@@ -1,0 +1,15 @@
+{
+  "source_server": "root@connect.westc.seetacloud.com:32305:/root/Verify",
+  "archive": "G:\\EDDY_detection\\verify_code_snapshot.tar.gz",
+  "target": "G:\\EDDY_detection\\S-H-I-T-ocean-",
+  "excluded": [
+    "Verify/.git",
+    "Verify/.venv",
+    "Verify/outputs",
+    "Verify/.pytest_cache",
+    "__pycache__",
+    "*.pyc"
+  ],
+  "files_extracted": 7455,
+  "timestamp_local": "2026-08-27 19:17:48"
+}

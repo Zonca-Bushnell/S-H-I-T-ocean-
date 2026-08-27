@@ -1,0 +1,13 @@
+version: 2
+conda:
+  environment: doc/environment.yml
+build:
+  os: ubuntu-lts-latest
+  tools:
+    python: "mambaforge-latest"
+python:
+  install:
+    - method: pip
+      path: .
+sphinx:
+  configuration: doc/conf.py

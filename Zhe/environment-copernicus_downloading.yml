@@ -1,0 +1,12 @@
+name: copernicus_downloading
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.11
+  - copernicusmarine
+  - xarray
+  - netcdf4
+  - h5netcdf
+  - dask
+  - cftime
+  - numpy

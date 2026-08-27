@@ -1,0 +1,11 @@
+name: binder-pyeddytracker
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10, <3.13
+  - pip
+  - ffmpeg
+  - pip:
+    - -r requirements.txt
+    - pyeddytrackersample
+    - .

@@ -1,0 +1,105 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Track eddy with Identification file produce with EddyIdentification
+"""
+import datetime as dt
+import logging
+from os import mkdir
+from os.path import exists
+
+from py_eddy_tracker import EddyParser
+from py_eddy_tracker.tracking import Correspondances
+
+logger = logging.getLogger("pet")
+
+
+def usage():
+    """Usage
+    """
+    # Run using:
+    parser = EddyParser("Tool to use identification step to compute tracking")
+    parser.add_argument(
+        "nc_file",
+        help="File of correspondances to reload link " "without tracking computation",
+    )
+    parser.add_argument("--path_out", default="./", help="Path, where to write file")
+
+    parser.add_argument("--eddies_long_model", default=None)
+    parser.add_argument("--eddies_short_model", default=None)
+    parser.add_argument("--eddies_untracked_model", default=None)
+
+    parser.add_argument(
+        "--nb_obs_min", type=int, default=28, help="Minimal length of tracks"
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    CONFIG = usage()
+
+    # Create output directory
+    if not exists(CONFIG.path_out):
+        mkdir(CONFIG.path_out)
+    SAVE_DIR = CONFIG.path_out
+    NB_OBS_MIN = CONFIG.nb_obs_min
+    START_TIME = dt.datetime.now()
+
+    CORRESPONDANCES = Correspondances.load(CONFIG.nc_file)
+
+    logger.info("Start merging")
+
+    CORRESPONDANCES.prepare_merging()
+
+    logger.info(
+        "The longest tracks have %d observations",
+        CORRESPONDANCES.nb_obs_by_tracks.max(),
+    )
+    logger.info(
+        "The mean length is %d observations before filtering",
+        CORRESPONDANCES.nb_obs_by_tracks.mean(),
+    )
+
+    if CONFIG.eddies_untracked_model is None:
+        CONFIG.eddies_untracked_model = (
+            "%(path)s/%(sign_type)s_%(prod_time)s_untracked.nc"
+        )
+    CORRESPONDANCES.get_unused_data(raw_data=True).write_file(
+        path=SAVE_DIR, filename=CONFIG.eddies_untracked_model
+    )
+
+    SHORT_CORRESPONDANCES = CORRESPONDANCES._copy()
+    SHORT_CORRESPONDANCES.shorter_than(size_max=NB_OBS_MIN)
+
+    CORRESPONDANCES.longer_than(size_min=NB_OBS_MIN)
+
+    FINAL_EDDIES = CORRESPONDANCES.merge()
+    SHORT_TRACK = SHORT_CORRESPONDANCES.merge()
+
+    # We flag obs
+    if CORRESPONDANCES.virtual:
+        FINAL_EDDIES["virtual"][:] = FINAL_EDDIES["time"] == 0
+        FINAL_EDDIES.filled_by_interpolation(FINAL_EDDIES["virtual"] == 1)
+        SHORT_TRACK["virtual"][:] = SHORT_TRACK["time"] == 0
+        SHORT_TRACK.filled_by_interpolation(SHORT_TRACK["virtual"] == 1)
+
+    # Total running time
+    FULL_TIME = dt.datetime.now() - START_TIME
+    logger.info("Duration : %s", FULL_TIME)
+
+    logger.info(
+        "Longer track saved have %d obs", CORRESPONDANCES.nb_obs_by_tracks.max()
+    )
+    logger.info(
+        "The mean length is %d observations after filtering",
+        CORRESPONDANCES.nb_obs_by_tracks.mean(),
+    )
+
+    if CONFIG.eddies_long_model is None:
+        CONFIG.eddies_long_model = "%(path)s/%(sign_type)s_%(prod_time)s.nc"
+    if CONFIG.eddies_short_model is None:
+        CONFIG.eddies_short_model = (
+            "%(path)s/%(sign_type)s_%(prod_time)s_track_too_short.nc"
+        )
+    FINAL_EDDIES.write_file(filename=CONFIG.eddies_long_model, path=SAVE_DIR)
+    SHORT_TRACK.write_file(filename=CONFIG.eddies_short_model, path=SAVE_DIR)
