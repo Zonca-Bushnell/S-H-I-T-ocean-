@@ -1,0 +1,91 @@
+project:
+  name: kuroshio_full_cpu_results
+  env_name: eddy_verify
+
+data_source:
+  kind: cmems_netcdf_timeseries
+  input_nc_dir: "/root/autodl-fs/1993_2022_kurushio"
+  annual_file_template: "global_phy_{year}.nc"
+
+paths:
+  input_mat_dir: ""
+  output_dir: "/root/autodl-fs/1993_2022_kurushio/results"
+  input_daily_dir: "/root/autodl-fs/1993_2022_kurushio/results/input_daily"
+  layer_dir: "/root/autodl-fs/1993_2022_kurushio/results/layers"
+  catalog_dir: "/root/autodl-fs/1993_2022_kurushio/results/catalog"
+  logs_dir: "/root/autodl-fs/1993_2022_kurushio/results/logs"
+  temp_dir: "/root/autodl-tmp/kuroshio_streaming_work"
+
+region:
+  bbox: [120.0, 145.0, 20.0, 35.0]
+  max_depth_m: 2000.0
+
+date_range:
+  start: "1993-01-01"
+  end: "2022-12-31"
+
+variables:
+  source_lon: longitude
+  source_lat: latitude
+  source_depth: depth
+  source_time: time
+  source_height: zos_glor
+  source_u: uo_glor
+  source_v: vo_glor
+  output_height: adt
+
+conversion:
+  use_input_daily: false
+  netcdf_format: NETCDF4
+  compression_level: 1
+  depth_block: 8
+  overwrite_existing: false
+
+identification:
+  workers: 16
+  cache_mode: year_ram
+  overwrite_existing: false
+  surface_depth_index: 0
+  surface_method: sla_pyeddy
+  subsurface_method: velocity_core_reversal
+  surface_isoline_step_m: 0.002
+  surface_fit_errmax_percent: 55
+  surface_nb_step_min: 2
+  surface_cut_wavelength_km: 500
+  surface_cut_highwavelength_km: 0
+  surface_filter_order: 3
+  surface_lat_max: 80
+  surface_sampling: 50
+  surface_sampling_method: visvalingam
+  surface_pixel_limit: [5, 2000]
+  core_window_km: 80.0
+  min_core_reversal_speed: 0.02
+  max_core_speed_percentile: 15.0
+  min_closed_contour_pixels: 12
+  max_closed_contour_pixels: 20000
+  min_core_distance_km: 40.0
+  max_candidates_per_layer: 80
+  contour_levels: 16
+
+vertical_linking:
+  max_center_distance_km: 70.0
+  min_layers: 1
+
+tracking:
+  max_daily_displacement_km: 120.0
+  min_depth_overlap_layers: 1
+  max_gap_days: 0
+
+center_completion:
+  enabled: true
+  method: speed_leading
+  zero_point_method: hybrid
+  multi_root_policy: depth_continuity
+  search_radius_factor: 1.5
+  min_search_radius_km: 80
+  max_search_radius_km: 250
+
+plotting:
+  z_mode: layer
+  layer_gap_km: 18
+  z_aspect: 0.85
