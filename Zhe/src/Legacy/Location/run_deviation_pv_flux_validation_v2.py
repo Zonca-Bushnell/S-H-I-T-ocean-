@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
-from src.First_temp.lifecycle_ep_flux_nondim_validation import (
+from src.Legacy.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
+from src.Legacy.First_temp.lifecycle_ep_flux_nondim_validation import (
     azimuth_second_derivative,
     ddz,
     load_n2,
@@ -22,9 +22,9 @@ from src.First_temp.lifecycle_ep_flux_nondim_validation import (
     radial_derivative,
     read_climatology_uv,
 )
-from src.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
-from src.Location.common import load_config, parse_ymd
-from src.Location.run_deviation_pv_flux_validation import (
+from src.Legacy.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
+from src.Legacy.Location.common import load_config, parse_ymd
+from src.Legacy.Location.run_deviation_pv_flux_validation import (
     OMEGA,
     _center_kinematics,
     _center_lines_from_points,
@@ -37,7 +37,7 @@ from src.Location.run_deviation_pv_flux_validation import (
     _same_sign,
     _slope,
 )
-from src.Location.streaming_cmems import read_day_data
+from src.Legacy.Location.streaming_cmems import read_day_data
 
 
 SECONDS_PER_DAY = 86400.0
@@ -526,9 +526,9 @@ def _plot_outputs(comp: pd.DataFrame, fig_dir: Path) -> None:
 
 
 def _write_report(output_dir: Path, summary: pd.DataFrame, decomposed: pd.DataFrame, part_count: int) -> None:
-    lines = ["# Deviation-induced PV flux V2 诊断报告\n\n"]
-    lines.append(f"全量 strict decomposition 覆盖 `{part_count}` 个 daily part；最终 tau-depth-radius 表有 `{len(decomposed)}` 行。\n\n")
-    lines.append("本轮不再把 deviation 简化为中心线漂移，而是分解为 `trap + tilt-poly + bg + asym + residual/nl`。其中 `Q(r,z)` 来自每个对象 `q'` 的方位平均，tilt polynomial 展开到三阶。\n\n")
+    lines = ["# Deviation-induced PV flux V2 璇婃柇鎶ュ憡\n\n"]
+    lines.append(f"鍏ㄩ噺 strict decomposition 瑕嗙洊 `{part_count}` 涓?daily part锛涙渶缁?tau-depth-radius 琛ㄦ湁 `{len(decomposed)}` 琛屻€俓n\n")
+    lines.append("鏈疆涓嶅啀鎶?deviation 绠€鍖栦负涓績绾挎紓绉伙紝鑰屾槸鍒嗚В涓?`trap + tilt-poly + bg + asym + residual/nl`銆傚叾涓?`Q(r,z)` 鏉ヨ嚜姣忎釜瀵硅薄 `q'` 鐨勬柟浣嶅钩鍧囷紝tilt polynomial 灞曞紑鍒颁笁闃躲€俓n\n")
     for rel in [
         "sanity_axis_reconstruction_vs_existing_pv_flux",
         "trap_vs_observed_meridional",
@@ -541,19 +541,19 @@ def _write_report(output_dir: Path, summary: pd.DataFrame, decomposed: pd.DataFr
         lines.append(f"## {rel}\n\n")
         for row in summary[summary["relation"].eq(rel)].itertuples(index=False):
             lines.append(
-                f"- {row.polarity}: status `{row.status}`, corr `{row.corr:.4g}`, 同号率 `{row.same_sign_fraction:.4g}`, "
-                f"RMSE ratio `{row.rmse_ratio:.4g}`, RMS/obs `{row.rms_ratio_to_meridional_obs:.4g}`。\n"
+                f"- {row.polarity}: status `{row.status}`, corr `{row.corr:.4g}`, 鍚屽彿鐜?`{row.same_sign_fraction:.4g}`, "
+                f"RMSE ratio `{row.rmse_ratio:.4g}`, RMS/obs `{row.rms_ratio_to_meridional_obs:.4g}`銆俓n"
             )
         lines.append("\n")
-    lines.append("## 机制项幅度\n\n")
+    lines.append("## 鏈哄埗椤瑰箙搴n\n")
     for row in summary[summary["relation"].str.startswith("component_amplitude_")].itertuples(index=False):
-        lines.append(f"- {row.polarity} / {row.predictor}: RMS/obs `{row.rms_ratio_to_meridional_obs:.4g}`, corr `{row.corr:.4g}`, status `{row.status}`。\n")
-    lines.append("\n## 解释框架\n\n")
-    lines.append("- `sanity_axis_reconstruction` 若 pass，说明 V2 的 `q'` 重构仍与既有 E-P `pv_flux` 对齐。\n")
-    lines.append("- 若 `F_trap` 幅度远小于 `F_asym_direct` 或 `F_residual_nl`，说明 PV transport 不是不漏水 PV blob 的整体搬运。\n")
-    lines.append("- 若 `F_tilt_order1/2/3` 中某阶幅度显著，说明倾斜造成的多项式非轴对称结构确实参与通量。\n")
-    lines.append("- 若 `F_asym_direct` 主导，说明内部 stirring、filament、相位差或非轴对称 PV 结构是主要来源。\n")
-    lines.append("- 若 `F_residual_nl` 仍大，说明三阶 tilt polynomial 与背景 PV 梯度仍不足以闭合，需考虑更高阶、边界剥离或平均流反馈。\n")
+        lines.append(f"- {row.polarity} / {row.predictor}: RMS/obs `{row.rms_ratio_to_meridional_obs:.4g}`, corr `{row.corr:.4g}`, status `{row.status}`銆俓n")
+    lines.append("\n## 瑙ｉ噴妗嗘灦\n\n")
+    lines.append("- `sanity_axis_reconstruction` 鑻?pass锛岃鏄?V2 鐨?`q'` 閲嶆瀯浠嶄笌鏃㈡湁 E-P `pv_flux` 瀵归綈銆俓n")
+    lines.append("- 鑻?`F_trap` 骞呭害杩滃皬浜?`F_asym_direct` 鎴?`F_residual_nl`锛岃鏄?PV transport 涓嶆槸涓嶆紡姘?PV blob 鐨勬暣浣撴惉杩愩€俓n")
+    lines.append("- 鑻?`F_tilt_order1/2/3` 涓煇闃跺箙搴︽樉钁楋紝璇存槑鍊炬枩閫犳垚鐨勫椤瑰紡闈炶酱瀵圭О缁撴瀯纭疄鍙備笌閫氶噺銆俓n")
+    lines.append("- 鑻?`F_asym_direct` 涓诲锛岃鏄庡唴閮?stirring銆乫ilament銆佺浉浣嶅樊鎴栭潪杞村绉?PV 缁撴瀯鏄富瑕佹潵婧愩€俓n")
+    lines.append("- 鑻?`F_residual_nl` 浠嶅ぇ锛岃鏄庝笁闃?tilt polynomial 涓庤儗鏅?PV 姊害浠嶄笉瓒充互闂悎锛岄渶鑰冭檻鏇撮珮闃躲€佽竟鐣屽墺绂绘垨骞冲潎娴佸弽棣堛€俓n")
     (output_dir / "deviation_pv_flux_v2_summary_zh.md").write_text("".join(lines), encoding="utf-8")
 
 

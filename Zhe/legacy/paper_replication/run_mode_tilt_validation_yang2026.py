@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.First_temp.tilted_ep_flux_validation import load_n2
-from src.experiments.theory_validation.unified_math import (
+from src.Legacy.First_temp.tilted_ep_flux_validation import load_n2
+from src.Legacy.experiments.theory_validation.unified_math import (
     geo_params,
     project_vertical_modes,
     streamfunction_from_zeta,
@@ -361,31 +361,31 @@ def _write_summary(out_dir: Path, metrics: pd.DataFrame, center_cmp: pd.DataFram
     mode12 = metrics["mode1_plus_2_explained_fraction_velocity_axis"].replace([np.inf, -np.inf], np.nan)
     mode15 = metrics["mode1_to_5_explained_fraction_velocity_axis"].replace([np.inf, -np.inf], np.nan)
     lines = [
-        "# Yang/Xu/Li 2026 模态倾斜机制验证",
+        "# Yang/Xu/Li 2026 妯℃€佸€炬枩鏈哄埗楠岃瘉",
         "",
-        "本实验只读现有 Kuroshiou coherent-only 代表涡旋结果，检验第一、第二斜压模态是否足以解释代表涡旋的垂向倾斜。",
+        "鏈疄楠屽彧璇荤幇鏈?Kuroshiou coherent-only 浠ｈ〃娑℃棆缁撴灉锛屾楠岀涓€銆佺浜屾枩鍘嬫ā鎬佹槸鍚﹁冻浠ヨВ閲婁唬琛ㄦ丁鏃嬬殑鍨傚悜鍊炬枩銆?,
         "",
-        "## 关键口径",
+        "## 鍏抽敭鍙ｅ緞",
         "",
-        "- 论文口径中心：流函数极值中心，用于模拟 Yang/Xu/Li 2026 的模态重构中心线。",
-        "- 我们的生产口径中心：Hua/Nencioli 速度中心线，来自 30-180 天带通速度、strict-contiguous 深度扩展和 global_ls_alpha 对齐。",
-        "- 因此本文只判断机制是否一致，不把温度/流函数中心定义直接等同于速度中心定义。",
+        "- 璁烘枃鍙ｅ緞涓績锛氭祦鍑芥暟鏋佸€间腑蹇冿紝鐢ㄤ簬妯℃嫙 Yang/Xu/Li 2026 鐨勬ā鎬侀噸鏋勪腑蹇冪嚎銆?,
+        "- 鎴戜滑鐨勭敓浜у彛寰勪腑蹇冿細Hua/Nencioli 閫熷害涓績绾匡紝鏉ヨ嚜 30-180 澶╁甫閫氶€熷害銆乻trict-contiguous 娣卞害鎵╁睍鍜?global_ls_alpha 瀵归綈銆?,
+        "- 鍥犳鏈枃鍙垽鏂満鍒舵槸鍚︿竴鑷达紝涓嶆妸娓╁害/娴佸嚱鏁颁腑蹇冨畾涔夌洿鎺ョ瓑鍚屼簬閫熷害涓績瀹氫箟銆?,
         "",
-        "## 主要数值摘要",
+        "## 涓昏鏁板€兼憳瑕?,
         "",
-        f"- mode1+2 对速度中心线的中位解释比例：`{float(np.nanmedian(mode12)):.3f}`。",
-        f"- mode1..5 对速度中心线的中位解释比例：`{float(np.nanmedian(mode15)):.3f}`。",
-        f"- mode1+2 流函数能量占比中位数：`{float(np.nanmedian(energy['mode1_plus_2_psi_energy_fraction'])):.3f}`。",
-        f"- mode1..5 流函数能量占比中位数：`{float(np.nanmedian(energy['mode1_to_5_psi_energy_fraction'])):.3f}`。",
+        f"- mode1+2 瀵归€熷害涓績绾跨殑涓綅瑙ｉ噴姣斾緥锛歚{float(np.nanmedian(mode12)):.3f}`銆?,
+        f"- mode1..5 瀵归€熷害涓績绾跨殑涓綅瑙ｉ噴姣斾緥锛歚{float(np.nanmedian(mode15)):.3f}`銆?,
+        f"- mode1+2 娴佸嚱鏁拌兘閲忓崰姣斾腑浣嶆暟锛歚{float(np.nanmedian(energy['mode1_plus_2_psi_energy_fraction'])):.3f}`銆?,
+        f"- mode1..5 娴佸嚱鏁拌兘閲忓崰姣斾腑浣嶆暟锛歚{float(np.nanmedian(energy['mode1_to_5_psi_energy_fraction'])):.3f}`銆?,
         "",
-        "## 判读规则",
+        "## 鍒よ瑙勫垯",
         "",
-        "- 如果 mode1-only 和 mode2-only 倾斜弱，而 mode1+2 明显接近观测轴线，支持“模态传播差异导致倾斜”。",
-        "- 如果 mode1..5 相比 mode1+2 只小幅改善，高模态是次级修正。",
-        "- 如果观测速度中心倾斜小于 mode1/mode2 独立中心分离，说明非线性耦合或速度中心定义会压制可见倾斜。",
-        "- 单一区域合成不能严格验证全球 N2/f2 标度律；这里只做机制一致性检验。",
+        "- 濡傛灉 mode1-only 鍜?mode2-only 鍊炬枩寮憋紝鑰?mode1+2 鏄庢樉鎺ヨ繎瑙傛祴杞寸嚎锛屾敮鎸佲€滄ā鎬佷紶鎾樊寮傚鑷村€炬枩鈥濄€?,
+        "- 濡傛灉 mode1..5 鐩告瘮 mode1+2 鍙皬骞呮敼鍠勶紝楂樻ā鎬佹槸娆＄骇淇銆?,
+        "- 濡傛灉瑙傛祴閫熷害涓績鍊炬枩灏忎簬 mode1/mode2 鐙珛涓績鍒嗙锛岃鏄庨潪绾挎€ц€﹀悎鎴栭€熷害涓績瀹氫箟浼氬帇鍒跺彲瑙佸€炬枩銆?,
+        "- 鍗曚竴鍖哄煙鍚堟垚涓嶈兘涓ユ牸楠岃瘉鍏ㄧ悆 N2/f2 鏍囧害寰嬶紱杩欓噷鍙仛鏈哄埗涓€鑷存€ф楠屻€?,
         "",
-        "## 输入",
+        "## 杈撳叆",
         "",
         f"- RV root: `{meta['rv_root']}`",
         f"- radial seed root: `{meta['radial_seed_root']}`",

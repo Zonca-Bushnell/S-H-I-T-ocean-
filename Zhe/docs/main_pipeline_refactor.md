@@ -1,4 +1,4 @@
-# Eddy Pipeline Refactor
+﻿# Eddy Pipeline Refactor
 
 This document records the first production refactor of the Verify / S-H-I-T-ocean codebase.
 
@@ -37,16 +37,16 @@ hua_b3_start2 + 30-180d bandpass + boundary_monotonic + strict_contiguous
 
 ## Compatibility Wrappers
 
-The old production paths under `src.Location` remain as thin wrappers so old commands fail less abruptly. New code should not import production logic from `src.Location`; it should use `src.eddy_pipeline`.
+The old production paths under `src.Legacy.Location` remain as thin wrappers so old commands fail less abruptly. New code should not import production logic from `src.Legacy.Location`; it should use `src.eddy_pipeline`.
 
 Promoted wrappers include:
 
-- `src.Location.run_acc_hua_b3_pipeline -> src.eddy_pipeline.cli`
-- `src.Location.run_hua_hybrid_detection_acc -> src.eddy_pipeline.detection_hybrid`
-- `src.Location.run_hua_feature_group_tracking_acc -> src.eddy_pipeline.tracking`
-- `src.Location.hua_b3_catalog_adapter -> src.eddy_pipeline.catalog`
-- `src.Location.classify_3d_eddy_shape -> src.eddy_pipeline.shape`
-- `src.Location.run_representative_vortex -> src.eddy_pipeline.radial_representative`
+- `src.Legacy.Location.run_acc_hua_b3_pipeline -> src.eddy_pipeline.cli`
+- `src.Legacy.Location.run_hua_hybrid_detection_acc -> src.eddy_pipeline.detection_hybrid`
+- `src.Legacy.Location.run_hua_feature_group_tracking_acc -> src.eddy_pipeline.tracking`
+- `src.Legacy.Location.hua_b3_catalog_adapter -> src.eddy_pipeline.catalog`
+- `src.Legacy.Location.classify_3d_eddy_shape -> src.eddy_pipeline.shape`
+- `src.Legacy.Location.run_representative_vortex -> src.eddy_pipeline.radial_representative`
 
 ## Legacy Areas
 

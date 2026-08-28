@@ -1,21 +1,21 @@
-# Post 后处理主链
+﻿# Post 鍚庡鐞嗕富閾?
 
-本文记录 `src.post` 的定位和迁移规则。识别、tracking、catalog、shape classification 和代表涡结构合成仍由 `src.eddy_pipeline` 负责；`src.post` 只接收代表涡之后的正式后处理。
+鏈枃璁板綍 `src.post` 鐨勫畾浣嶅拰杩佺Щ瑙勫垯銆傝瘑鍒€乼racking銆乧atalog銆乻hape classification 鍜屼唬琛ㄦ丁缁撴瀯鍚堟垚浠嶇敱 `src.eddy_pipeline` 璐熻矗锛沗src.post` 鍙帴鏀朵唬琛ㄦ丁涔嬪悗鐨勬寮忓悗澶勭悊銆?
 
-## 当前正式口径
+## 褰撳墠姝ｅ紡鍙ｅ緞
 
-默认科学口径为：
+榛樿绉戝鍙ｅ緞涓猴細
 
 `hua_b3_start2 + 30-180d bandpass + boundary_monotonic + strict_contiguous + life30 + coherent_only + ME_LIUTEX azimuth_preserved + global_ls_alpha`
 
-默认输入是 `/root/autodl-fs/kuroshiou/result_boundary_monotonic/result_coherent_only`。TURN 是主输送口径；UNTURN 只用于结构对照。
+榛樿杈撳叆鏄?`/root/autodl-fs/kuroshiou/result_boundary_monotonic/result_coherent_only`銆俆URN 鏄富杈撻€佸彛寰勶紱UNTURN 鍙敤浜庣粨鏋勫鐓с€?
 
-## 模块划分
+## 妯″潡鍒掑垎
 
-- `src.post.transport`：aggregate-product stirring，输出 `product_mean`、`mean_product`、`covariance` 和二阶矩。主结论使用乘积后平均与协方差，不使用平均后乘积替代。
-- `src.post.structure`：从 ME_LIUTEX 角向代表涡输出标准结构图，支持 `turned`、`unturned`、`both`。
-- `src.post.double_core`：从代表涡速度场诊断速度中心和旋转核心分离，输出 `D_omega/R` 表格与热图。
-- `src.post.cli`：正式后处理统一入口。
+- `src.post.transport`锛歛ggregate-product stirring锛岃緭鍑?`product_mean`銆乣mean_product`銆乣covariance` 鍜屼簩闃剁煩銆備富缁撹浣跨敤涔樼Н鍚庡钩鍧囦笌鍗忔柟宸紝涓嶄娇鐢ㄥ钩鍧囧悗涔樼Н鏇夸唬銆?
+- `src.post.structure`锛氫粠 ME_LIUTEX 瑙掑悜浠ｈ〃娑¤緭鍑烘爣鍑嗙粨鏋勫浘锛屾敮鎸?`turned`銆乣unturned`銆乣both`銆?
+- `src.post.double_core`锛氫粠浠ｈ〃娑￠€熷害鍦鸿瘖鏂€熷害涓績鍜屾棆杞牳蹇冨垎绂伙紝杈撳嚭 `D_omega/R` 琛ㄦ牸涓庣儹鍥俱€?
+- `src.post.cli`锛氭寮忓悗澶勭悊缁熶竴鍏ュ彛銆?
 
 ## CLI
 
@@ -26,15 +26,14 @@ python -m src.post.cli analyze-double-core --shape coherent --orientation both
 python -m src.post.cli run-default --shape coherent --orientation both
 ```
 
-参数放在子命令后面。`--dry-run` 只打印路径、科学口径和将执行的命令，不写入结果。
+鍙傛暟鏀惧湪瀛愬懡浠ゅ悗闈€俙--dry-run` 鍙墦鍗拌矾寰勩€佺瀛﹀彛寰勫拰灏嗘墽琛岀殑鍛戒护锛屼笉鍐欏叆缁撴灉銆?
 
-## Legacy 边界
+## Legacy 杈圭晫
 
-`src/Location/run_representative_stirring_transport.py`、`src/Location/run_coherent_stirring_transport.py` 和 `src/experiments/temp/run_aggregate_product_stirring.py` 现在是兼容 wrapper，真实实现位于 `src.post.transport`。
+`src/Legacy/Location/run_representative_stirring_transport.py`銆乣src/Legacy/Location/run_coherent_stirring_transport.py` 鍜?`src/Legacy/experiments/temp/run_aggregate_product_stirring.py` 鐜板湪鏄吋瀹?wrapper锛岀湡瀹炲疄鐜颁綅浜?`src.post.transport`銆?
 
-Li2026/MITgcm/Nencioli/Hua 论文复刻、9-panel 单涡间断点审查图、一次性方法对比图仍属于 `legacy/` 或 `src/experiments/`，不进入正式 post 主链。
+Li2026/MITgcm/Nencioli/Hua 璁烘枃澶嶅埢銆?-panel 鍗曟丁闂存柇鐐瑰鏌ュ浘銆佷竴娆℃€ф柟娉曞姣斿浘浠嶅睘浜?`legacy/` 鎴?`src/Legacy/experiments/`锛屼笉杩涘叆姝ｅ紡 post 涓婚摼銆?
+## 鍚庣画娓呯悊
 
-## 后续清理
-
-`src.post.transport` 仍沿用部分 `src.First_temp` 数值工具以保持结果不变。下一步若要继续工程化，应把 QG/PV、插值和网格工具抽到稳定工具模块，再减少对 `First_temp` 的依赖。
+`src.post.transport` 浠嶆部鐢ㄩ儴鍒?`src.Legacy.First_temp` 鏁板€煎伐鍏蜂互淇濇寔缁撴灉涓嶅彉銆備笅涓€姝ヨ嫢瑕佺户缁伐绋嬪寲锛屽簲鎶?QG/PV銆佹彃鍊煎拰缃戞牸宸ュ叿鎶藉埌绋冲畾宸ュ叿妯″潡锛屽啀鍑忓皯瀵?`First_temp` 鐨勪緷璧栥€?
 

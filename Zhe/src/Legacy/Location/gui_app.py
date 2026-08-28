@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 LOCATION_DIR = SRC_DIR / "Location"
-LOCATION_PACKAGE = "src.Location"
+LOCATION_PACKAGE = "src.Legacy.Location"
 BASE_DEFAULT_CONFIG = PROJECT_ROOT / "config" / "config_3d_cmems.yaml"
 ACTIVE_CONFIG_MARKER = PROJECT_ROOT / "config" / "active_config.txt"
 PAPER_DIR = Path("C:/Users/chenz/Desktop/PAPER")

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import shift as ndi_shift
 
-from src.First_temp.tilted_ep_flux_validation import load_n2
-from src.experiments.temp.run_mode_tilt_validation_yang2026 import (
+from src.Legacy.First_temp.tilted_ep_flux_validation import load_n2
+from src.Legacy.experiments.temp.run_mode_tilt_validation_yang2026 import (
     POLARITIES,
     _core_mask,
     _corr_xy,
@@ -32,7 +32,7 @@ from src.experiments.temp.run_mode_tilt_validation_yang2026 import (
     _speed_min_centerline,
     _tilt_distance,
 )
-from src.experiments.theory_validation.unified_math import (
+from src.Legacy.experiments.theory_validation.unified_math import (
     geo_params,
     project_vertical_modes,
     streamfunction_from_zeta,
@@ -323,36 +323,36 @@ def _plot_energy(out_dir: Path, energy: pd.DataFrame) -> None:
 def _write_summary(out_dir: Path, decision: pd.DataFrame, metrics: pd.DataFrame, meta: dict) -> None:
     decision_rows = decision.to_dict("records")
     lines = [
-        "# 旋转核心中心线模态分解验证 Li/Yang/Xu 2026",
+        "# 鏃嬭浆鏍稿績涓績绾挎ā鎬佸垎瑙ｉ獙璇?Li/Yang/Xu 2026",
         "",
-        "本实验只读最新 Kuroshiou boundary-monotonic coherent-only ME_LIUTEX 代表涡。",
-        "中心线主口径改为旋转核心 r_omega，即由代表涡速度场的相对涡度 |zeta| 核心极值定义。",
+        "鏈疄楠屽彧璇绘渶鏂?Kuroshiou boundary-monotonic coherent-only ME_LIUTEX 浠ｈ〃娑°€?,
+        "涓績绾夸富鍙ｅ緞鏀逛负鏃嬭浆鏍稿績 r_omega锛屽嵆鐢变唬琛ㄦ丁閫熷害鍦虹殑鐩稿娑″害 |zeta| 鏍稿績鏋佸€煎畾涔夈€?,
         "",
-        "## 两条验证链",
+        "## 涓ゆ潯楠岃瘉閾?,
         "",
-        "- `r_omega_as_target`：不重定心速度场，检验模态重构中心线是否能解释原始旋转核心轴线。",
-        "- `rotation_core_centered`：每层先以 r_omega 重定心，再做模态分解，检验去除双核心偏心后是否仍支持低模态倾斜机制。",
+        "- `r_omega_as_target`锛氫笉閲嶅畾蹇冮€熷害鍦猴紝妫€楠屾ā鎬侀噸鏋勪腑蹇冪嚎鏄惁鑳借В閲婂師濮嬫棆杞牳蹇冭酱绾裤€?,
+        "- `rotation_core_centered`锛氭瘡灞傚厛浠?r_omega 閲嶅畾蹇冿紝鍐嶅仛妯℃€佸垎瑙ｏ紝妫€楠屽幓闄ゅ弻鏍稿績鍋忓績鍚庢槸鍚︿粛鏀寔浣庢ā鎬佸€炬枩鏈哄埗銆?,
         "",
-        "## 判定结果",
+        "## 鍒ゅ畾缁撴灉",
         "",
     ]
     for row in decision_rows:
         lines += [
-            f"- `{row['chain']}`：`{row['decision']}`；support_fraction={row.get('support_fraction', float('nan')):.3f}，"
-            f"low_mode_fraction={row.get('low_mode_fraction', float('nan')):.3f}，"
-            f"median mode1+2 RMSE={row.get('median_mode12_rmse', float('nan')):.3f} R，"
-            f"median mode1..5 RMSE={row.get('median_mode15_rmse', float('nan')):.3f} R。",
+            f"- `{row['chain']}`锛歚{row['decision']}`锛泂upport_fraction={row.get('support_fraction', float('nan')):.3f}锛?
+            f"low_mode_fraction={row.get('low_mode_fraction', float('nan')):.3f}锛?
+            f"median mode1+2 RMSE={row.get('median_mode12_rmse', float('nan')):.3f} R锛?
+            f"median mode1..5 RMSE={row.get('median_mode15_rmse', float('nan')):.3f} R銆?,
         ]
     lines += [
         "",
-        "## 解释口径",
+        "## 瑙ｉ噴鍙ｅ緞",
         "",
-        "若 `r_omega_as_target` 支持而 `rotation_core_centered` 不支持，说明低模态机制更像是在解释旋转核心位置演化，"
-        "但双核心偏心本身是额外结构。若两条都不支持，则说明速度定义/旋转核心定义下，Li 2026 的 mode1+2 机制不足以解释我们的代表涡。",
+        "鑻?`r_omega_as_target` 鏀寔鑰?`rotation_core_centered` 涓嶆敮鎸侊紝璇存槑浣庢ā鎬佹満鍒舵洿鍍忔槸鍦ㄨВ閲婃棆杞牳蹇冧綅缃紨鍖栵紝"
+        "浣嗗弻鏍稿績鍋忓績鏈韩鏄澶栫粨鏋勩€傝嫢涓ゆ潯閮戒笉鏀寔锛屽垯璇存槑閫熷害瀹氫箟/鏃嬭浆鏍稿績瀹氫箟涓嬶紝Li 2026 鐨?mode1+2 鏈哄埗涓嶈冻浠ヨВ閲婃垜浠殑浠ｈ〃娑°€?,
         "",
-        "本实验不使用温度中心作为主定义；速度中心和 psi 极值中心只作为审计对照。",
+        "鏈疄楠屼笉浣跨敤娓╁害涓績浣滀负涓诲畾涔夛紱閫熷害涓績鍜?psi 鏋佸€间腑蹇冨彧浣滀负瀹¤瀵圭収銆?,
         "",
-        "## 输入",
+        "## 杈撳叆",
         "",
         f"- RV root: `{meta['rv_root']}`",
         f"- radial seed root: `{meta['radial_seed_root']}`",
@@ -455,7 +455,7 @@ def run(args: argparse.Namespace) -> None:
                         centers["rotation_core"] = _rotation_core_centerline(u_part, v_part, x_m, y_m, xx_r, yy_r, core)[:2]
                     else:
                         # For modal reconstructions, define rotation core through reconstructed geostrophic velocity from psi.
-                        from src.experiments.theory_validation.unified_math import velocity_from_psi
+                        from src.Legacy.experiments.theory_validation.unified_math import velocity_from_psi
 
                         uu, vv = velocity_from_psi(part, y_m, x_m)
                         centers["rotation_core"] = _rotation_core_centerline(uu, vv, x_m, y_m, xx_r, yy_r, core)[:2]

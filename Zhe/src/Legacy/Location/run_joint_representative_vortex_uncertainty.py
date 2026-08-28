@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -12,11 +12,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
-from src.First_temp.lifecycle_ep_flux_nondim_validation import make_polar_grid
-from src.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
-from src.Location.common import load_config
-from src.Location.streaming_cmems import read_day_data
+from src.Legacy.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
+from src.Legacy.First_temp.lifecycle_ep_flux_nondim_validation import make_polar_grid
+from src.Legacy.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
+from src.Legacy.Location.common import load_config
+from src.Legacy.Location.streaming_cmems import read_day_data
 
 
 EPS = 1e-12
@@ -420,26 +420,26 @@ def _write_report(df: pd.DataFrame, track: pd.DataFrame, tau: pd.DataFrame, outp
     }
     (output_dir / "joint_representativeness_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [
-        "# ACC joint representativeness 诊断\n\n",
+        "# ACC joint representativeness 璇婃柇\n\n",
         f"- Dataset: `{dataset}`\n",
         f"- Object-days with finite joint error: `{df['eddy3d_object_id'].nunique():,}`\n",
         f"- Tracks with finite joint error: `{df['track3d_id'].nunique():,}`\n",
         f"- Track-block median sqrt(E_joint): `{summary['median_sqrt_E_joint']:.4f}`\n",
         f"- Track-block p90 sqrt(E_joint): `{summary['p90_sqrt_E_joint']:.4f}`\n\n",
-        "## 口径\n\n",
-        "本诊断把代表涡视作联合对象 `[psi(z,r), x_rot(z)/R, y_rot(z)/R]`，而不是把流函数和倾斜偏移拆成两个互不相干的误差条。`E_joint = E_psi_core + E_axis`，两项已无量纲化并默认等权。\n\n",
-        "aligned-frame 用于判断结构代表性；若解释原始地理方向，需要按合成时角度逆旋转：`x_orig=x_rot cosθ-y_rot sinθ`, `y_orig=x_rot sinθ+y_rot cosθ`。all-shape 使用 `temp_direction`，coherent-only 使用 `global_ls_alpha` 对齐结果，因此两者方向相位不可直接比较。\n\n",
-        "## 覆盖率\n\n",
+        "## 鍙ｅ緞\n\n",
+        "鏈瘖鏂妸浠ｈ〃娑¤浣滆仈鍚堝璞?`[psi(z,r), x_rot(z)/R, y_rot(z)/R]`锛岃€屼笉鏄妸娴佸嚱鏁板拰鍊炬枩鍋忕Щ鎷嗘垚涓や釜浜掍笉鐩稿共鐨勮宸潯銆俙E_joint = E_psi_core + E_axis`锛屼袱椤瑰凡鏃犻噺绾插寲骞堕粯璁ょ瓑鏉冦€俓n\n",
+        "aligned-frame 鐢ㄤ簬鍒ゆ柇缁撴瀯浠ｈ〃鎬э紱鑻ヨВ閲婂師濮嬪湴鐞嗘柟鍚戯紝闇€瑕佹寜鍚堟垚鏃惰搴﹂€嗘棆杞細`x_orig=x_rot cos胃-y_rot sin胃`, `y_orig=x_rot sin胃+y_rot cos胃`銆俛ll-shape 浣跨敤 `temp_direction`锛宑oherent-only 浣跨敤 `global_ls_alpha` 瀵归綈缁撴灉锛屽洜姝や袱鑰呮柟鍚戠浉浣嶄笉鍙洿鎺ユ瘮杈冦€俓n\n",
+        "## 瑕嗙洊鐜嘰n\n",
     ]
     for _, row in cov.iterrows():
         lines.append(
             f"- `{row['shape_class']}/{row['polarity']}`: tracks `{int(row['n_tracks'])}`, "
             f"median sqrt(E_joint) `{row['median_sqrt_E_joint']:.4f}`, p90 `{row['p90_sqrt_E_joint']:.4f}`, "
             f"coverage <0.3 `{row['coverage_sqrt_E_joint_lt_0.3']:.3f}`, "
-            f"coverage <0.5 `{row['coverage_sqrt_E_joint_lt_0.5']:.3f}`。\n"
+            f"coverage <0.5 `{row['coverage_sqrt_E_joint_lt_0.5']:.3f}`銆俓n"
         )
-    lines.append("\n## 限制\n\n")
-    lines.append("旧的 `psi_variance/n_tracks` 只可作为辅助，因为现有 `psi_variance` 主要来自对象内方位角方差；本报告的主结论来自逐对象重采样后的 joint residual 与 track-block 聚合。\n")
+    lines.append("\n## 闄愬埗\n\n")
+    lines.append("鏃х殑 `psi_variance/n_tracks` 鍙彲浣滀负杈呭姪锛屽洜涓虹幇鏈?`psi_variance` 涓昏鏉ヨ嚜瀵硅薄鍐呮柟浣嶈鏂瑰樊锛涙湰鎶ュ憡鐨勪富缁撹鏉ヨ嚜閫愬璞￠噸閲囨牱鍚庣殑 joint residual 涓?track-block 鑱氬悎銆俓n")
     (output_dir / "joint_representativeness_summary_zh.md").write_text("".join(lines), encoding="utf-8")
 
 

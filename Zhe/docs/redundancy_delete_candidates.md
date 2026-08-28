@@ -1,15 +1,15 @@
-# 冗余与删除候选清单
+﻿# 鍐椾綑涓庡垹闄ゅ€欓€夋竻鍗?
 
-本文只给删除/归档建议，不表示已经删除任何文件。
+鏈枃鍙粰鍒犻櫎/褰掓。寤鸿锛屼笉琛ㄧず宸茬粡鍒犻櫎浠讳綍鏂囦欢銆?
 
-扫描范围：
+鎵弿鑼冨洿锛?
 
 ```text
 G:\EDDY_detection\S-H-I-T-ocean-\Zhe
 /root/Verify
 ```
 
-服务器与本地快照一致：
+鏈嶅姟鍣ㄤ笌鏈湴蹇収涓€鑷达細
 
 ```text
 non-vendor Python files: 120
@@ -18,48 +18,48 @@ root-level Python files: 13
 duplicate file names: 15
 ```
 
-## 1. Root-level 与 `src/Location` 完全相同的脚本
+## 1. Root-level 涓?`src/Legacy/Location` 瀹屽叏鐩稿悓鐨勮剼鏈?
 
-这些文件 hash 完全一致，可以作为第一批 `redundant-identical` 候选。建议先移动到 `legacy/root_entrypoints/identical_snapshots/`，确认 1-2 周无引用后再删除。
+杩欎簺鏂囦欢 hash 瀹屽叏涓€鑷达紝鍙互浣滀负绗竴鎵?`redundant-identical` 鍊欓€夈€傚缓璁厛绉诲姩鍒?`legacy/root_entrypoints/identical_snapshots/`锛岀‘璁?1-2 鍛ㄦ棤寮曠敤鍚庡啀鍒犻櫎銆?
 
-| root-level 文件 | 对应正式位置 | 判定 |
+| root-level 鏂囦欢 | 瀵瑰簲姝ｅ紡浣嶇疆 | 鍒ゅ畾 |
 |---|---|---|
-| `build_cmems_climatology.py` | `src/Location/build_cmems_climatology.py` | redundant-identical |
-| `classify_3d_eddy_shape.py` | `src/Location/classify_3d_eddy_shape.py` | redundant-identical |
-| `complete_3d_layer_centers.py` | `src/Location/complete_3d_layer_centers.py` | redundant-identical |
-| `composite_3d_lifecycle.py` | `src/Location/composite_3d_lifecycle.py` | redundant-identical |
-| `track_3d_objects.py` | `src/Location/track_3d_objects.py` | redundant-identical |
+| `build_cmems_climatology.py` | `src/Legacy/Location/build_cmems_climatology.py` | redundant-identical |
+| `classify_3d_eddy_shape.py` | `src/Legacy/Location/classify_3d_eddy_shape.py` | redundant-identical |
+| `complete_3d_layer_centers.py` | `src/Legacy/Location/complete_3d_layer_centers.py` | redundant-identical |
+| `composite_3d_lifecycle.py` | `src/Legacy/Location/composite_3d_lifecycle.py` | redundant-identical |
+| `track_3d_objects.py` | `src/Legacy/Location/track_3d_objects.py` | redundant-identical |
 
-删除前检查：
+鍒犻櫎鍓嶆鏌ワ細
 
 ```powershell
 rg "build_cmems_climatology.py|classify_3d_eddy_shape.py|complete_3d_layer_centers.py|composite_3d_lifecycle.py|track_3d_objects.py" G:\EDDY_detection\S-H-I-T-ocean-\Zhe
 ```
 
-如果文档或脚本仍直接调用 root-level 路径，应先改成 `python -m src.Location.<module>`。
+濡傛灉鏂囨。鎴栬剼鏈粛鐩存帴璋冪敤 root-level 璺緞锛屽簲鍏堟敼鎴?`python -m src.Legacy.Location.<module>`銆?
 
-## 2. Root-level 与 `src/Location` 同名但已分叉的脚本
+## 2. Root-level 涓?`src/Legacy/Location` 鍚屽悕浣嗗凡鍒嗗弶鐨勮剼鏈?
 
-这些不能直接删除。它们同名但 hash 不同，需要进入 `diverged-snapshot review`。
+杩欎簺涓嶈兘鐩存帴鍒犻櫎銆傚畠浠悓鍚嶄絾 hash 涓嶅悓锛岄渶瑕佽繘鍏?`diverged-snapshot review`銆?
 
-| root-level 文件 | 对应正式位置 | 差异规模 | 判定 |
+| root-level 鏂囦欢 | 瀵瑰簲姝ｅ紡浣嶇疆 | 宸紓瑙勬ā | 鍒ゅ畾 |
 |---|---|---:|---|
-| `run_kuroshio_full_cpu_pipeline.py` | `src/Location/run_kuroshio_full_cpu_pipeline.py` | 约 120 diff lines | redundant-diverged-review |
-| `run_streaming_layer_identification.py` | `src/Location/run_streaming_layer_identification.py` | 约 678 diff lines | redundant-diverged-review |
-| `run_streaming_shape_pipeline.py` | `src/Location/run_streaming_shape_pipeline.py` | 约 208 diff lines | redundant-diverged-review |
-| `streaming_cmems.py` | `src/Location/streaming_cmems.py` | 约 51 diff lines | redundant-diverged-review |
-| `table_io.py` | `src/Location/table_io.py` | 约 33 diff lines | redundant-diverged-review |
+| `run_kuroshio_full_cpu_pipeline.py` | `src/Legacy/Location/run_kuroshio_full_cpu_pipeline.py` | 绾?120 diff lines | redundant-diverged-review |
+| `run_streaming_layer_identification.py` | `src/Legacy/Location/run_streaming_layer_identification.py` | 绾?678 diff lines | redundant-diverged-review |
+| `run_streaming_shape_pipeline.py` | `src/Legacy/Location/run_streaming_shape_pipeline.py` | 绾?208 diff lines | redundant-diverged-review |
+| `streaming_cmems.py` | `src/Legacy/Location/streaming_cmems.py` | 绾?51 diff lines | redundant-diverged-review |
+| `table_io.py` | `src/Legacy/Location/table_io.py` | 绾?33 diff lines | redundant-diverged-review |
 
-建议处理：
+寤鸿澶勭悊锛?
 
-1. 逐个 diff。
-2. 如果 root-level 只是旧参数或旧路径，归档 root-level。
-3. 如果 root-level 有仍需要的逻辑，把逻辑合并进 `src/Location`。
-4. 保留 root-level wrapper 一段时间，输出 deprecation warning。
+1. 閫愪釜 diff銆?
+2. 濡傛灉 root-level 鍙槸鏃у弬鏁版垨鏃ц矾寰勶紝褰掓。 root-level銆?
+3. 濡傛灉 root-level 鏈変粛闇€瑕佺殑閫昏緫锛屾妸閫昏緫鍚堝苟杩?`src/Legacy/Location`銆?
+4. 淇濈暀 root-level wrapper 涓€娈垫椂闂达紝杈撳嚭 deprecation warning銆?
 
-## 3. root-only 文件
+## 3. root-only 鏂囦欢
 
-这些 root-level 文件没有同名 `src/Location` 对应物，不能根据同名规则删除：
+杩欎簺 root-level 鏂囦欢娌℃湁鍚屽悕 `src/Legacy/Location` 瀵瑰簲鐗╋紝涓嶈兘鏍规嵁鍚屽悕瑙勫垯鍒犻櫎锛?
 
 ```text
 acc_config.py
@@ -67,39 +67,39 @@ crop_acc_raw.py
 download_acc_raw.py
 ```
 
-建议分类：
+寤鸿鍒嗙被锛?
 
-- `download_acc_raw.py`、`crop_acc_raw.py`：应迁入 `src/data_downloading/` 或 `scripts/legacy_data_download/`。
-- `acc_config.py`：确认是否仍被 root-level ACC workflow 使用；若只服务旧流程，归档。
+- `download_acc_raw.py`銆乣crop_acc_raw.py`锛氬簲杩佸叆 `src/data_downloading/` 鎴?`scripts/legacy_data_download/`銆?
+- `acc_config.py`锛氱‘璁ゆ槸鍚︿粛琚?root-level ACC workflow 浣跨敤锛涜嫢鍙湇鍔℃棫娴佺▼锛屽綊妗ｃ€?
 
-## 4. 非 root 的重复命名
+## 4. 闈?root 鐨勯噸澶嶅懡鍚?
 
-这些重复名不必然冗余，但表示语义边界可能不清：
+杩欎簺閲嶅鍚嶄笉蹇呯劧鍐椾綑锛屼絾琛ㄧず璇箟杈圭晫鍙兘涓嶆竻锛?
 
-| 文件名 | 位置 | 建议 |
+| 鏂囦欢鍚?| 浣嶇疆 | 寤鸿 |
 |---|---|---|
-| `run_hua_hybrid_detection_acc.py` | `src/Location/` 与 `src/experiments/temp/` | 明确一个为 production，一个为 replication experiment |
-| `unified_math.py` | `src/Location/validation/` 与 `src/experiments/theory_validation/` | 合并或重命名，避免理论工具双源 |
-| `cli.py` | `forecast/` 与 `validation/` | 正常重复名，但应迁出 `Location` |
-| `common.py` | `Location/common.py` 与 `forecast/common.py` | 正常重复名，但 forecast 应独立命名空间 |
+| `run_hua_hybrid_detection_acc.py` | `src/Legacy/Location/` 涓?`src/Legacy/experiments/temp/` | 鏄庣‘涓€涓负 production锛屼竴涓负 replication experiment |
+| `unified_math.py` | `src/Legacy/Location/validation/` 涓?`src/Legacy/experiments/theory_validation/` | 鍚堝苟鎴栭噸鍛藉悕锛岄伩鍏嶇悊璁哄伐鍏峰弻婧?|
+| `cli.py` | `forecast/` 涓?`validation/` | 姝ｅ父閲嶅鍚嶏紝浣嗗簲杩佸嚭 `Location` |
+| `common.py` | `Location/common.py` 涓?`forecast/common.py` | 姝ｅ父閲嶅鍚嶏紝浣?forecast 搴旂嫭绔嬪懡鍚嶇┖闂?|
 
-## 5. `.bak_*` 文件
+## 5. `.bak_*` 鏂囦欢
 
-当前存在：
+褰撳墠瀛樺湪锛?
 
 ```text
-src/First_temp/direction_fit.py.bak_20260720_170713
-src/Location/run_representative_vortex.py.bak_20260720_170713
+src/Legacy/First_temp/direction_fit.py.bak_20260720_170713
+src/Legacy/Location/run_representative_vortex.py.bak_20260720_170713
 ```
 
-建议：
+寤鸿锛?
 
-- 若 Git 历史已经覆盖这些内容，归档到 `legacy/backups/` 或删除。
-- 若 Git 历史不完整，保留到 `legacy/backups/`，不要留在正式 package 目录。
+- 鑻?Git 鍘嗗彶宸茬粡瑕嗙洊杩欎簺鍐呭锛屽綊妗ｅ埌 `legacy/backups/` 鎴栧垹闄ゃ€?
+- 鑻?Git 鍘嗗彶涓嶅畬鏁达紝淇濈暀鍒?`legacy/backups/`锛屼笉瑕佺暀鍦ㄦ寮?package 鐩綍銆?
 
-## 6. 实验区删除策略
+## 6. 瀹為獙鍖哄垹闄ょ瓥鐣?
 
-`src/experiments/temp/` 目前有多个仍有科学价值的脚本，不应直接删除：
+`src/Legacy/experiments/temp/` 鐩墠鏈夊涓粛鏈夌瀛︿环鍊肩殑鑴氭湰锛屼笉搴旂洿鎺ュ垹闄わ細
 
 ```text
 run_azimuthal_representative_vortex.py
@@ -110,11 +110,11 @@ run_rotation_core_modal_tilt_validation_li2026.py
 plot_original_eddy_discontinuity_7panel.py
 ```
 
-其中前三个已经接近生产主链，应考虑提升，而不是删除。
+鍏朵腑鍓嶄笁涓凡缁忔帴杩戠敓浜т富閾撅紝搴旇€冭檻鎻愬崌锛岃€屼笉鏄垹闄ゃ€?
 
-## 7. Vendor 管理
+## 7. Vendor 绠＄悊
 
-`vendor/` 约 587 MB，不是冗余代码。它包含参考或第三方实现：
+`vendor/` 绾?587 MB锛屼笉鏄啑浣欎唬鐮併€傚畠鍖呭惈鍙傝€冩垨绗笁鏂瑰疄鐜帮細
 
 ```text
 vendor/Hybrid-Eddy-detection
@@ -123,21 +123,21 @@ vendor/MITgcm
 vendor/py-eddy-tracker
 ```
 
-建议：
+寤鸿锛?
 
-- 不直接编辑 vendor。
-- 若 GitHub 仓库不适合提交 587 MB vendor，可改成下载脚本、子模块或 release artifact。
-- 自研适配逻辑应留在 `src/`，不要写进 vendor。
+- 涓嶇洿鎺ョ紪杈?vendor銆?
+- 鑻?GitHub 浠撳簱涓嶉€傚悎鎻愪氦 587 MB vendor锛屽彲鏀规垚涓嬭浇鑴氭湰銆佸瓙妯″潡鎴?release artifact銆?
+- 鑷爺閫傞厤閫昏緫搴旂暀鍦?`src/`锛屼笉瑕佸啓杩?vendor銆?
 
-## 8. 第一批安全动作建议
+## 8. 绗竴鎵瑰畨鍏ㄥ姩浣滃缓璁?
 
-第一批只做归档，不做硬删除：
+绗竴鎵瑰彧鍋氬綊妗ｏ紝涓嶅仛纭垹闄わ細
 
-1. 新建 `legacy/root_entrypoints/identical_snapshots/`。
-2. 移入 5 个 hash 完全相同的 root-level 脚本。
-3. 新建 `legacy/root_entrypoints/diverged_snapshots/`。
-4. 复制 5 个分叉 root-level 脚本进去，原文件先保留 wrapper。
-5. 新建 `legacy/backups/`，移动 `.bak_*` 文件。
+1. 鏂板缓 `legacy/root_entrypoints/identical_snapshots/`銆?
+2. 绉诲叆 5 涓?hash 瀹屽叏鐩稿悓鐨?root-level 鑴氭湰銆?
+3. 鏂板缓 `legacy/root_entrypoints/diverged_snapshots/`銆?
+4. 澶嶅埗 5 涓垎鍙?root-level 鑴氭湰杩涘幓锛屽師鏂囦欢鍏堜繚鐣?wrapper銆?
+5. 鏂板缓 `legacy/backups/`锛岀Щ鍔?`.bak_*` 鏂囦欢銆?
 
-只有在 smoke tests 和文档路径更新后，才进入真正删除阶段。
+鍙湁鍦?smoke tests 鍜屾枃妗ｈ矾寰勬洿鏂板悗锛屾墠杩涘叆鐪熸鍒犻櫎闃舵銆?
 

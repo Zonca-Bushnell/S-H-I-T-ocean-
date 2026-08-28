@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -13,8 +13,8 @@ import netCDF4
 import numpy as np
 import pandas as pd
 
-from src.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
-from src.First_temp.lifecycle_ep_flux_nondim_validation import (
+from src.Legacy.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
+from src.Legacy.First_temp.lifecycle_ep_flux_nondim_validation import (
     azimuth_second_derivative,
     ddz,
     load_n2,
@@ -22,9 +22,9 @@ from src.First_temp.lifecycle_ep_flux_nondim_validation import (
     radial_derivative,
     read_climatology_uv,
 )
-from src.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
-from src.Location.common import load_config, parse_ymd
-from src.Location.streaming_cmems import read_day_data
+from src.Legacy.First_temp.tilted_ep_flux_validation import bilinear_sample, sanitize_ocean_field, xy_to_lonlat
+from src.Legacy.Location.common import load_config, parse_ymd
+from src.Legacy.Location.streaming_cmems import read_day_data
 
 
 SECONDS_PER_DAY = 86400.0
@@ -640,21 +640,21 @@ def _finalize(rv_root: Path, output_dir: Path) -> None:
             fig.savefig(fig_dir / f"{pol}_{name}_scatter.png")
             plt.close(fig)
 
-    lines = ["# Deviation-induced PV flux 验证结果\n\n"]
-    lines.append("本报告区分两个口径：全球经向 `v' q'` 用来检验 deviation 是否产生经向 PV flux；倾斜轴法向 `u_n' q'` 用来和既有 E-P `pv_flux/divF` 输出对齐。\n\n")
+    lines = ["# Deviation-induced PV flux 楠岃瘉缁撴灉\n\n"]
+    lines.append("鏈姤鍛婂尯鍒嗕袱涓彛寰勶細鍏ㄧ悆缁忓悜 `v' q'` 鐢ㄦ潵妫€楠?deviation 鏄惁浜х敓缁忓悜 PV flux锛涘€炬枩杞存硶鍚?`u_n' q'` 鐢ㄦ潵鍜屾棦鏈?E-P `pv_flux/divF` 杈撳嚭瀵归綈銆俓n\n")
     for row in summary.itertuples(index=False):
         lines.append(f"## {row.relation} / {row.polarity}\n\n")
-        lines.append(f"- 判定：{row.status}\n")
+        lines.append(f"- 鍒ゅ畾锛歿row.status}\n")
         lines.append(f"- corr: {row.corr:.4g}\n")
         lines.append(f"- same_sign_fraction: {row.same_sign_fraction:.4g}\n")
         lines.append(f"- slope: {row.slope:.4g}\n")
         lines.append(f"- rmse_ratio: {row.rmse_ratio:.4g}\n")
         lines.append(f"- n_bins: {row.n_bins}\n\n")
-    lines.append("## 解释\n\n")
-    lines.append("- 若 `center_formula_vs_meridional_clim_vq` 通过，说明 `M_q/A_z * V_dev,y` 能直接解释经向扰动 PV 通量。\n")
-    lines.append("- 若 `linear_displacement_vs_meridional_clim_vq` 通过，说明背景 PV 梯度线性位移近似 `-qbar_y xi_y Dxi_y/Dt` 可用。\n")
-    lines.append("- 若 `axis_measured_reconstruction_vs_existing_pv_flux` 通过，说明严格重构的 `q_prime` 和既有 representative E-P 诊断口径一致。\n")
-    lines.append("- 若 deviation 公式能解释 `pv_flux/divF` 但不能解释经向 `v'q'`，则代表它主要对应倾斜轴法向通量而不是全球经向通量。\n")
+    lines.append("## 瑙ｉ噴\n\n")
+    lines.append("- 鑻?`center_formula_vs_meridional_clim_vq` 閫氳繃锛岃鏄?`M_q/A_z * V_dev,y` 鑳界洿鎺ヨВ閲婄粡鍚戞壈鍔?PV 閫氶噺銆俓n")
+    lines.append("- 鑻?`linear_displacement_vs_meridional_clim_vq` 閫氳繃锛岃鏄庤儗鏅?PV 姊害绾挎€т綅绉昏繎浼?`-qbar_y xi_y Dxi_y/Dt` 鍙敤銆俓n")
+    lines.append("- 鑻?`axis_measured_reconstruction_vs_existing_pv_flux` 閫氳繃锛岃鏄庝弗鏍奸噸鏋勭殑 `q_prime` 鍜屾棦鏈?representative E-P 璇婃柇鍙ｅ緞涓€鑷淬€俓n")
+    lines.append("- 鑻?deviation 鍏紡鑳借В閲?`pv_flux/divF` 浣嗕笉鑳借В閲婄粡鍚?`v'q'`锛屽垯浠ｈ〃瀹冧富瑕佸搴斿€炬枩杞存硶鍚戦€氶噺鑰屼笉鏄叏鐞冪粡鍚戦€氶噺銆俓n")
     (output_dir / "deviation_pv_flux_summary_zh.md").write_text("".join(lines), encoding="utf-8")
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.experiments.temp.run_mode_tilt_validation_yang2026 import (
+from src.Legacy.experiments.temp.run_mode_tilt_validation_yang2026 import (
     _load_azimuthal_npz,
     _polar_to_xy,
     _relative_vorticity_xy,
@@ -22,7 +22,7 @@ from src.experiments.temp.run_mode_tilt_validation_yang2026 import (
     _resolve_radial_seed_root,
     _speed_min_centerline,
 )
-from src.experiments.theory_validation.unified_math import (
+from src.Legacy.experiments.theory_validation.unified_math import (
     geo_params,
     project_vertical_modes,
     streamfunction_from_zeta,
@@ -30,7 +30,7 @@ from src.experiments.theory_validation.unified_math import (
     vertical_mode_decomposition,
     vertical_weights,
 )
-from src.First_temp.tilted_ep_flux_validation import load_n2
+from src.Legacy.First_temp.tilted_ep_flux_validation import load_n2
 
 
 G = 9.81
@@ -522,19 +522,19 @@ def main() -> int:
     (out_root / "summary_zh.md").write_text(
         "\n".join(
             [
-                "# Kuroshiou MITgcm 速度中心倾斜验证实验",
+                "# Kuroshiou MITgcm 閫熷害涓績鍊炬枩楠岃瘉瀹為獙",
                 "",
-                "本目录是独立 MITgcm 理想化/观测约束实验脚手架，不覆盖现有识别结果。",
+                "鏈洰褰曟槸鐙珛 MITgcm 鐞嗘兂鍖?瑙傛祴绾︽潫瀹為獙鑴氭墜鏋讹紝涓嶈鐩栫幇鏈夎瘑鍒粨鏋溿€?,
                 "",
-                f"- 输入代表涡：`{rv_root}`",
-                f"- 径向种子/速度中心：`{radial_seed_root}`",
-                f"- 极性与生命周期：`{args.polarity}`, tau={float(np.asarray(data['tau_grid'])[tau_index]):.2f}",
-                f"- 半径：{float(radius)/1000:.1f} km",
-                f"- 背景场：{background_source}",
+                f"- 杈撳叆浠ｈ〃娑★細`{rv_root}`",
+                f"- 寰勫悜绉嶅瓙/閫熷害涓績锛歚{radial_seed_root}`",
+                f"- 鏋佹€т笌鐢熷懡鍛ㄦ湡锛歚{args.polarity}`, tau={float(np.asarray(data['tau_grid'])[tau_index]):.2f}",
+                f"- 鍗婂緞锛歿float(radius)/1000:.1f} km",
+                f"- 鑳屾櫙鍦猴細{background_source}",
                 "",
-                "核心设计是：用代表涡速度异常反演流函数，按 QG 垂向模态分解成 real、mode1、mode2、mode1+mode2 四组初值；后处理时只把速度异常中心线作为主诊断。",
+                "鏍稿績璁捐鏄細鐢ㄤ唬琛ㄦ丁閫熷害寮傚父鍙嶆紨娴佸嚱鏁帮紝鎸?QG 鍨傚悜妯℃€佸垎瑙ｆ垚 real銆乵ode1銆乵ode2銆乵ode1+mode2 鍥涚粍鍒濆€硷紱鍚庡鐞嗘椂鍙妸閫熷害寮傚父涓績绾夸綔涓轰富璇婃柇銆?,
                 "",
-                "需要特别注意：Yang/Xu/Li 2026 的中心口径主要来自温度异常/流函数结构；这里的主口径是速度弱中心加旋转约束，因此验证的是同一模态机制在速度中心定义下是否仍成立。",
+                "闇€瑕佺壒鍒敞鎰忥細Yang/Xu/Li 2026 鐨勪腑蹇冨彛寰勪富瑕佹潵鑷俯搴﹀紓甯?娴佸嚱鏁扮粨鏋勶紱杩欓噷鐨勪富鍙ｅ緞鏄€熷害寮变腑蹇冨姞鏃嬭浆绾︽潫锛屽洜姝ら獙璇佺殑鏄悓涓€妯℃€佹満鍒跺湪閫熷害涓績瀹氫箟涓嬫槸鍚︿粛鎴愮珛銆?,
             ]
         ),
         encoding="utf-8",

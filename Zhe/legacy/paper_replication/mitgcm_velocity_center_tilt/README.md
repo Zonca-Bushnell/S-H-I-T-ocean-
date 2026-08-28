@@ -1,4 +1,4 @@
-# Kuroshiou MITgcm Velocity-Center Tilt Validation
+﻿# Kuroshiou MITgcm Velocity-Center Tilt Validation
 
 This temporary experiment builds an observation-constrained MITgcm idealized
 case from the Kuroshiou representative vortex.
@@ -32,6 +32,6 @@ The scientific distinction is important:
 3. `check_mitgcm_environment.py` records whether the server has MITgcm source
    and a usable Fortran compiler.
 
-The package stays under `src/experiments/temp` until a real MITgcm smoke run is
+The package stays under `src/Legacy/experiments/temp` until a real MITgcm smoke run is
 complete and the binary field layout has been verified.
 

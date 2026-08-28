@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -81,7 +81,7 @@ def _detect_command(args: argparse.Namespace, output_dir: Path, *, monotonic: bo
     cmd = [
         sys.executable,
         "-m",
-        "src.Location.run_hua_hybrid_detection_acc",
+        "src.Legacy.Location.run_hua_hybrid_detection_acc",
         "--filter-root",
         str(args.filter_root),
         "--raw-root",
@@ -147,7 +147,7 @@ def _tracking_command(input_dir: Path, output_dir: Path) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "src.Location.run_hua_feature_group_tracking_acc",
+        "src.Legacy.Location.run_hua_feature_group_tracking_acc",
         "--input-dir",
         str(input_dir),
         "--output-dir",
@@ -356,13 +356,13 @@ def _write_summary(output_dir: Path, baseline: dict[str, float | int], strict: d
     (output_dir / "boundary_monotonic_comparison_summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     lines = [
-        "# Kuroshiou Hua b3 边界速度向量单调旋转约束对比",
+        "# Kuroshiou Hua b3 杈圭晫閫熷害鍚戦噺鍗曡皟鏃嬭浆绾︽潫瀵规瘮",
         "",
-        "本实验只改一个条件：在当前 Hua b3 圆周速度判据之外，额外要求边界速度向量沿圆周单调旋转。baseline 保持当前生产参数；monotonic 只增加该硬约束。",
+        "鏈疄楠屽彧鏀逛竴涓潯浠讹細鍦ㄥ綋鍓?Hua b3 鍦嗗懆閫熷害鍒ゆ嵁涔嬪锛岄澶栬姹傝竟鐣岄€熷害鍚戦噺娌垮渾鍛ㄥ崟璋冩棆杞€俠aseline 淇濇寔褰撳墠鐢熶骇鍙傛暟锛沵onotonic 鍙鍔犺纭害鏉熴€?,
         "",
-        "## 核心结果",
+        "## 鏍稿績缁撴灉",
         "",
-        "| 指标 | baseline | monotonic | monotonic / baseline |",
+        "| 鎸囨爣 | baseline | monotonic | monotonic / baseline |",
         "|---|---:|---:|---:|",
     ]
     keys = ["pass_layers", "surface_pass", "frame_objects", "feature_tracks", "tracks_ge2", "tracks_ge3", "max_track_objects", "continuous_events", "max_depth_median"]
@@ -374,11 +374,11 @@ def _write_summary(output_dir: Path, baseline: dict[str, float | int], strict: d
     lines.extend(
         [
             "",
-            "## 解释",
+            "## 瑙ｉ噴",
             "",
-            "- 如果 `pass_layers` 明显下降，说明很多原本通过的层依赖“允许少量方向异常”的 Hua/Nencioli 容错。",
-            "- 如果 `feature_tracks` 或 `tracks_ge2` 明显下降，说明该约束不仅筛掉单层，还会破坏相邻帧对象体素 overlap 的连续性。",
-            "- 如果 `max_depth_median` 下降，说明它主要切掉深层弱旋转或开口/月牙状速度结构；这正是你关心的“强区呈月牙、速度弱区开口”的情形。",
+            "- 濡傛灉 `pass_layers` 鏄庢樉涓嬮檷锛岃鏄庡緢澶氬師鏈€氳繃鐨勫眰渚濊禆鈥滃厑璁稿皯閲忔柟鍚戝紓甯糕€濈殑 Hua/Nencioli 瀹归敊銆?,
+            "- 濡傛灉 `feature_tracks` 鎴?`tracks_ge2` 鏄庢樉涓嬮檷锛岃鏄庤绾︽潫涓嶄粎绛涙帀鍗曞眰锛岃繕浼氱牬鍧忕浉閭诲抚瀵硅薄浣撶礌 overlap 鐨勮繛缁€с€?,
+            "- 濡傛灉 `max_depth_median` 涓嬮檷锛岃鏄庡畠涓昏鍒囨帀娣卞眰寮辨棆杞垨寮€鍙?鏈堢墮鐘堕€熷害缁撴瀯锛涜繖姝ｆ槸浣犲叧蹇冪殑鈥滃己鍖哄憟鏈堢墮銆侀€熷害寮卞尯寮€鍙ｂ€濈殑鎯呭舰銆?,
         ]
     )
     (output_dir / "boundary_monotonic_comparison_summary_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

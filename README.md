@@ -40,9 +40,12 @@ For the detailed code map, see:
   double-core diagnostics.
 - `Zhe/src/data_downloading/`: data acquisition utilities, intentionally kept
   outside the current refactor boundary.
-- `Zhe/src/experiments/`: temporary research experiments.
-- `Zhe/src/First_temp/`: legacy-but-active numerical helpers.
-- `Zhe/src/Location/`: compatibility wrappers and older entry points.
+- `Zhe/src/Legacy/experiments/`: temporary research experiments, kept out of
+  the production package namespace.
+- `Zhe/src/Legacy/First_temp/`: legacy-but-active numerical helpers that are
+  still imported explicitly by selected production diagnostics.
+- `Zhe/src/Legacy/Location/`: older entry points and compatibility code.
+- `Zhe/src/Legacy/validation/`: historical validation scripts.
 - `Zhe/legacy/`: archived historical scripts, paper replications, diagnostics,
   and non-default representative variants.
 - `Zhe/vendor/`: third-party or reference source code. Do not edit directly as

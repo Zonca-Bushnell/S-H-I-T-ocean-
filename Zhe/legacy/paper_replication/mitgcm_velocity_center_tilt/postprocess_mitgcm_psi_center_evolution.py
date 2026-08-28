@@ -1,4 +1,4 @@
-"""Postprocess MITgcm runs with velocity-inverted streamfunction centers.
+﻿"""Postprocess MITgcm runs with velocity-inverted streamfunction centers.
 
 This experiment does not use temperature centers.  It reads existing MITgcm
 U/V MDS output, computes relative vorticity, inverts a 2-D streamfunction for
@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.experiments.theory_validation.unified_math import streamfunction_from_zeta
+from src.Legacy.experiments.theory_validation.unified_math import streamfunction_from_zeta
 
 
 CASES = ("real", "mode1", "mode2", "mode1_plus_mode2", "mode1_to_5")
@@ -417,38 +417,38 @@ def _write_summary(diag_dir: Path, judgment: dict[str, object], metrics: pd.Data
         mean_speed_tilt_distance_over_R=("speed_tilt_distance_over_R", "mean"),
     )
     verdict_map = {
-        "support": "支持",
-        "partial": "部分支持",
-        "fail": "不支持",
+        "support": "鏀寔",
+        "partial": "閮ㄥ垎鏀寔",
+        "fail": "涓嶆敮鎸?,
     }
     lines = [
-        "# 速度反演流函数中心验证 Yang/Xu/Li 2026 模态倾斜机制",
+        "# 閫熷害鍙嶆紨娴佸嚱鏁颁腑蹇冮獙璇?Yang/Xu/Li 2026 妯℃€佸€炬枩鏈哄埗",
         "",
-        "本诊断只使用 MITgcm 输出的 `U,V`。流程是 `U,V -> 相对涡度 zeta -> 流函数 psi`，再用 `abs(psi)` 极值定义中心线；没有使用温度中心。",
+        "鏈瘖鏂彧浣跨敤 MITgcm 杈撳嚭鐨?`U,V`銆傛祦绋嬫槸 `U,V -> 鐩稿娑″害 zeta -> 娴佸嚱鏁?psi`锛屽啀鐢?`abs(psi)` 鏋佸€煎畾涔変腑蹇冪嚎锛涙病鏈変娇鐢ㄦ俯搴︿腑蹇冦€?,
         "",
-        f"总判定：**{verdict_map.get(str(judgment['verdict']), judgment['verdict'])}**。",
+        f"鎬诲垽瀹氾細**{verdict_map.get(str(judgment['verdict']), judgment['verdict'])}**銆?,
         "",
-        "## 判据结果",
+        "## 鍒ゆ嵁缁撴灉",
         "",
-        f"- mode1+2 相对单模态的最小 RMSE 改善：`{float(judgment['mode12_rmse_gain_min_vs_single_modes']):.3f}`。",
-        f"- mode1+2 相对单模态的最小相关提升：`{float(judgment['mode12_corr_gain_min_vs_single_modes']):.3f}`。",
-        f"- mode1..5 相对 mode1+2 的 RMSE 改善：`{float(judgment['mode1_to_5_rmse_gain_vs_mode12']):.3f}`。",
+        f"- mode1+2 鐩稿鍗曟ā鎬佺殑鏈€灏?RMSE 鏀瑰杽锛歚{float(judgment['mode12_rmse_gain_min_vs_single_modes']):.3f}`銆?,
+        f"- mode1+2 鐩稿鍗曟ā鎬佺殑鏈€灏忕浉鍏虫彁鍗囷細`{float(judgment['mode12_corr_gain_min_vs_single_modes']):.3f}`銆?,
+        f"- mode1..5 鐩稿 mode1+2 鐨?RMSE 鏀瑰杽锛歚{float(judgment['mode1_to_5_rmse_gain_vs_mode12']):.3f}`銆?,
         "",
-        "判定规则：mode1+2 必须比 mode1 和 mode2 的 60 天平均 RMSE 都低至少 20%，且相关都提高至少 0.2，才算支持；mode1..5 若只比 mode1+2 改善小于 10%，才说明低模态足够。",
+        "鍒ゅ畾瑙勫垯锛歮ode1+2 蹇呴』姣?mode1 鍜?mode2 鐨?60 澶╁钩鍧?RMSE 閮戒綆鑷冲皯 20%锛屼笖鐩稿叧閮芥彁楂樿嚦灏?0.2锛屾墠绠楁敮鎸侊紱mode1..5 鑻ュ彧姣?mode1+2 鏀瑰杽灏忎簬 10%锛屾墠璇存槑浣庢ā鎬佽冻澶熴€?,
         "",
-        "## 60 天平均指标（去掉 day 0）",
+        "## 60 澶╁钩鍧囨寚鏍囷紙鍘绘帀 day 0锛?,
         "",
         "```csv",
         main_mean.to_csv(index=False).strip(),
         "```",
         "",
-        "## 中心定义敏感性",
+        "## 涓績瀹氫箟鏁忔劅鎬?,
         "",
         "```csv",
         sens_mean.to_csv(index=False).strip(),
         "```",
         "",
-        "解释：如果 `psi_abs_extreme` 支持 mode1+2，而 `speed_min` 不支持，说明论文机制更接近流函数/压力中心的模态相位演化；这不能自动推出 Hua/VG 速度中心线也由同一机制控制。",
+        "瑙ｉ噴锛氬鏋?`psi_abs_extreme` 鏀寔 mode1+2锛岃€?`speed_min` 涓嶆敮鎸侊紝璇存槑璁烘枃鏈哄埗鏇存帴杩戞祦鍑芥暟/鍘嬪姏涓績鐨勬ā鎬佺浉浣嶆紨鍖栵紱杩欎笉鑳借嚜鍔ㄦ帹鍑?Hua/VG 閫熷害涓績绾夸篃鐢卞悓涓€鏈哄埗鎺у埗銆?,
     ]
     (diag_dir / "psi_center_validation_summary_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (diag_dir / "psi_center_validation_summary.json").write_text(json.dumps(judgment, ensure_ascii=False, indent=2), encoding="utf-8")

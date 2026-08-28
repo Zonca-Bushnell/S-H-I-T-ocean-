@@ -1,4 +1,4 @@
-# Zhe Eddy Analysis Codebase
+﻿# Zhe Eddy Analysis Codebase
 
 This directory is the current code root inside the `S-H-I-T-ocean-` Git
 repository. Development is now centered on the `Zonca` branch.
@@ -37,9 +37,9 @@ options:
 | `src/eddy_pipeline/` | Production detection, tracking, catalog, shape classification, and representative-vortex structure pipeline. |
 | `src/post/` | Formal post-processing after representative-vortex construction: aggregate-product stirring, structure plots, and double-core diagnostics. |
 | `src/data_downloading/` | Data download and raw preprocessing utilities. Kept separate from the detection refactor. |
-| `src/experiments/` | Temporary research experiments. Useful, but not production entry points. |
-| `src/First_temp/` | Legacy-but-active numerical helpers used by older representative and E-P/PV diagnostics. |
-| `src/Location/` | Compatibility wrappers and older entry points. Prefer `src.eddy_pipeline` and `src.post`. |
+| `src/Legacy/experiments/` | Temporary research experiments. Useful, but not production entry points. |
+| `src/Legacy/First_temp/` | Legacy-but-active numerical helpers used by older representative and E-P/PV diagnostics. |
+| `src/Legacy/Location/` | Compatibility wrappers and older entry points. Prefer `src.eddy_pipeline` and `src.post`. |
 | `legacy/` | Archived diagnostics, paper replications, older variants, and historical scripts. |
 | `vendor/` | Third-party/reference code such as Hua/Nencioli/MITgcm material. Do not edit as production code. |
 
