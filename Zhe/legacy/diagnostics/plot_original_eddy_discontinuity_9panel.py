@@ -15,6 +15,7 @@ from netCDF4 import Dataset, num2date
 
 
 RHO0 = 1025.0
+G = 9.81
 OMEGA = 7.2921159e-5
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -243,6 +244,26 @@ def _window_indices(values: np.ndarray, center: float, half_width: float) -> np.
     return idx
 
 
+def _year_filter_path(filter_root: Path, year: str) -> Path:
+    candidates = [
+        filter_root / f"global_phy_{year}_bandpass_30_180d.nc",
+        filter_root / f"global_phy_{year}.nc",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def _year_raw_path(raw_root: Path, year: str) -> Path:
+    return raw_root / f"global_phy_{year}.nc"
+
+
+def _as_float_array(values) -> np.ndarray:
+    arr = np.ma.asarray(values)
+    return np.asarray(np.ma.filled(arr, np.nan), dtype="f8")
+
+
 def _read_field_window(
     path: Path,
     date: str,
@@ -254,9 +275,9 @@ def _read_field_window(
 ) -> dict[str, np.ndarray]:
     with Dataset(path) as ds:
         t = _read_time_index(path, date)
-        lon = np.asarray(ds.variables["longitude"][:], dtype="f8")
-        lat = np.asarray(ds.variables["latitude"][:], dtype="f8")
-        depth = np.asarray(ds.variables["depth"][:], dtype="f8") if "depth" in ds.variables else None
+        lon = _as_float_array(ds.variables["longitude"][:])
+        lat = _as_float_array(ds.variables["latitude"][:])
+        depth = _as_float_array(ds.variables["depth"][:]) if "depth" in ds.variables else None
         ix = _window_indices(lon, center_lon, half_width_deg)
         iy = _window_indices(lat, center_lat, half_width_deg)
         out = {"longitude": lon[ix], "latitude": lat[iy]}
@@ -267,29 +288,39 @@ def _read_field_window(
                 continue
             var = ds.variables[name]
             if var.ndim == 4:
-                out[name] = np.asarray(var[t, depth_index, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1], dtype="f8")
+                out[name] = _as_float_array(var[t, depth_index, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1])
             elif var.ndim == 3:
-                out[name] = np.asarray(var[t, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1], dtype="f8")
+                out[name] = _as_float_array(var[t, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1])
     return out
 
 
-def _read_velocity_column(
+def _read_column_window(
     path: Path,
     date: str,
     center_lon: float,
     center_lat: float,
     half_width_deg: float,
+    variables: tuple[str, ...],
 ) -> dict[str, np.ndarray]:
     with Dataset(path) as ds:
         t = _read_time_index(path, date)
-        lon = np.asarray(ds.variables["longitude"][:], dtype="f8")
-        lat = np.asarray(ds.variables["latitude"][:], dtype="f8")
-        depth = np.asarray(ds.variables["depth"][:], dtype="f8")
+        lon = _as_float_array(ds.variables["longitude"][:])
+        lat = _as_float_array(ds.variables["latitude"][:])
+        depth = _as_float_array(ds.variables["depth"][:])
         ix = _window_indices(lon, center_lon, half_width_deg)
         iy = _window_indices(lat, center_lat, half_width_deg)
-        u = np.asarray(ds.variables["uo_glor"][t, :, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1], dtype="f8")
-        v = np.asarray(ds.variables["vo_glor"][t, :, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1], dtype="f8")
-    return {"longitude": lon[ix], "latitude": lat[iy], "depth": depth, "uo_glor": u, "vo_glor": v}
+        out = {"longitude": lon[ix], "latitude": lat[iy], "depth": depth}
+        for name in variables:
+            if name not in ds.variables:
+                raise KeyError(f"{name} not found in {path}")
+            var = ds.variables[name]
+            if var.ndim == 4:
+                out[name] = _as_float_array(var[t, :, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1])
+            elif var.ndim == 3:
+                out[name] = _as_float_array(var[t, iy.min() : iy.max() + 1, ix.min() : ix.max() + 1])
+            else:
+                raise ValueError(f"Unsupported variable shape for {name} in {path}: {var.shape}")
+    return out
 
 
 def _relative_xy(lon: np.ndarray, lat: np.ndarray, lon0: float, lat0: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -338,6 +369,190 @@ def _vertical_velocity_proxy(u3: np.ndarray, v3: np.ndarray, depth: np.ndarray, 
         dz = float(depth[k] - depth[k - 1])
         w[k] = w[k - 1] - 0.5 * (div[k] + div[k - 1]) * dz
     return w
+
+
+def _finite_fill(values: np.ndarray, fill_value: float | None = None) -> np.ndarray:
+    arr = np.asarray(values, dtype="f8").copy()
+    finite = np.isfinite(arr)
+    if np.all(finite):
+        return arr
+    if fill_value is None:
+        fill_value = float(np.nanmedian(arr[finite])) if np.any(finite) else 0.0
+    arr[~finite] = fill_value
+    return arr
+
+
+def _density_sigma0(theta: np.ndarray, salinity: np.ndarray) -> np.ndarray:
+    try:
+        import gsw
+    except Exception as exc:
+        raise RuntimeError("gsw is required for omega-equation density; linear density fallback is disabled") from exc
+    sigma = gsw.sigma0(salinity, theta)
+    return _finite_fill(np.asarray(sigma, dtype="f8"))
+
+
+def _thermal_wind_geostrophic_velocity(
+    eta: np.ndarray,
+    sigma0: np.ndarray,
+    depth: np.ndarray,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+    f0: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    f = float(f0)
+    if abs(f) < 1.0e-8:
+        raise ValueError(f"Invalid Coriolis parameter for geostrophic velocity: {f0}")
+    eta = _finite_fill(eta)
+    sigma0 = _finite_fill(sigma0)
+    eta_x = np.gradient(eta, x_m, axis=1, edge_order=1)
+    eta_y = np.gradient(eta, y_m, axis=0, edge_order=1)
+    ug = np.zeros_like(sigma0, dtype="f8")
+    vg = np.zeros_like(sigma0, dtype="f8")
+    ug[0] = -G / f * eta_y
+    vg[0] = G / f * eta_x
+    sigma_x = np.gradient(sigma0, x_m, axis=2, edge_order=1)
+    sigma_y = np.gradient(sigma0, y_m, axis=1, edge_order=1)
+    du_dz = -G / (RHO0 * f) * sigma_y
+    dv_dz = G / (RHO0 * f) * sigma_x
+    for k in range(1, len(depth)):
+        dz = float(depth[k] - depth[k - 1])
+        ug[k] = ug[k - 1] + 0.5 * dz * (du_dz[k] + du_dz[k - 1])
+        vg[k] = vg[k - 1] + 0.5 * dz * (dv_dz[k] + dv_dz[k - 1])
+    return ug, vg
+
+
+def _omega_forcing_qtw_qdag(
+    ug: np.ndarray,
+    vg: np.ndarray,
+    ua: np.ndarray,
+    va: np.ndarray,
+    sigma0: np.ndarray,
+    depth: np.ndarray,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+    f0: float,
+) -> dict[str, np.ndarray]:
+    ug_x = np.gradient(ug, x_m, axis=2, edge_order=1)
+    ug_y = np.gradient(ug, y_m, axis=1, edge_order=1)
+    vg_x = np.gradient(vg, x_m, axis=2, edge_order=1)
+    vg_y = np.gradient(vg, y_m, axis=1, edge_order=1)
+    rho_x = np.gradient(sigma0, x_m, axis=2, edge_order=1)
+    rho_y = np.gradient(sigma0, y_m, axis=1, edge_order=1)
+    ua_z = np.gradient(ua, depth, axis=0, edge_order=1)
+    va_z = np.gradient(va, depth, axis=0, edge_order=1)
+    qtw_x = G / RHO0 * (ug_x * rho_x + vg_x * rho_y)
+    qtw_y = G / RHO0 * (ug_y * rho_x + vg_y * rho_y)
+    qdag_x = f0 * (vg_x * ua_z - ug_x * va_z)
+    qdag_y = f0 * (vg_y * ua_z - ug_y * va_z)
+    qx = -2.0 * qtw_x + qdag_x
+    qy = -2.0 * qtw_y + qdag_y
+    div_q = np.gradient(qx, x_m, axis=2, edge_order=1) + np.gradient(qy, y_m, axis=1, edge_order=1)
+    return {
+        "Qtw_x": qtw_x,
+        "Qtw_y": qtw_y,
+        "Qdag_x": qdag_x,
+        "Qdag_y": qdag_y,
+        "div_Q": div_q,
+    }
+
+
+def _n2_from_sigma0(sigma0: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    dsigma_dz = np.gradient(_finite_fill(sigma0), depth, axis=0, edge_order=1)
+    n2 = G / RHO0 * dsigma_dz
+    finite_positive = n2[np.isfinite(n2) & (n2 > 0)]
+    fallback = float(np.nanmedian(finite_positive)) if finite_positive.size else 1.0e-5
+    n2 = np.where(np.isfinite(n2) & (n2 > 1.0e-8), n2, fallback)
+    return np.clip(n2, 1.0e-8, 1.0e-3)
+
+
+def _solve_omega_dirichlet(div_q: np.ndarray, n2: np.ndarray, depth: np.ndarray, x_m: np.ndarray, y_m: np.ndarray, f0: float) -> np.ndarray:
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.linalg import spsolve
+
+    nz, ny, nx = div_q.shape
+    w = np.zeros_like(div_q, dtype="f8")
+    if nz < 3 or ny < 3 or nx < 3:
+        return w
+    dx2 = float(np.nanmedian(np.diff(x_m)) ** 2)
+    dy2 = float(np.nanmedian(np.diff(y_m)) ** 2)
+    if not np.isfinite(dx2) or not np.isfinite(dy2) or dx2 <= 0 or dy2 <= 0:
+        return w
+
+    def node(k: int, j: int, i: int) -> int:
+        return ((k - 1) * (ny - 2) + (j - 1)) * (nx - 2) + (i - 1)
+
+    rows: list[int] = []
+    cols: list[int] = []
+    vals: list[float] = []
+    rhs = np.zeros((nz - 2) * (ny - 2) * (nx - 2), dtype="f8")
+    for k in range(1, nz - 1):
+        dzm = max(float(depth[k] - depth[k - 1]), 1.0e-6)
+        dzp = max(float(depth[k + 1] - depth[k]), 1.0e-6)
+        czm = float(f0 * f0) * 2.0 / (dzm + dzp) / dzm
+        czp = float(f0 * f0) * 2.0 / (dzm + dzp) / dzp
+        for j in range(1, ny - 1):
+            for i in range(1, nx - 1):
+                idx = node(k, j, i)
+                nk = float(n2[k, j, i])
+                cx = nk / dx2
+                cy = nk / dy2
+                diag = -2.0 * cx - 2.0 * cy - czm - czp
+                rows.append(idx); cols.append(idx); vals.append(diag)
+                for kk, jj, ii, coeff in (
+                    (k, j, i - 1, cx),
+                    (k, j, i + 1, cx),
+                    (k, j - 1, i, cy),
+                    (k, j + 1, i, cy),
+                    (k - 1, j, i, czm),
+                    (k + 1, j, i, czp),
+                ):
+                    if 0 < kk < nz - 1 and 0 < jj < ny - 1 and 0 < ii < nx - 1:
+                        rows.append(idx); cols.append(node(kk, jj, ii)); vals.append(coeff)
+                rhs[idx] = float(div_q[k, j, i]) if np.isfinite(div_q[k, j, i]) else 0.0
+    mat = coo_matrix((vals, (rows, cols)), shape=(rhs.size, rhs.size)).tocsr()
+    sol = spsolve(mat, rhs)
+    if not np.all(np.isfinite(sol)):
+        sol = np.nan_to_num(sol, nan=0.0, posinf=0.0, neginf=0.0)
+    for k in range(1, nz - 1):
+        for j in range(1, ny - 1):
+            for i in range(1, nx - 1):
+                w[k, j, i] = sol[node(k, j, i)]
+    return w
+
+
+def _omega_w_diagnostic(
+    filter_column: dict[str, np.ndarray],
+    raw_column: dict[str, np.ndarray],
+    surface_lon: float,
+    surface_lat: float,
+) -> dict[str, np.ndarray | str]:
+    lon = filter_column["longitude"]
+    lat = filter_column["latitude"]
+    depth = filter_column["depth"]
+    x_m, y_m, _, _ = _relative_xy(lon, lat, surface_lon, surface_lat)
+    sigma0 = _density_sigma0(raw_column["thetao_glor"], raw_column["so_glor"])
+    eta = _finite_fill(filter_column["zos_glor"])
+    u_band = _finite_fill(filter_column["uo_glor"])
+    v_band = _finite_fill(filter_column["vo_glor"])
+    f0 = _coriolis(surface_lat)
+    ug, vg = _thermal_wind_geostrophic_velocity(eta, sigma0, depth, x_m, y_m, f0)
+    ua = u_band - ug
+    va = v_band - vg
+    forcing = _omega_forcing_qtw_qdag(ug, vg, ua, va, sigma0, depth, x_m, y_m, f0)
+    n2 = _n2_from_sigma0(sigma0, depth)
+    omega_w = _solve_omega_dirichlet(forcing["div_Q"], n2, depth, x_m, y_m, f0)
+    return {
+        **forcing,
+        "omega_w": omega_w,
+        "partial_z_omega_w": _vertical_gradient_w(omega_w, depth),
+        "N2": n2,
+        "ug": ug,
+        "vg": vg,
+        "ua": ua,
+        "va": va,
+        "sigma0": sigma0,
+        "method_note": "local omega equation with Q=-2Qtw+Qdag; Dirichlet w=0 boundaries",
+    }
 
 
 def _vertical_gradient_w(w: np.ndarray, depth: np.ndarray) -> np.ndarray:
@@ -402,6 +617,21 @@ def _hatch_unavailable(ax, text: str) -> None:
     ax.text(0.5, 0.5, text, ha="center", va="center", transform=ax.transAxes, fontsize=10)
     for offset in np.linspace(-0.8, 1.4, 12):
         ax.plot([offset, offset + 0.8], [0.0, 1.0], color="0.55", lw=1.2, transform=ax.transAxes, clip_on=True)
+
+
+def _write_omega_diagnostics(fields: dict[str, dict[str, np.ndarray] | None], output_dir: Path) -> None:
+    for label in ("first", "second"):
+        part = fields.get(label)
+        if not part or "w_section" not in part:
+            continue
+        diagnostics = part["w_section"].get("diagnostics", {})
+        arrays = {
+            key: value
+            for key, value in diagnostics.items()
+            if isinstance(value, np.ndarray)
+        }
+        if arrays:
+            np.savez_compressed(output_dir / f"omega_diagnostics_{label}.npz", **arrays)
 
 
 def _plot_field(
@@ -519,7 +749,7 @@ def _plot_vertical_w_section(
     axis_name = str(section.get("section_axis", "section"))
     ax.set_xlim(float(xlim[0]), float(xlim[1]))
     ax.set_ylim(float(zlim[1]), float(zlim[0]))
-    ax.set_title(f"{title}: vertical shear of w proxy ({axis_name})", fontsize=10)
+    ax.set_title(f"{title}: vertical shear of omega-equation w ({axis_name})", fontsize=10)
     ax.set_xlabel("section distance from surface center (km)")
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
@@ -577,7 +807,7 @@ def _plot_9panel(
         fig.colorbar(m4, ax=ax4, shrink=0.82, label="Pa proxy")
         if "w_section" in first_fields:
             m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_title}", selected, second=False)
-            fig.colorbar(m8, ax=ax8, shrink=0.82, label="m/s proxy")
+            fig.colorbar(m8, ax=ax8, shrink=0.82, label="s^-1 diagnostic")
         else:
             _hatch_unavailable(ax8, "first jump vertical w section unavailable")
         for ax in [ax3, ax4]:
@@ -599,7 +829,7 @@ def _plot_9panel(
         fig.colorbar(m6, ax=ax6, shrink=0.82, label="Pa proxy")
         if "w_section" in second_fields:
             m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_title}", selected, second=True)
-            fig.colorbar(m9, ax=ax9, shrink=0.82, label="m/s proxy")
+            fig.colorbar(m9, ax=ax9, shrink=0.82, label="s^-1 diagnostic")
         else:
             _hatch_unavailable(ax9, "second jump vertical w section unavailable")
         for ax in [ax5, ax6]:
@@ -643,6 +873,7 @@ def _plot_9panel(
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_dir / f"{output_name_stem}.png", dpi=220)
     fig.savefig(output_dir / f"{output_name_stem}.pdf")
+    _write_omega_diagnostics(fields, output_dir)
     plt.close(fig)
 
 
@@ -660,6 +891,7 @@ def _make_jump_cross_section_fields(
     *,
     selected: SelectedObject,
     object_layers: pd.DataFrame,
+    raw_root: Path,
     filter_root: Path,
     half_width_deg: float,
     jump_from_depth_index: int | None,
@@ -672,9 +904,12 @@ def _make_jump_cross_section_fields(
     if jump_to_depth_index is None:
         return None
     year = str(selected.date)[:4]
-    filter_path = filter_root / f"global_phy_{year}_bandpass_30_180d.nc"
+    filter_path = _year_filter_path(filter_root, year)
+    raw_path = _year_raw_path(raw_root, year)
     if not filter_path.exists():
         return None
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Raw file required for omega-equation density: {raw_path}")
 
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -706,16 +941,29 @@ def _make_jump_cross_section_fields(
         jump_from_depth_index,
         jump_to_depth_index,
     )
-    column = _read_velocity_column(
+    filter_column = _read_column_window(
         path=filter_path,
         date=selected.date,
         center_lon=surface_lon,
         center_lat=surface_lat,
         half_width_deg=half_width_deg,
+        variables=("uo_glor", "vo_glor", "zos_glor"),
     )
+    raw_column = _read_column_window(
+        path=raw_path,
+        date=selected.date,
+        center_lon=surface_lon,
+        center_lat=surface_lat,
+        half_width_deg=half_width_deg,
+        variables=("thetao_glor", "so_glor"),
+    )
+    omega = _omega_w_diagnostic(filter_column, raw_column, surface_lon, surface_lat)
     w_section = _make_vertical_w_section(
         object_layers=offsets,
-        column=column,
+        column=filter_column,
+        w_field=np.asarray(omega["omega_w"], dtype="f8"),
+        dwdz_field=np.asarray(omega["partial_z_omega_w"], dtype="f8"),
+        diagnostics=omega,
         surface_lon=surface_lon,
         surface_lat=surface_lat,
         jump_from_depth_index=jump_from_depth_index,
@@ -743,6 +991,9 @@ def _make_vertical_w_section(
     *,
     object_layers: pd.DataFrame,
     column: dict[str, np.ndarray],
+    w_field: np.ndarray,
+    dwdz_field: np.ndarray,
+    diagnostics: dict[str, np.ndarray | str],
     surface_lon: float,
     surface_lat: float,
     jump_from_depth_index: int | None,
@@ -757,8 +1008,8 @@ def _make_vertical_w_section(
     lat = column["latitude"]
     depth = column["depth"]
     x_m, y_m, _, _ = _relative_xy(lon, lat, surface_lon, surface_lat)
-    w = _vertical_velocity_proxy(column["uo_glor"], column["vo_glor"], depth, x_m, y_m)
-    dwdz = _vertical_gradient_w(w, depth)
+    w = np.asarray(w_field, dtype="f8")
+    dwdz = np.asarray(dwdz_field, dtype="f8")
 
     centers = object_layers.sort_values("depth_index").copy()
     center_x = centers["delta_x_km"].to_numpy(dtype="f8")
@@ -850,6 +1101,7 @@ def _make_vertical_w_section(
         "section_axis": axis,
         "xlim_km": xlim,
         "zlim_m": zlim,
+        "diagnostics": diagnostics,
     }
 
 
@@ -864,11 +1116,11 @@ def _make_cross_section_fields(
     w_shear_min_half_width_km: float,
     w_section_mode: str,
 ) -> dict[str, dict[str, np.ndarray] | None]:
-    del raw_root
     return {
         "first": _make_jump_cross_section_fields(
             selected=selected,
             object_layers=object_layers,
+            raw_root=raw_root,
             filter_root=filter_root,
             half_width_deg=half_width_deg,
             jump_from_depth_index=selected.jump_from_depth_index if selected.has_abrupt_jump else None,
@@ -881,6 +1133,7 @@ def _make_cross_section_fields(
         "second": _make_jump_cross_section_fields(
             selected=selected,
             object_layers=object_layers,
+            raw_root=raw_root,
             filter_root=filter_root,
             half_width_deg=half_width_deg,
             jump_from_depth_index=selected.second_jump_from_depth_index if selected.has_second_abrupt_jump else None,
