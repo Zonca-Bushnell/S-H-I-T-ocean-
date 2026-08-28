@@ -72,14 +72,13 @@ def _load_catalog(results_root: Path, shape_dir_name: str) -> tuple[pd.DataFrame
     return centers, shape
 
 
-def _choose_object(
+def _candidate_objects(
     centers: pd.DataFrame,
     shape: pd.DataFrame,
     preferred_shapes: set[str],
     min_layers: int,
-    abrupt_threshold_over_R: float,
     year_limit: int | None,
-) -> tuple[SelectedObject, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     shape = shape[shape["shape_class"].astype(str).isin(preferred_shapes)].copy()
     if shape.empty:
         raise ValueError(f"No shape tracks found for {sorted(preferred_shapes)}")
@@ -145,8 +144,71 @@ def _choose_object(
     if candidates.empty:
         raise ValueError("No candidate object-days with enough layers")
     candidates = candidates.sort_values(["jump_distance_over_R", "n_layers"], ascending=[False, False])
-    best = candidates.iloc[0]
-    selected = SelectedObject(
+    return allowed, candidates
+
+
+def _selected_from_row(row: pd.Series, abrupt_threshold_over_R: float) -> SelectedObject:
+    return SelectedObject(
+        track3d_id=int(row["track3d_id"]),
+        eddy3d_object_id=int(row["eddy3d_object_id"]),
+        date=str(row["date"]),
+        polarity=str(row["polarity"]),
+        shape_class=str(row["shape_class"]),
+        radius_m=float(row["radius_m"]),
+        n_layers=int(row["n_layers"]),
+        jump_from_depth_index=int(row["jump_from_depth_index"]) if int(row["jump_from_depth_index"]) >= 0 else None,
+        jump_to_depth_index=int(row["jump_to_depth_index"]) if int(row["jump_to_depth_index"]) >= 0 else None,
+        jump_from_depth_m=float(row["jump_from_depth_m"]) if np.isfinite(float(row["jump_from_depth_m"])) else None,
+        jump_to_depth_m=float(row["jump_to_depth_m"]) if np.isfinite(float(row["jump_to_depth_m"])) else None,
+        jump_distance_km=float(row["jump_distance_km"]),
+        jump_distance_over_R=float(row["jump_distance_over_R"]),
+        has_abrupt_jump=bool(float(row["jump_distance_over_R"]) >= abrupt_threshold_over_R),
+        second_jump_from_depth_index=int(row["second_jump_from_depth_index"]) if int(row["second_jump_from_depth_index"]) >= 0 else None,
+        second_jump_to_depth_index=int(row["second_jump_to_depth_index"]) if int(row["second_jump_to_depth_index"]) >= 0 else None,
+        second_jump_from_depth_m=float(row["second_jump_from_depth_m"]) if np.isfinite(float(row["second_jump_from_depth_m"])) else None,
+        second_jump_to_depth_m=float(row["second_jump_to_depth_m"]) if np.isfinite(float(row["second_jump_to_depth_m"])) else None,
+        second_jump_distance_km=float(row["second_jump_distance_km"]) if np.isfinite(float(row["second_jump_distance_km"])) else np.nan,
+        second_jump_distance_over_R=float(row["second_jump_distance_over_R"]) if np.isfinite(float(row["second_jump_distance_over_R"])) else np.nan,
+        has_second_abrupt_jump=bool(np.isfinite(float(row["second_jump_distance_over_R"])) and float(row["second_jump_distance_over_R"]) >= abrupt_threshold_over_R),
+    )
+
+
+def _choose_object(
+    centers: pd.DataFrame,
+    shape: pd.DataFrame,
+    preferred_shapes: set[str],
+    min_layers: int,
+    abrupt_threshold_over_R: float,
+    year_limit: int | None,
+) -> tuple[SelectedObject, pd.DataFrame, pd.DataFrame]:
+    allowed, candidates = _candidate_objects(centers, shape, preferred_shapes, min_layers, year_limit)
+    selected = _selected_from_row(candidates.iloc[0], abrupt_threshold_over_R)
+    obj = allowed[allowed["eddy3d_object_id"].astype(int).eq(selected.eddy3d_object_id)].sort_values("depth_index").copy()
+    track = centers[centers["track3d_id"].astype(int).eq(selected.track3d_id)].copy()
+    return selected, obj, track
+
+
+def _choose_objects(
+    centers: pd.DataFrame,
+    shape: pd.DataFrame,
+    preferred_shapes: set[str],
+    min_layers: int,
+    abrupt_threshold_over_R: float,
+    year_limit: int | None,
+    max_examples: int,
+) -> list[tuple[SelectedObject, pd.DataFrame, pd.DataFrame]]:
+    allowed, candidates = _candidate_objects(centers, shape, preferred_shapes, min_layers, year_limit)
+    chosen: list[tuple[SelectedObject, pd.DataFrame, pd.DataFrame]] = []
+    for _, row in candidates.head(max_examples).iterrows():
+        selected = _selected_from_row(row, abrupt_threshold_over_R)
+        obj = allowed[allowed["eddy3d_object_id"].astype(int).eq(selected.eddy3d_object_id)].sort_values("depth_index").copy()
+        track = centers[centers["track3d_id"].astype(int).eq(selected.track3d_id)].copy()
+        chosen.append((selected, obj, track))
+    return chosen
+
+
+def _legacy_selected_from_row(best: pd.Series, abrupt_threshold_over_R: float) -> SelectedObject:
+    return SelectedObject(
         track3d_id=int(best["track3d_id"]),
         eddy3d_object_id=int(best["eddy3d_object_id"]),
         date=str(best["date"]),
@@ -169,9 +231,6 @@ def _choose_object(
         second_jump_distance_over_R=float(best["second_jump_distance_over_R"]) if np.isfinite(float(best["second_jump_distance_over_R"])) else np.nan,
         has_second_abrupt_jump=bool(np.isfinite(float(best["second_jump_distance_over_R"])) and float(best["second_jump_distance_over_R"]) >= abrupt_threshold_over_R),
     )
-    obj = allowed[allowed["eddy3d_object_id"].astype(int).eq(selected.eddy3d_object_id)].sort_values("depth_index").copy()
-    track = centers[centers["track3d_id"].astype(int).eq(selected.track3d_id)].copy()
-    return selected, obj, track
 
 
 def _window_indices(values: np.ndarray, center: float, half_width: float) -> np.ndarray:
@@ -762,6 +821,33 @@ def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
     pd.DataFrame([payload]).to_csv(output_dir / "selected_object_metadata.csv", index=False)
 
 
+def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, object]:
+    return {
+        "eddy3d_object_id": selected.eddy3d_object_id,
+        "track3d_id": selected.track3d_id,
+        "date": selected.date,
+        "polarity": selected.polarity,
+        "shape_class": selected.shape_class,
+        "n_layers": selected.n_layers,
+        "radius_m": selected.radius_m,
+        "max_jump_distance_km": selected.jump_distance_km,
+        "max_jump_distance_over_R": selected.jump_distance_over_R,
+        "jump_from_depth_index": selected.jump_from_depth_index,
+        "jump_to_depth_index": selected.jump_to_depth_index,
+        "jump_from_depth_m": selected.jump_from_depth_m,
+        "jump_to_depth_m": selected.jump_to_depth_m,
+        "has_abrupt_jump": selected.has_abrupt_jump,
+        "second_jump_distance_km": selected.second_jump_distance_km,
+        "second_jump_distance_over_R": selected.second_jump_distance_over_R,
+        "second_jump_from_depth_index": selected.second_jump_from_depth_index,
+        "second_jump_to_depth_index": selected.second_jump_to_depth_index,
+        "second_jump_from_depth_m": selected.second_jump_from_depth_m,
+        "second_jump_to_depth_m": selected.second_jump_to_depth_m,
+        "has_second_abrupt_jump": selected.has_second_abrupt_jump,
+        "output_dir": str(output_dir),
+    }
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot one original eddy 9-panel vertical discontinuity diagnostic.")
     parser.add_argument("--results-root", type=Path, default=Path("/root/autodl-fs/kuroshiou/result_boundary_monotonic"))
@@ -774,30 +860,65 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--abrupt-threshold-over-r", type=float, default=0.15)
     parser.add_argument("--half-width-deg", type=float, default=2.0)
     parser.add_argument("--year-limit", type=int, default=None)
+    parser.add_argument("--max-examples", type=int, default=1, help="Number of ranked original eddy object-days to plot.")
     return parser
 
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
     centers, shape_tracks = _load_catalog(args.results_root, args.shape_dir_name)
-    selected, object_layers, track_layers = _choose_object(
+    if args.max_examples <= 1:
+        selected, object_layers, track_layers = _choose_object(
+            centers,
+            shape_tracks,
+            preferred_shapes=_format_shape_list(args.preferred_shapes),
+            min_layers=args.min_layers,
+            abrupt_threshold_over_R=args.abrupt_threshold_over_r,
+            year_limit=args.year_limit,
+        )
+        fields = _make_cross_section_fields(
+            selected,
+            object_layers,
+            args.raw_root,
+            args.filter_root,
+            args.half_width_deg,
+        )
+        _write_metadata(selected, args.output_dir)
+        _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir)
+        print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
+        return
+
+    selections = _choose_objects(
         centers,
         shape_tracks,
         preferred_shapes=_format_shape_list(args.preferred_shapes),
         min_layers=args.min_layers,
         abrupt_threshold_over_R=args.abrupt_threshold_over_r,
         year_limit=args.year_limit,
+        max_examples=args.max_examples,
     )
-    fields = _make_cross_section_fields(
-        selected,
-        object_layers,
-        args.raw_root,
-        args.filter_root,
-        args.half_width_deg,
+    rows: list[dict[str, object]] = []
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for idx, (selected, object_layers, track_layers) in enumerate(selections, start=1):
+        child = args.output_dir / f"example_{idx:03d}_object_{selected.eddy3d_object_id}_track_{selected.track3d_id}_{selected.date}"
+        fields = _make_cross_section_fields(
+            selected,
+            object_layers,
+            args.raw_root,
+            args.filter_root,
+            args.half_width_deg,
+        )
+        _write_metadata(selected, child)
+        _plot_9panel(selected, object_layers, track_layers, fields, child)
+        rows.append(_metadata_payload(selected, child))
+        print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
+
+    summary = pd.DataFrame(rows)
+    summary.to_csv(args.output_dir / "selected_objects_metadata.csv", index=False)
+    (args.output_dir / "selected_objects_metadata.json").write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
-    _write_metadata(selected, args.output_dir)
-    _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir)
-    print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
