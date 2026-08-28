@@ -346,6 +346,17 @@ def _vertical_gradient_w(w: np.ndarray, depth: np.ndarray) -> np.ndarray:
     return np.gradient(w, depth, axis=0, edge_order=1)
 
 
+def _interp_section(field: np.ndarray, x_m: np.ndarray, y_m: np.ndarray, x_line_km: np.ndarray, y_line_km: np.ndarray) -> np.ndarray:
+    from scipy.interpolate import RegularGridInterpolator
+
+    points = np.column_stack([y_line_km * 1000.0, x_line_km * 1000.0])
+    section = np.full((field.shape[0], len(x_line_km)), np.nan, dtype="f8")
+    for k in range(field.shape[0]):
+        interp = RegularGridInterpolator((y_m, x_m), field[k], bounds_error=False, fill_value=np.nan)
+        section[k] = interp(points)
+    return section
+
+
 def _sigma0(theta: np.ndarray, salinity: np.ndarray) -> tuple[np.ndarray, str]:
     try:
         import gsw
@@ -521,6 +532,7 @@ def _plot_9panel(
     track_layers: pd.DataFrame,
     fields: dict[str, dict[str, np.ndarray] | None],
     output_dir: Path,
+    output_name_stem: str = "original_eddy_discontinuity_9panel",
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -629,8 +641,8 @@ def _plot_9panel(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_dir / "original_eddy_discontinuity_9panel.png", dpi=220)
-    fig.savefig(output_dir / "original_eddy_discontinuity_9panel.pdf")
+    fig.savefig(output_dir / f"{output_name_stem}.png", dpi=220)
+    fig.savefig(output_dir / f"{output_name_stem}.pdf")
     plt.close(fig)
 
 
@@ -655,6 +667,7 @@ def _make_jump_cross_section_fields(
     w_shear_depth_padding_layers: int,
     w_shear_half_width_r: float,
     w_shear_min_half_width_km: float,
+    w_section_mode: str,
 ) -> dict[str, np.ndarray] | None:
     if jump_to_depth_index is None:
         return None
@@ -711,6 +724,7 @@ def _make_jump_cross_section_fields(
         depth_padding_layers=w_shear_depth_padding_layers,
         half_width_r=w_shear_half_width_r,
         min_half_width_km=w_shear_min_half_width_km,
+        section_mode=w_section_mode,
     )
 
     return {
@@ -737,6 +751,7 @@ def _make_vertical_w_section(
     depth_padding_layers: int,
     half_width_r: float,
     min_half_width_km: float,
+    section_mode: str,
 ) -> dict[str, np.ndarray]:
     lon = column["longitude"]
     lat = column["latitude"]
@@ -774,11 +789,30 @@ def _make_vertical_w_section(
         target_x = float(np.nanmedian(center_x)) if center_x.size else 0.0
         target_y = float(np.nanmedian(center_y)) if center_y.size else 0.0
 
-    if abs(dx) >= abs(dy):
+    if section_mode == "normal":
+        norm = float(np.hypot(dx, dy))
+        if not np.isfinite(norm) or norm <= 1e-9:
+            ex, ey = 1.0, 0.0
+        else:
+            ex, ey = -dy / norm, dx / norm
+        mid_x = 0.5 * (p0[0] + p1[0]) if p0 is not None and p1 is not None else target_x
+        mid_y = 0.5 * (p0[1] + p1[1]) if p0 is not None and p1 is not None else target_y
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        x_line = mid_x + section_coord * ex
+        y_line = mid_y + section_coord * ey
+        section = _interp_section(w, x_m, y_m, x_line, y_line)
+        dwdz_section = _interp_section(dwdz, x_m, y_m, x_line, y_line)
+        center_coord = (center_x - mid_x) * ex + (center_y - mid_y) * ey
+        center_target = 0.0
+        axis = "jump-normal through center-pair midpoint"
+    elif abs(dx) >= abs(dy):
         iy = int(np.nanargmin(np.abs(y_m / 1000.0 - target_y)))
         section = w[:, iy, :]
+        dwdz_section = dwdz[:, iy, :]
         section_coord = x_m / 1000.0
         center_coord = center_x
+        center_target = target_x
         axis = f"x-z at y={y_m[iy] / 1000.0:.1f} km"
     else:
         ix = int(np.nanargmin(np.abs(x_m / 1000.0 - target_x)))
@@ -788,10 +822,6 @@ def _make_vertical_w_section(
         center_coord = center_y
         axis = f"y-z at x={x_m[ix] / 1000.0:.1f} km"
         center_target = target_y
-
-    if abs(dx) >= abs(dy):
-        dwdz_section = dwdz[:, iy, :]
-        center_target = target_x
 
     if jump_from_depth_index is not None and jump_to_depth_index is not None:
         k_min = max(0, min(jump_from_depth_index, jump_to_depth_index) - max(0, depth_padding_layers))
@@ -832,6 +862,7 @@ def _make_cross_section_fields(
     w_shear_depth_padding_layers: int,
     w_shear_half_width_r: float,
     w_shear_min_half_width_km: float,
+    w_section_mode: str,
 ) -> dict[str, dict[str, np.ndarray] | None]:
     del raw_root
     return {
@@ -845,6 +876,7 @@ def _make_cross_section_fields(
             w_shear_depth_padding_layers=w_shear_depth_padding_layers,
             w_shear_half_width_r=w_shear_half_width_r,
             w_shear_min_half_width_km=w_shear_min_half_width_km,
+            w_section_mode=w_section_mode,
         ),
         "second": _make_jump_cross_section_fields(
             selected=selected,
@@ -856,6 +888,7 @@ def _make_cross_section_fields(
             w_shear_depth_padding_layers=w_shear_depth_padding_layers,
             w_shear_half_width_r=w_shear_half_width_r,
             w_shear_min_half_width_km=w_shear_min_half_width_km,
+            w_section_mode=w_section_mode,
         ),
     }
 
@@ -916,6 +949,60 @@ def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, o
     }
 
 
+def _selected_from_metadata_row(row: pd.Series, abrupt_threshold_over_R: float) -> SelectedObject:
+    def maybe_int(name: str) -> int | None:
+        value = row.get(name, np.nan)
+        return int(value) if pd.notna(value) and int(value) >= 0 else None
+
+    def maybe_float(name: str) -> float | None:
+        value = row.get(name, np.nan)
+        return float(value) if pd.notna(value) and np.isfinite(float(value)) else None
+
+    jump_r = float(row.get("max_jump_distance_over_R", row.get("jump_distance_over_R", np.nan)))
+    jump2_r = float(row.get("second_jump_distance_over_R", np.nan))
+    return SelectedObject(
+        track3d_id=int(row["track3d_id"]),
+        eddy3d_object_id=int(row["eddy3d_object_id"]),
+        date=str(row["date"]),
+        polarity=str(row["polarity"]),
+        shape_class=str(row["shape_class"]),
+        radius_m=float(row["radius_m"]),
+        n_layers=int(row["n_layers"]),
+        jump_from_depth_index=maybe_int("jump_from_depth_index"),
+        jump_to_depth_index=maybe_int("jump_to_depth_index"),
+        jump_from_depth_m=maybe_float("jump_from_depth_m"),
+        jump_to_depth_m=maybe_float("jump_to_depth_m"),
+        jump_distance_km=float(row.get("max_jump_distance_km", row.get("jump_distance_km", np.nan))),
+        jump_distance_over_R=jump_r,
+        has_abrupt_jump=bool(pd.notna(jump_r) and np.isfinite(jump_r) and jump_r >= abrupt_threshold_over_R),
+        second_jump_from_depth_index=maybe_int("second_jump_from_depth_index"),
+        second_jump_to_depth_index=maybe_int("second_jump_to_depth_index"),
+        second_jump_from_depth_m=maybe_float("second_jump_from_depth_m"),
+        second_jump_to_depth_m=maybe_float("second_jump_to_depth_m"),
+        second_jump_distance_km=float(row.get("second_jump_distance_km", np.nan)),
+        second_jump_distance_over_R=jump2_r,
+        has_second_abrupt_jump=bool(pd.notna(jump2_r) and np.isfinite(jump2_r) and jump2_r >= abrupt_threshold_over_R),
+    )
+
+
+def _selections_from_metadata(
+    metadata_path: Path,
+    centers: pd.DataFrame,
+    abrupt_threshold_over_R: float,
+) -> list[tuple[SelectedObject, pd.DataFrame, pd.DataFrame, str]]:
+    metadata = pd.read_csv(metadata_path)
+    selections: list[tuple[SelectedObject, pd.DataFrame, pd.DataFrame, str]] = []
+    for idx, row in metadata.iterrows():
+        selected = _selected_from_metadata_row(row, abrupt_threshold_over_R)
+        object_layers = centers[centers["eddy3d_object_id"].astype(int).eq(selected.eddy3d_object_id)].sort_values("depth_index").copy()
+        track_layers = centers[centers["track3d_id"].astype(int).eq(selected.track3d_id)].copy()
+        basename = Path(str(row.get("output_dir", ""))).name
+        if not basename:
+            basename = f"example_{idx + 1:03d}_object_{selected.eddy3d_object_id}_track_{selected.track3d_id}_{selected.date}"
+        selections.append((selected, object_layers, track_layers, basename))
+    return selections
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot one original eddy 9-panel vertical discontinuity diagnostic.")
     parser.add_argument("--results-root", type=Path, default=Path("/root/autodl-fs/kuroshiou/result_boundary_monotonic"))
@@ -932,13 +1019,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
     parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
+    parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
+    parser.add_argument("--selected-metadata", type=Path, default=None, help="Reuse a selected_objects_metadata.csv object list instead of re-ranking candidates.")
+    parser.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     return parser
 
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
     centers, shape_tracks = _load_catalog(args.results_root, args.shape_dir_name)
-    if args.max_examples <= 1:
+    if args.selected_metadata is None and args.max_examples <= 1:
         selected, object_layers, track_layers = _choose_object(
             centers,
             shape_tracks,
@@ -956,25 +1046,33 @@ def main() -> None:
             args.w_shear_depth_padding_layers,
             args.w_shear_half_width_r,
             args.w_shear_min_half_width_km,
+            args.w_section_mode,
         )
         _write_metadata(selected, args.output_dir)
-        _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir)
+        _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir, args.output_name_stem)
         print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
         return
 
-    selections = _choose_objects(
-        centers,
-        shape_tracks,
-        preferred_shapes=_format_shape_list(args.preferred_shapes),
-        min_layers=args.min_layers,
-        abrupt_threshold_over_R=args.abrupt_threshold_over_r,
-        year_limit=args.year_limit,
-        max_examples=args.max_examples,
-    )
+    if args.selected_metadata is not None:
+        selections = _selections_from_metadata(args.selected_metadata, centers, args.abrupt_threshold_over_r)
+    else:
+        selections = [
+            (*item, "")
+            for item in _choose_objects(
+                centers,
+                shape_tracks,
+                preferred_shapes=_format_shape_list(args.preferred_shapes),
+                min_layers=args.min_layers,
+                abrupt_threshold_over_R=args.abrupt_threshold_over_r,
+                year_limit=args.year_limit,
+                max_examples=args.max_examples,
+            )
+        ]
     rows: list[dict[str, object]] = []
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for idx, (selected, object_layers, track_layers) in enumerate(selections, start=1):
-        child = args.output_dir / f"example_{idx:03d}_object_{selected.eddy3d_object_id}_track_{selected.track3d_id}_{selected.date}"
+    for idx, (selected, object_layers, track_layers, basename) in enumerate(selections, start=1):
+        child_name = basename or f"example_{idx:03d}_object_{selected.eddy3d_object_id}_track_{selected.track3d_id}_{selected.date}"
+        child = args.output_dir / child_name
         fields = _make_cross_section_fields(
             selected,
             object_layers,
@@ -984,9 +1082,10 @@ def main() -> None:
             args.w_shear_depth_padding_layers,
             args.w_shear_half_width_r,
             args.w_shear_min_half_width_km,
+            args.w_section_mode,
         )
         _write_metadata(selected, child)
-        _plot_9panel(selected, object_layers, track_layers, fields, child)
+        _plot_9panel(selected, object_layers, track_layers, fields, child, args.output_name_stem)
         rows.append(_metadata_payload(selected, child))
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
 
