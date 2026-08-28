@@ -88,7 +88,7 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
         print(f"[post] filter root: {args.filter_root}")
         print(
             "[dry-run] analyze jump-wshear relation for "
-            f"shapes={args.shapes}, output={args.output_dir}"
+            f"shapes={args.shapes}, section_modes={args.section_modes}, output={args.output_dir}"
         )
         return
     from .discontinuity_relation import analyze_jump_wshear_relation as run
@@ -104,6 +104,7 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
         depth_padding_layers=args.w_shear_depth_padding_layers,
         half_width_r=args.w_shear_half_width_r,
         min_half_width_km=args.w_shear_min_half_width_km,
+        section_modes=args.section_modes,
         year_limit=args.year_limit,
         resume=args.resume,
     )
@@ -153,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     relation.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
     relation.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     relation.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
+    relation.add_argument("--section-modes", default="parallel")
     relation.add_argument("--year-limit", type=int, default=None)
     relation.add_argument("--chunk-days", type=int, default=14)
     relation.add_argument("--resume", action="store_true")

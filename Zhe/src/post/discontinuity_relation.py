@@ -158,7 +158,7 @@ def _read_velocity_column(path: Path, date: str, lon0: float, lat0: float, half_
     return {"lon": lon[ix], "lat": lat[iy], "depth": depth, "u": u, "v": v}
 
 
-def _section_for_jump(jump: JumpCandidate, column: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _parallel_axis_aligned_section(jump: JumpCandidate, column: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     x_m, y_m = _relative_xy(column["lon"], column["lat"], jump.surface_lon, jump.surface_lat)
     w = _vertical_velocity_proxy(column["u"], column["v"], column["depth"], x_m, y_m)
     dwdz = np.gradient(w, column["depth"], axis=0, edge_order=1) if len(column["depth"]) > 1 else np.zeros_like(w)
@@ -179,6 +179,79 @@ def _section_for_jump(jump: JumpCandidate, column: dict[str, np.ndarray]) -> dic
     return {"coord": coord, "depth": column["depth"], "w": w_sec, "dwdz": dwdz_sec, "target": np.array(target)}
 
 
+def _interpolate_vertical_section(
+    field: np.ndarray,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+    x_line_km: np.ndarray,
+    y_line_km: np.ndarray,
+) -> np.ndarray:
+    from scipy.interpolate import RegularGridInterpolator
+
+    points = np.column_stack([y_line_km * 1000.0, x_line_km * 1000.0])
+    section = np.full((field.shape[0], len(x_line_km)), np.nan, dtype="f8")
+    for k in range(field.shape[0]):
+        interp = RegularGridInterpolator((y_m, x_m), field[k], bounds_error=False, fill_value=np.nan)
+        section[k] = interp(points)
+    return section
+
+
+def _normal_interpolated_section(jump: JumpCandidate, column: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    x_m, y_m = _relative_xy(column["lon"], column["lat"], jump.surface_lon, jump.surface_lat)
+    w = _vertical_velocity_proxy(column["u"], column["v"], column["depth"], x_m, y_m)
+    dwdz = np.gradient(w, column["depth"], axis=0, edge_order=1) if len(column["depth"]) > 1 else np.zeros_like(w)
+    dx = jump.to_x_km - jump.from_x_km
+    dy = jump.to_y_km - jump.from_y_km
+    norm = float(np.hypot(dx, dy))
+    if not np.isfinite(norm) or norm <= 1e-9:
+        ex, ey = 1.0, 0.0
+    else:
+        ex, ey = -dy / norm, dx / norm
+    mid_x = 0.5 * (jump.from_x_km + jump.to_x_km)
+    mid_y = 0.5 * (jump.from_y_km + jump.to_y_km)
+    max_half = max(float(jump.radius_m) / 1000.0 * 2.5, 150.0)
+    coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+    x_line = mid_x + coord * ex
+    y_line = mid_y + coord * ey
+    return {
+        "coord": coord,
+        "depth": column["depth"],
+        "w": _interpolate_vertical_section(w, x_m, y_m, x_line, y_line),
+        "dwdz": _interpolate_vertical_section(dwdz, x_m, y_m, x_line, y_line),
+        "target": np.array(0.0),
+    }
+
+
+def _section_for_jump(jump: JumpCandidate, column: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return _parallel_axis_aligned_section(jump, column)
+
+
+METRIC_FIELDS = (
+    "local_abs_dwdz_peak",
+    "local_abs_dwdz_p90",
+    "local_abs_dwdz_mean",
+    "background_abs_dwdz_median",
+    "shear_enrichment_ratio",
+    "sign_change_fraction",
+    "edge_alignment_score",
+    "qualitative_relation",
+)
+
+
+def _parse_section_modes(section_modes: str) -> tuple[str, ...]:
+    aliases = {"parallel_axis_aligned": "parallel", "normal_interpolated": "normal"}
+    modes: list[str] = []
+    for raw in section_modes.split(","):
+        mode = aliases.get(raw.strip(), raw.strip())
+        if not mode:
+            continue
+        if mode not in {"parallel", "normal"}:
+            raise ValueError(f"Unsupported section mode: {raw}")
+        if mode not in modes:
+            modes.append(mode)
+    return tuple(modes or ["parallel"])
+
+
 def _jump_metrics(jump: JumpCandidate, section: dict[str, np.ndarray], depth_padding_layers: int, half_width_r: float, min_half_width_km: float) -> dict[str, object]:
     coord = section["coord"]
     depth = section["depth"]
@@ -196,7 +269,7 @@ def _jump_metrics(jump: JumpCandidate, section: dict[str, np.ndarray], depth_pad
     local_f = local[np.isfinite(local)]
     back_f = background[np.isfinite(background)]
     if local_f.size < 10:
-        return {**jump.__dict__, "qualitative_relation": "insufficient_data"}
+        return {"qualitative_relation": "insufficient_data"}
     back_med = float(np.nanmedian(back_f)) if back_f.size else np.nan
     p90 = float(np.nanpercentile(local_f, 90))
     peak = float(np.nanmax(local_f))
@@ -219,7 +292,6 @@ def _jump_metrics(jump: JumpCandidate, section: dict[str, np.ndarray], depth_pad
     else:
         relation = "not_obvious_from_wshear"
     return {
-        **jump.__dict__,
         "local_abs_dwdz_peak": peak,
         "local_abs_dwdz_p90": p90,
         "local_abs_dwdz_mean": mean,
@@ -229,6 +301,68 @@ def _jump_metrics(jump: JumpCandidate, section: dict[str, np.ndarray], depth_pad
         "edge_alignment_score": edge_score,
         "qualitative_relation": relation,
     }
+
+
+def _prefixed_metrics(prefix: str, metrics: dict[str, object]) -> dict[str, object]:
+    return {f"{prefix}_{field}": metrics.get(field, np.nan) for field in METRIC_FIELDS}
+
+
+def _relation_agreement(row: dict[str, object]) -> str:
+    parallel = row.get("parallel_qualitative_relation")
+    normal = row.get("normal_qualitative_relation")
+    if parallel in (None, "not_computed") or normal in (None, "not_computed"):
+        return "not_computed"
+    if parallel == "insufficient_data" or normal == "insufficient_data":
+        return "insufficient_data"
+    if parallel == normal:
+        return "same"
+    if normal == "strong_edge_related" and parallel != "strong_edge_related":
+        return "normal_stronger"
+    if parallel == "strong_edge_related" and normal != "strong_edge_related":
+        return "parallel_stronger"
+    return "different_nonstrong"
+
+
+def _metrics_for_jump(
+    jump: JumpCandidate,
+    column: dict[str, np.ndarray],
+    section_modes: tuple[str, ...],
+    depth_padding_layers: int,
+    half_width_r: float,
+    min_half_width_km: float,
+) -> dict[str, object]:
+    row: dict[str, object] = dict(jump.__dict__)
+    if "parallel" in section_modes:
+        metrics = _jump_metrics(jump, _parallel_axis_aligned_section(jump, column), depth_padding_layers, half_width_r, min_half_width_km)
+        row.update(_prefixed_metrics("parallel", metrics))
+    if "normal" in section_modes:
+        metrics = _jump_metrics(jump, _normal_interpolated_section(jump, column), depth_padding_layers, half_width_r, min_half_width_km)
+        row.update(_prefixed_metrics("normal", metrics))
+    for prefix in ("parallel", "normal"):
+        if prefix not in section_modes:
+            row.update(_prefixed_metrics(prefix, {"qualitative_relation": "not_computed"}))
+
+    p90_parallel = row.get("parallel_local_abs_dwdz_p90", np.nan)
+    p90_normal = row.get("normal_local_abs_dwdz_p90", np.nan)
+    enrich_parallel = row.get("parallel_shear_enrichment_ratio", np.nan)
+    enrich_normal = row.get("normal_shear_enrichment_ratio", np.nan)
+    row["normal_minus_parallel_enrichment"] = (
+        float(enrich_normal) - float(enrich_parallel)
+        if np.isfinite(enrich_normal) and np.isfinite(enrich_parallel)
+        else np.nan
+    )
+    row["normal_to_parallel_p90_ratio"] = (
+        float(p90_normal) / float(p90_parallel)
+        if np.isfinite(p90_normal) and np.isfinite(p90_parallel) and float(p90_parallel) > 0
+        else np.nan
+    )
+    row["relation_agreement_class"] = _relation_agreement(row)
+
+    # Backward-compatible aliases keep older plotting scripts usable.
+    source = "parallel" if "parallel" in section_modes else "normal"
+    for field in METRIC_FIELDS:
+        row[field] = row.get(f"{source}_{field}", np.nan)
+    return row
 
 
 def _safe_corr(a: pd.Series, b: pd.Series) -> float:
@@ -245,22 +379,46 @@ def _write_tables(top: pd.DataFrame, all_jumps: pd.DataFrame, output_dir: Path) 
     all_jumps.to_parquet(output_dir / "coherent_all_layer_jump_wshear.parquet", index=False)
     summary_rows = []
     for key, part in [("top1", top[top["jump_rank"].eq(1)]), ("top2", top)]:
-        counts = part["qualitative_relation"].value_counts(dropna=False).to_dict()
-        summary_rows.append(
-            {
-                "subset": key,
-                "n_jumps": int(len(part)),
-                "n_objectdays": int(part["eddy3d_object_id"].nunique()),
-                "n_tracks": int(part["track3d_id"].nunique()),
-                "corr_jump_over_R_vs_shear_enrichment": _safe_corr(part["jump_distance_over_R"], part["shear_enrichment_ratio"]),
-                "corr_jump_over_R_vs_abs_dwdz_p90": _safe_corr(part["jump_distance_over_R"], part["local_abs_dwdz_p90"]),
-                "strong_edge_related_fraction": float((part["qualitative_relation"] == "strong_edge_related").mean()) if len(part) else np.nan,
-                "weak_or_broad_shear_related_fraction": float((part["qualitative_relation"] == "weak_or_broad_shear_related").mean()) if len(part) else np.nan,
-                "not_obvious_fraction": float((part["qualitative_relation"] == "not_obvious_from_wshear").mean()) if len(part) else np.nan,
-                "insufficient_data_fraction": float((part["qualitative_relation"] == "insufficient_data").mean()) if len(part) else np.nan,
-                "relation_counts_json": json.dumps(counts, ensure_ascii=False),
-            }
-        )
+        for mode in ("parallel", "normal"):
+            relation_col = f"{mode}_qualitative_relation"
+            enrichment_col = f"{mode}_shear_enrichment_ratio"
+            p90_col = f"{mode}_local_abs_dwdz_p90"
+            if relation_col not in part.columns:
+                continue
+            counts = part[relation_col].value_counts(dropna=False).to_dict()
+            summary_rows.append(
+                {
+                    "subset": key,
+                    "section_mode": mode,
+                    "n_jumps": int(len(part)),
+                    "n_objectdays": int(part["eddy3d_object_id"].nunique()),
+                    "n_tracks": int(part["track3d_id"].nunique()),
+                    "corr_jump_over_R_vs_shear_enrichment": _safe_corr(part["jump_distance_over_R"], part[enrichment_col]),
+                    "corr_jump_over_R_vs_abs_dwdz_p90": _safe_corr(part["jump_distance_over_R"], part[p90_col]),
+                    "strong_edge_related_fraction": float((part[relation_col] == "strong_edge_related").mean()) if len(part) else np.nan,
+                    "weak_or_broad_shear_related_fraction": float((part[relation_col] == "weak_or_broad_shear_related").mean()) if len(part) else np.nan,
+                    "not_obvious_fraction": float((part[relation_col] == "not_obvious_from_wshear").mean()) if len(part) else np.nan,
+                    "insufficient_data_fraction": float((part[relation_col] == "insufficient_data").mean()) if len(part) else np.nan,
+                    "relation_counts_json": json.dumps(counts, ensure_ascii=False),
+                }
+            )
+        if {"normal_shear_enrichment_ratio", "parallel_shear_enrichment_ratio"}.issubset(part.columns):
+            agreement = part["relation_agreement_class"].value_counts(dropna=False).to_dict()
+            summary_rows.append(
+                {
+                    "subset": key,
+                    "section_mode": "parallel_vs_normal",
+                    "n_jumps": int(len(part)),
+                    "n_objectdays": int(part["eddy3d_object_id"].nunique()),
+                    "n_tracks": int(part["track3d_id"].nunique()),
+                    "median_normal_minus_parallel_enrichment": float(np.nanmedian(part["normal_minus_parallel_enrichment"])),
+                    "median_normal_to_parallel_p90_ratio": float(np.nanmedian(part["normal_to_parallel_p90_ratio"])),
+                    "relation_agreement_counts_json": json.dumps(agreement, ensure_ascii=False),
+                    "normal_stronger_fraction": float((part["relation_agreement_class"] == "normal_stronger").mean()),
+                    "parallel_stronger_fraction": float((part["relation_agreement_class"] == "parallel_stronger").mean()),
+                    "same_fraction": float((part["relation_agreement_class"] == "same").mean()),
+                }
+            )
     summary = pd.DataFrame(summary_rows)
     summary.to_csv(output_dir / "coherent_jump_wshear_relation_summary.csv", index=False)
     (output_dir / "coherent_jump_wshear_relation_summary.json").write_text(
@@ -284,6 +442,8 @@ def _scatter(ax, df: pd.DataFrame, x: str, y: str, title: str, ylabel: str) -> N
 def _plot_outputs(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) -> None:
     fig_dir = output_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
+    rel_order = ["strong_edge_related", "weak_or_broad_shear_related", "not_obvious_from_wshear", "insufficient_data"]
+
     fig, ax = plt.subplots(figsize=(7, 5))
     _scatter(ax, top, "jump_distance_over_R", "shear_enrichment_ratio", "Jump vs local |dw/dz| enrichment", "shear enrichment ratio")
     fig.tight_layout()
@@ -305,7 +465,6 @@ def _plot_outputs(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) ->
     plt.close(fig)
 
     depth_bins = np.arange(0, max(2100.0, float(np.nanmax(top["to_depth_m"])) + 100.0), 100.0)
-    rel_order = ["strong_edge_related", "weak_or_broad_shear_related", "not_obvious_from_wshear", "insufficient_data"]
     top["depth_bin_m"] = pd.cut(top["to_depth_m"], depth_bins, include_lowest=True)
     depth_rel = top.groupby(["depth_bin_m", "qualitative_relation"], observed=True).size().unstack(fill_value=0)
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -349,19 +508,105 @@ def _plot_outputs(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) ->
     fig.savefig(fig_dir / "coherent_polarity_comparison.png", dpi=200)
     plt.close(fig)
 
+    if {"parallel_shear_enrichment_ratio", "normal_shear_enrichment_ratio"}.issubset(top.columns):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        for polarity, part in top.groupby("polarity"):
+            ax.scatter(
+                part["parallel_shear_enrichment_ratio"],
+                part["normal_shear_enrichment_ratio"],
+                s=9,
+                alpha=0.35,
+                label=str(polarity),
+            )
+        finite = top[["parallel_shear_enrichment_ratio", "normal_shear_enrichment_ratio"]].replace([np.inf, -np.inf], np.nan)
+        limit = float(np.nanpercentile(finite.to_numpy(dtype="f8"), 98)) if np.isfinite(finite.to_numpy(dtype="f8")).any() else 1.0
+        limit = max(1.0, min(limit, 20.0))
+        ax.plot([0, limit], [0, limit], color="0.25", lw=1, ls="--")
+        ax.set_xlim(0, limit)
+        ax.set_ylim(0, limit)
+        ax.set_xlabel("parallel shear enrichment")
+        ax.set_ylabel("normal shear enrichment")
+        ax.set_title("Parallel vs normal |dw/dz| enrichment")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "parallel_vs_normal_shear_enrichment.png", dpi=200)
+        plt.close(fig)
+
+        matrix = pd.crosstab(top["parallel_qualitative_relation"], top["normal_qualitative_relation"]).reindex(index=rel_order, columns=rel_order, fill_value=0)
+        fig, ax = plt.subplots(figsize=(7, 6))
+        im = ax.imshow(matrix.to_numpy(), cmap="YlGnBu")
+        ax.set_xticks(np.arange(len(matrix.columns)), matrix.columns, rotation=35, ha="right", fontsize=8)
+        ax.set_yticks(np.arange(len(matrix.index)), matrix.index, fontsize=8)
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                ax.text(j, i, str(int(matrix.iat[i, j])), ha="center", va="center", fontsize=8)
+        ax.set_xlabel("normal relation")
+        ax.set_ylabel("parallel relation")
+        ax.set_title("Parallel vs normal qualitative relation matrix")
+        fig.colorbar(im, ax=ax, label="count")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "parallel_vs_normal_relation_matrix.png", dpi=200)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        _scatter(ax, top, "jump_distance_over_R", "normal_shear_enrichment_ratio", "Normal-section jump vs |dw/dz| enrichment", "normal shear enrichment ratio")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "normal_jump_over_R_vs_shear_enrichment.png", dpi=200)
+        plt.close(fig)
+
+        normal_depth_rel = top.groupby(["depth_bin_m", "normal_qualitative_relation"], observed=True).size().unstack(fill_value=0)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        normal_depth_rel.reindex(columns=rel_order, fill_value=0).plot(kind="bar", stacked=True, ax=ax, width=0.9)
+        ax.set_xlabel("jump lower depth bin (m)")
+        ax.set_ylabel("count")
+        ax.set_title("Normal-section qualitative relation by depth")
+        ax.tick_params(axis="x", labelsize=7, rotation=70)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "normal_qualitative_relation_by_depth.png", dpi=200)
+        plt.close(fig)
+
+        normal_pol = top.groupby(["polarity", "normal_qualitative_relation"]).size().unstack(fill_value=0)
+        fig, ax = plt.subplots(figsize=(7, 5))
+        normal_pol.reindex(columns=rel_order, fill_value=0).plot(kind="bar", stacked=True, ax=ax)
+        ax.set_ylabel("count")
+        ax.set_title("Normal edge-related classification by polarity")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "normal_edge_related_polarity_comparison.png", dpi=200)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        top.boxplot(column="normal_to_parallel_p90_ratio", by="depth_bin_m", ax=ax, rot=70)
+        ax.set_title("Normal / parallel |dw/dz| p90 ratio by depth")
+        fig.suptitle("")
+        ax.set_xlabel("jump lower depth bin (m)")
+        ax.set_ylabel("normal_to_parallel_p90_ratio")
+        ax.tick_params(axis="x", labelsize=7)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "normal_to_parallel_ratio_by_depth.png", dpi=200)
+        plt.close(fig)
+
 
 def _write_report(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) -> None:
     top1 = top[top["jump_rank"].eq(1)]
-    relation_counts = top["qualitative_relation"].value_counts()
-    strong_frac = float((top["qualitative_relation"] == "strong_edge_related").mean()) if len(top) else np.nan
-    depth_strong = top[top["qualitative_relation"].eq("strong_edge_related")]["to_depth_m"]
-    depth_text = "无足够 strong_edge_related 样本"
+    normal_available = "normal_qualitative_relation" in top.columns and not top["normal_qualitative_relation"].eq("not_computed").all()
+    main_prefix = "normal" if normal_available else "parallel"
+    relation_col = f"{main_prefix}_qualitative_relation"
+    enrichment_col = f"{main_prefix}_shear_enrichment_ratio"
+    p90_col = f"{main_prefix}_local_abs_dwdz_p90"
+    relation_counts = top[relation_col].value_counts()
+    strong_frac = float((top[relation_col] == "strong_edge_related").mean()) if len(top) else np.nan
+    depth_strong = top[top[relation_col].eq("strong_edge_related")]["to_depth_m"]
+    depth_text = "没有足够的 strong_edge_related 样本"
     if len(depth_strong):
         depth_text = f"{float(depth_strong.quantile(0.25)):.0f}-{float(depth_strong.quantile(0.75)):.0f} m 四分位区间"
+
     lines = [
         "# Coherent 全体间断点与垂直速度剪切关系诊断",
         "",
-        "本诊断只使用 boundary-monotonic、strict-contiguous、life30 的 coherent object-day。图表不是代表涡旋，而是原始识别对象的全体关系统计。",
+        "本诊断只使用 boundary-monotonic、strict-contiguous、life30 的 coherent object-day。它统计的是原始识别对象的间断点关系，不是代表涡旋。",
+        "",
+        "本版同时输出两种剖面：parallel 剖面近似沿中心跳变路径，normal 剖面沿 (-Delta y, Delta x) 方向并穿过上下两层中心中点。normal 剖面是判断“垂直速度剪切边界是否横切中心跳变”的主口径。",
         "",
         "## 样本量",
         f"- object-day 数：{int(top['eddy3d_object_id'].nunique())}",
@@ -369,9 +614,10 @@ def _write_report(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) ->
         f"- top-1 jump 数：{len(top1)}",
         f"- top-1/top-2 jump 总数：{len(top)}",
         "",
-        "## 定量关系",
-        f"- top-1/top-2 的 `J/R` 与 `shear_enrichment_ratio` 相关系数：{_safe_corr(top['jump_distance_over_R'], top['shear_enrichment_ratio']):.3f}",
-        f"- top-1/top-2 的 `J/R` 与 `local_abs_dwdz_p90` 相关系数：{_safe_corr(top['jump_distance_over_R'], top['local_abs_dwdz_p90']):.3f}",
+        "## 主口径定量关系",
+        f"- 主口径：{main_prefix}",
+        f"- top-1/top-2 的 `J/R` 与 `{enrichment_col}` 相关系数：{_safe_corr(top['jump_distance_over_R'], top[enrichment_col]):.3f}",
+        f"- top-1/top-2 的 `J/R` 与 `{p90_col}` 相关系数：{_safe_corr(top['jump_distance_over_R'], top[p90_col]):.3f}",
         "",
         "## 定性关系",
         f"- strong_edge_related 比例：{strong_frac:.3f}",
@@ -380,15 +626,30 @@ def _write_report(top: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) ->
     ]
     for name, count in relation_counts.items():
         lines.append(f"  - {name}: {int(count)}")
+    if {"normal_shear_enrichment_ratio", "parallel_shear_enrichment_ratio"}.issubset(top.columns):
+        agreement_counts = top["relation_agreement_class"].value_counts()
+        lines.extend(
+            [
+                "",
+                "## Parallel 与 Normal 对比",
+                f"- normal - parallel 的剪切增强中位差：{float(np.nanmedian(top['normal_minus_parallel_enrichment'])):.3f}",
+                f"- normal / parallel 的 |dw/dz| p90 中位比：{float(np.nanmedian(top['normal_to_parallel_p90_ratio'])):.3f}",
+                "- 分类一致性计数：",
+            ]
+        )
+        for name, count in agreement_counts.items():
+            lines.append(f"  - {name}: {int(count)}")
     lines.extend(
         [
             "",
             "## 解释边界",
-            "这里的 `w_diag` 是由 30-180 天带通水平速度散度积分得到的连续方程诊断代理，不是直接观测垂直速度。",
-            "若大量 jump 被标记为 `strong_edge_related`，可以说间断点与局地垂直速度剪切边界相关；但这仍不是因果证明，因为中心跳变还可能受弱速区多核结构、缺测边界和圆周判据切换影响。",
+            "`w_diag` 是由 30-180 天带通水平速度散度积分得到的连续方程诊断代理，`partial_z w_diag` 也是代理诊断量，不是直接观测垂直速度。",
+            "如果 normal 剖面被标记为 `strong_edge_related`，可以说间断点附近存在横切中心跳变的垂直速度剪切边界证据；但这仍不是因果证明，因为中心跳变还可能受弱速区多核结构、缺测边界、圆周判据切换和速度中心定义影响。",
         ]
     )
-    (output_dir / "coherent_jump_wshear_relation_summary_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    text = "\n".join(lines) + "\n"
+    (output_dir / "coherent_jump_wshear_parallel_vs_normal_summary_zh.md").write_text(text, encoding="utf-8")
+    (output_dir / "coherent_jump_wshear_relation_summary_zh.md").write_text(text, encoding="utf-8")
 
 
 def analyze_jump_wshear_relation(
@@ -403,10 +664,12 @@ def analyze_jump_wshear_relation(
     depth_padding_layers: int,
     half_width_r: float,
     min_half_width_km: float,
+    section_modes: str,
     year_limit: int | None,
     resume: bool,
 ) -> None:
     shape_set = {part.strip() for part in shapes.split(",") if part.strip()}
+    parsed_section_modes = _parse_section_modes(section_modes)
     layers = _load_inputs(results_root, shape_dir_name, shape_set, year_limit)
     output_dir.mkdir(parents=True, exist_ok=True)
     parts_dir = output_dir / "parts"
@@ -441,12 +704,16 @@ def analyze_jump_wshear_relation(
         try:
             column = _read_velocity_column(filter_path, jumps[0].date, jumps[0].surface_lon, jumps[0].surface_lat, half_width_deg)
             for jump in jumps[:jump_ranks]:
-                section = _section_for_jump(jump, column)
-                metrics = _jump_metrics(jump, section, depth_padding_layers, half_width_r, min_half_width_km)
+                metrics = _metrics_for_jump(jump, column, parsed_section_modes, depth_padding_layers, half_width_r, min_half_width_km)
                 metric_rows.append(metrics)
         except Exception as exc:
             for jump in jumps[:jump_ranks]:
-                metric_rows.append({**jump.__dict__, "qualitative_relation": "insufficient_data", "error": str(exc)})
+                row = dict(jump.__dict__)
+                for prefix in ("parallel", "normal"):
+                    row.update(_prefixed_metrics(prefix, {"qualitative_relation": "insufficient_data"}))
+                row["qualitative_relation"] = "insufficient_data"
+                row["error"] = str(exc)
+                metric_rows.append(row)
         if len(metric_rows) >= flush_every_objectdays * max(1, jump_ranks):
             pd.DataFrame(metric_rows).to_parquet(parts_dir / f"top2_part_{part_index:04d}.parquet", index=False)
             pd.DataFrame(all_jump_rows).to_parquet(parts_dir / f"all_jumps_part_{part_index:04d}.parquet", index=False)
@@ -473,4 +740,15 @@ def analyze_jump_wshear_relation(
     summary = _write_tables(top, all_jumps, output_dir)
     _plot_outputs(top, summary, output_dir)
     _write_report(top, summary, output_dir)
-    print(json.dumps({"output_dir": str(output_dir), "rows": int(len(top)), "objectdays": int(top["eddy3d_object_id"].nunique())}, ensure_ascii=False), flush=True)
+    print(
+        json.dumps(
+            {
+                "output_dir": str(output_dir),
+                "rows": int(len(top)),
+                "objectdays": int(top["eddy3d_object_id"].nunique()),
+                "section_modes": list(parsed_section_modes),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
