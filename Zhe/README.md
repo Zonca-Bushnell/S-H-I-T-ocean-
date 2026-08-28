@@ -1,77 +1,120 @@
-# Copernicus ACC raw-download workflow
+# Zhe Eddy Analysis Codebase
 
-This workflow avoids the old FTP service and avoids `subset` transfer overhead by downloading original Copernicus Marine files first, then cropping locally.
+This directory is the current code root inside the `S-H-I-T-ocean-` Git
+repository. Development is now centered on the `Zonca` branch.
 
-## Environment
+The project has accumulated several historical eddy-detection and representative
+vortex variants. The current README records the production path so old scripts
+are not accidentally mixed into new scientific runs.
 
-Use the existing mamba environment:
+## Current Production Contract
 
-```powershell
-mamba activate copernicus_downloading
-python -c "import copernicusmarine, xarray, netCDF4, dask, cftime; print('OK')"
-```
-
-If credentials are not already saved, log in once:
-
-```powershell
-copernicusmarine login
-```
-
-The checked environment already contains the needed packages. To recreate it later:
-
-```powershell
-mamba env create -f environment-copernicus_downloading.yml
-```
-
-Environment variables are also supported:
-
-```powershell
-$env:COPERNICUSMARINE_SERVICE_USERNAME = "your_username"
-$env:COPERNICUSMARINE_SERVICE_PASSWORD = "your_password"
-```
-
-## Create the file list
-
-```powershell
-python download_acc_raw.py
-```
-
-This creates:
+The current default scientific workflow is:
 
 ```text
-manifests\selected_files.txt
+Hua b3_start2
++ 30-180 day bandpass velocity
++ boundary_monotonic circular-boundary rotation constraint
++ strict_contiguous vertical extension
++ life30 shape classification
++ coherent_only selection
++ ME_LIUTEX azimuth-preserved representative vortex
++ global_ls_alpha alignment
 ```
 
-## Download raw files
+TURN and UNTURN are both allowed only as final representative-vortex structure
+options:
+
+- `turned`: rotate each object by `global_ls_alpha`; this is the main structure
+  and transport frame.
+- `unturned`: keep the original local east/north frame; this is a structure
+  comparison, not the main transport frame.
+
+## Main Packages
+
+| Path | Role |
+| --- | --- |
+| `src/eddy_pipeline/` | Production detection, tracking, catalog, shape classification, and representative-vortex structure pipeline. |
+| `src/post/` | Formal post-processing after representative-vortex construction: aggregate-product stirring, structure plots, and double-core diagnostics. |
+| `src/data_downloading/` | Data download and raw preprocessing utilities. Kept separate from the detection refactor. |
+| `src/experiments/` | Temporary research experiments. Useful, but not production entry points. |
+| `src/First_temp/` | Legacy-but-active numerical helpers used by older representative and E-P/PV diagnostics. |
+| `src/Location/` | Compatibility wrappers and older entry points. Prefer `src.eddy_pipeline` and `src.post`. |
+| `legacy/` | Archived diagnostics, paper replications, older variants, and historical scripts. |
+| `vendor/` | Third-party/reference code such as Hua/Nencioli/MITgcm material. Do not edit as production code. |
+
+## Production Entry Points
+
+Use the new self-contained pipeline package first:
 
 ```powershell
-python download_acc_raw.py --download --reuse-file-list
+python -m src.eddy_pipeline.cli --help
+python -m src.eddy_pipeline.cli run-detection-to-shape --dry-run
+python -m src.eddy_pipeline.cli build-representative --dry-run --shape coherent --orientation both
+python -m src.eddy_pipeline.cli run-all --dry-run
 ```
 
-Raw files are written under:
+Post-processing starts after representative vortex outputs exist:
+
+```powershell
+python -m src.post.cli --help
+python -m src.post.cli run-default --dry-run --shape coherent --orientation both
+python -m src.post.cli build-transport --shape coherent --orientation turned
+python -m src.post.cli analyze-double-core --shape coherent --orientation both
+```
+
+The post package must not rerun detection, tracking, or shape classification.
+
+## Output Layout
+
+For the current Kuroshiou production result, keep structure and transport
+diagnostics separate:
+
+| Output | Meaning |
+| --- | --- |
+| `result_boundary_monotonic/result_coherent_only/representative_vortex_radial_seed/` | Coherent-only lifecycle objects and radial seed diagnostics. |
+| `result_boundary_monotonic/result_coherent_only/representative_vortex_me_liutex/` | TURN ME_LIUTEX azimuth-preserved representative vortex. |
+| `result_boundary_monotonic/result_coherent_only/representative_vortex_me_liutex_unturned/` | UNTURN structure comparison. |
+| `result_boundary_monotonic/result_coherent_only/aggregate_product_stirring/` | Heat/PV stirring from product-then-mean statistics and covariance. |
+| `double_core_analysis/` | Velocity-center axis vs rotation-core axis diagnostics. |
+
+Do not use old radial-only, non-strict-contiguous, non-boundary-monotonic, or
+all-shape representative outputs as the production baseline unless a study
+explicitly says it is a legacy comparison.
+
+## Transport Rule
+
+Representative structure plots show the mean eddy, but transport must be
+computed as an aggregate product:
 
 ```text
-E:\DATA\Copernicus_Data\ACC_raw
+product_mean = mean(v_rot * X)
+mean_product = mean(v_rot) * mean(X)
+covariance = product_mean - mean_product
 ```
 
-## Crop locally
+where:
+
+- `X = theta_30_180d` for heat stirring,
+- `X = q_prime` for QG-like PV stirring,
+- `v_rot` is the `global_ls_alpha` rotated `y_rot` velocity component.
+
+The mean-product field is a diagnostic baseline. The primary transport estimate
+is `product_mean`, with `covariance` explaining why mean fields alone are not
+enough.
+
+## Quick Checks
 
 ```powershell
-python crop_acc_raw.py
+python -m py_compile src/eddy_pipeline/*.py src/post/*.py
+python -m src.eddy_pipeline.cli --help
+python -m src.post.cli run-default --dry-run --shape coherent --orientation both
 ```
 
-The cropped NetCDF output is written under:
+See the engineering notes for the migration history:
 
-```text
-E:\DATA\Copernicus_Data\ACC
-```
-
-## Sample test
-
-For a small test window, use `--sample` consistently:
-
-```powershell
-python download_acc_raw.py --sample
-python download_acc_raw.py --sample --download --reuse-file-list
-python crop_acc_raw.py --sample
-```
+- `docs/main_pipeline_refactor.md`
+- `docs/post_pipeline_refactor.md`
+- `docs/main_pipeline_contract.md`
+- `docs/ambiguous_method_registry.md`
+- `docs/redundancy_delete_candidates.md`
