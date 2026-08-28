@@ -36,12 +36,24 @@ options:
 | --- | --- |
 | `src/eddy_pipeline/` | Production detection, tracking, catalog, shape classification, and representative-vortex structure pipeline. |
 | `src/post/` | Formal post-processing after representative-vortex construction: aggregate-product stirring, structure plots, and double-core diagnostics. |
+| `src/utils/` | Shared numerical, geospatial, field-sampling, and representative-composite helpers used by production packages. |
 | `src/data_downloading/` | Data download and raw preprocessing utilities. Kept separate from the detection refactor. |
 | `src/Legacy/experiments/` | Temporary research experiments. Useful, but not production entry points. |
-| `src/Legacy/First_temp/` | Legacy-but-active numerical helpers used by older representative and E-P/PV diagnostics. |
+| `src/Legacy/First_temp/` | Historical numerical helpers. Stable production dependencies have been promoted into `src/utils`. |
 | `src/Legacy/Location/` | Compatibility wrappers and older entry points. Prefer `src.eddy_pipeline` and `src.post`. |
 | `legacy/` | Archived diagnostics, paper replications, older variants, and historical scripts. |
 | `vendor/` | Third-party/reference code such as Hua/Nencioli/MITgcm material. Do not edit as production code. |
+
+Production dependency direction is now:
+
+```text
+src.eddy_pipeline  ┐
+                   ├──> src.utils
+src.post           ┘
+```
+
+`src.Legacy/*` is a historical area. New production imports should not reach
+into Legacy directly; promote reusable helpers into `src.utils` instead.
 
 ## Production Entry Points
 

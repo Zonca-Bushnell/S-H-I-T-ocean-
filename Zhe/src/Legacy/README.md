@@ -13,8 +13,6 @@ paper replications, and numerical helpers that are still being phased out. New
 production code should not import from this directory unless the dependency is
 explicitly documented as legacy-but-active.
 
-Current legacy-but-active exception:
-
-- `src.Legacy.First_temp`: selected QG, polar-grid, and streamfunction helpers
-  are still reused by `src.eddy_pipeline` and `src.post` until those utilities
-  are promoted into stable production modules.
+Previously legacy-but-active utilities from `src.Legacy.First_temp` have been
+promoted into `src.utils`. New production code should depend on `src.utils`
+instead of reaching back into this directory.

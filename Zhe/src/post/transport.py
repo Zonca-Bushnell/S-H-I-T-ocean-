@@ -19,18 +19,18 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from src.Legacy.First_temp.axis_streamfunction_separation import (
+from src.utils.axis_streamfunction import (
     grid_spacing_m,
     relative_vorticity,
     streamfunction_from_zeta,
 )
-from src.Legacy.First_temp.lifecycle_ep_flux_nondim_validation import (
+from src.utils.ep_flux import (
     OMEGA,
     azimuth_second_derivative,
     ddz,
     radial_derivative,
 )
-from src.Legacy.First_temp.tilted_ep_flux_validation import (
+from src.utils.field_sampling import (
     bilinear_sample,
     load_n2,
     sanitize_ocean_field,

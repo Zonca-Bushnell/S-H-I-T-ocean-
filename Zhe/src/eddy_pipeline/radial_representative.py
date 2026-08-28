@@ -12,15 +12,15 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from src.Legacy.First_temp.axis_streamfunction_separation import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
-from src.Legacy.First_temp.direction_fit import (
+from src.utils.axis_streamfunction import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
+from src.utils.axis_alignment import (
     build_rotated_points,
     depth_distribution,
     fit_quadratic,
     load_shape_tracks,
     parse_csv_list as parse_shape_list,
 )
-from src.Legacy.First_temp.lifecycle_continuous_representative import (
+from src.utils.representative_accumulation import (
     add_weighted_terms,
     build_continuous_mlrw_profiles,
     build_manifest,
@@ -30,8 +30,8 @@ from src.Legacy.First_temp.lifecycle_continuous_representative import (
     representative_radii,
     rows_from_continuous_final,
 )
-from src.Legacy.First_temp.lifecycle_ep_flux_nondim_validation import add_wave_activity, compute_nondim_terms
-from src.Legacy.First_temp.tilted_ep_flux_validation import (
+from src.utils.ep_flux import add_wave_activity, compute_nondim_terms
+from src.utils.field_sampling import (
     OMEGA,
     G,
     RHO0,

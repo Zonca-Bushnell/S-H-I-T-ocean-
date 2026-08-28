@@ -38,18 +38,34 @@ For the detailed code map, see:
 - `Zhe/src/post/`: production post-processing after representative vortex
   construction, including aggregate-product stirring, structure figures, and
   double-core diagnostics.
+- `Zhe/src/utils/`: shared numerical, geospatial, field-sampling, and
+  representative-composite helpers used by `eddy_pipeline` and `post`.
 - `Zhe/src/data_downloading/`: data acquisition utilities, intentionally kept
   outside the current refactor boundary.
 - `Zhe/src/Legacy/experiments/`: temporary research experiments, kept out of
   the production package namespace.
-- `Zhe/src/Legacy/First_temp/`: legacy-but-active numerical helpers that are
-  still imported explicitly by selected production diagnostics.
+- `Zhe/src/Legacy/First_temp/`: historical numerical helpers. Stable pieces
+  used by production have been promoted into `Zhe/src/utils/`.
 - `Zhe/src/Legacy/Location/`: older entry points and compatibility code.
 - `Zhe/src/Legacy/validation/`: historical validation scripts.
 - `Zhe/legacy/`: archived historical scripts, paper replications, diagnostics,
   and non-default representative variants.
 - `Zhe/vendor/`: third-party or reference source code. Do not edit directly as
   production code.
+
+## Dependency Direction
+
+Production code should follow this direction:
+
+```text
+src.eddy_pipeline  ┐
+                   ├──> src.utils
+src.post           ┘
+```
+
+`src.Legacy/*` is retained for reproducibility and old experiments, but it is
+not a production dependency target. When an old numerical helper is still useful,
+promote it into `src.utils` first, then import it from there.
 
 ## Output Convention
 

@@ -8,13 +8,21 @@ Imported on: see `SERVER_SYNC_MANIFEST.json`.
 
 ## Production Pipeline
 
-- `src/Legacy/Location/`
-  - Main production and analysis pipeline for Hua/Nencioli detection, tracking, shape classification, representative vortex generation, and transport diagnostics.
-  - Treat this as the current source of truth for production runs unless a newer promoted module says otherwise.
+- `src/eddy_pipeline/`
+  - Production pipeline for Hua/Nencioli detection, feature/group tracking, strict-contiguous catalog construction, life30 shape classification, and final representative vortex generation.
+  - Treat this as the current source of truth for identification through representative-vortex structure builds.
+
+- `src/post/`
+  - Formal post-processing after representative-vortex construction: aggregate-product stirring, structure figures, and double-core diagnostics.
+  - This package should not rerun detection, tracking, or shape classification.
+
+- `src/utils/`
+  - Shared numerical, geospatial, field-sampling, streamfunction, E-P/PV, and representative-composite helpers.
+  - `src/eddy_pipeline` and `src/post` should depend on this package instead of importing from `src/Legacy`.
 
 - `src/Legacy/First_temp/`
-  - Legacy-but-active numerical helpers still used by representative vortex and E-P/PV diagnostics.
-  - Do not delete or rename casually; first trace imports.
+  - Historical numerical helpers. Stable production dependencies have been promoted into `src/utils`.
+  - Keep it for reproducibility and old scripts, but do not add new production imports from it.
 
 - `src/data_downloading/`
   - Data download and subset scripts.
@@ -25,7 +33,7 @@ Imported on: see `SERVER_SYNC_MANIFEST.json`.
 - `src/Legacy/experiments/temp/`
   - Temporary research scripts and one-off diagnostics.
   - Code here is not automatically production-approved.
-  - Promote stable scripts into `src/Legacy/Location/` only after naming, tests, and documentation are cleaned up.
+  - Promote stable scripts into `src/eddy_pipeline`, `src/post`, or `src/utils` only after naming, tests, and documentation are cleaned up.
 
 - `src/Legacy/experiments/theory_validation/`
   - Theory and mechanism validation experiments.
@@ -42,7 +50,7 @@ Imported on: see `SERVER_SYNC_MANIFEST.json`.
 
 ## Root-Level Scripts
 
-Root-level Python files are historical entrypoints and deployment helpers. Before using one, check whether an equivalent maintained entrypoint exists under `src/Legacy/Location/`.
+Root-level Python files are historical entrypoints and deployment helpers. Before using one, check whether an equivalent maintained entrypoint exists under `src/eddy_pipeline/` or `src/post/`.
 
 ## Current Scientific Default
 
@@ -54,4 +62,3 @@ Transport diagnostics should be kept separate from structural composites:
 
 - structure: `representative_vortex_me_liutex/`
 - covariance transport: `aggregate_product_stirring/`
-

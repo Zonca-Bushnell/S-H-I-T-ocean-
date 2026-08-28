@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from src.Legacy.First_temp.tilted_ep_flux_validation import (
+from src.utils.field_sampling import (
     bilinear_sample,
     make_polar_grid,
     sanitize_ocean_field,
