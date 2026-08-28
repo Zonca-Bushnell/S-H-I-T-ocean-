@@ -167,9 +167,11 @@ def run(args: argparse.Namespace) -> None:
     azimuthal_root = shape_root / "representative_vortex_me_liutex"
     stirring_root = shape_root / "aggregate_product_stirring"
 
-    if not args.skip_preflight:
+    if args.dry_run:
+        print("[dry-run] skip representative bundle preflight checks", flush=True)
+    elif not args.skip_preflight:
         _preflight_shape_tracks(Path(args.results_root), str(args.shape_dir_name), shape_root, str(args.shapes))
-    if not args.skip_preflight and not args.skip_filter_preflight:
+    if not args.dry_run and not args.skip_preflight and not args.skip_filter_preflight:
         _preflight_filter_variables(Path(args.filter_root), str(args.filter_template), shape_root)
 
     python = args.python
@@ -241,7 +243,7 @@ def run(args: argparse.Namespace) -> None:
     stirring = [
         python,
         "-m",
-        "src.experiments.temp.run_aggregate_product_stirring",
+        "src.post.transport",
         "--rv-root",
         str(radial_root),
         "--filter-root",

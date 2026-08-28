@@ -1,0 +1,23 @@
+{
+  "legacy_root": "Zhe/legacy",
+  "deprecated_src_legacy": {
+    "path": "Zhe/src/Legacy",
+    "status": "empty_at_scan_time",
+    "policy": "do_not_use_as_importable_package"
+  },
+  "wrappers": [
+    {
+      "old_entrypoint": "src/Location/run_representative_stirring_transport.py",
+      "implementation": "src.post.transport"
+    },
+    {
+      "old_entrypoint": "src/Location/run_coherent_stirring_transport.py",
+      "implementation": "src.post.transport"
+    },
+    {
+      "old_entrypoint": "src/experiments/temp/run_aggregate_product_stirring.py",
+      "implementation": "src.post.transport"
+    }
+  ]
+}
+

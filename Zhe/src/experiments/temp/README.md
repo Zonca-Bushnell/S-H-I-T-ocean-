@@ -1,17 +1,19 @@
-# Temporary Aggregate-Product Experiments
+# Temporary Representative Experiments
 
-This package holds research scripts that are not yet part of the production
-`src.Location` pipeline.
+This package holds research scripts that are not part of the production
+`src.eddy_pipeline` or `src.post` interfaces.
 
 ## Aggregate-Product Stirring
 
-`run_aggregate_product_stirring.py` computes strict-contiguous representative
-vortex heat and PV stirring in the `global_ls_alpha` aligned `y_rot` direction.
-Use `--shapes` to choose the shape class; the default remains `coherent`.
+`run_aggregate_product_stirring.py` is now a compatibility wrapper around
+`src.post.transport`. The formal post-processing interface is:
 
-It is intentionally an experiment because it changes the representative-vortex
-transport definition from multiplying first-order mean fields to aggregating
-object-day products:
+```bash
+python -m src.post.cli build-transport --shape coherent --orientation turned
+```
+
+The production diagnostic aggregates object-day products rather than
+multiplying first-order mean fields:
 
 ```text
 product_mean = mean(v_rot * tracer)
@@ -19,9 +21,8 @@ mean_product = mean(v_rot) * mean(tracer)
 covariance = product_mean - mean_product
 ```
 
-The script does not calculate trapping and does not report geographic northward
-transport. Promotion to production should happen only after the outputs and
-figures are accepted.
+It does not calculate trapping and does not report geographic northward
+transport.
 
 ## Azimuth-Preserved Representative Vortex
 
@@ -53,9 +54,9 @@ result_upright_like/
   aggregate_product_stirring/
 ```
 
-The bundle does not change the scientific computations; it calls the existing
-radial representative vortex entrypoint, then the azimuth-preserved ME_LIUTEX
-experiment, then the aggregate-product stirring experiment.
+The bundle does not change the scientific computations; it calls the radial
+representative vortex entrypoint, the azimuth-preserved ME_LIUTEX structure
+composite, and the formal `src.post.transport` aggregate-product diagnostic.
 
 ## Hua Boundary-Monotonic Rotation
 
