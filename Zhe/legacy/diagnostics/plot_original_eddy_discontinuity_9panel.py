@@ -749,7 +749,55 @@ def _plot_vertical_w_section(
     axis_name = str(section.get("section_axis", "section"))
     ax.set_xlim(float(xlim[0]), float(xlim[1]))
     ax.set_ylim(float(zlim[1]), float(zlim[0]))
-    ax.set_title(f"{title}: vertical shear of omega-equation w ({axis_name})", fontsize=10)
+    ax.set_title(f"{title}: dW/dz (omega)\n{axis_name}", fontsize=9)
+    ax.set_xlabel("section distance from surface center (km)")
+    ax.set_ylabel("depth (m)")
+    ax.grid(alpha=0.2)
+    return mesh
+
+
+def _plot_vertical_w_value_section(
+    ax,
+    section: dict[str, np.ndarray],
+    title: str,
+    selected: SelectedObject,
+    *,
+    second: bool = False,
+):
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    w = section["w_section"]
+    dwdz = section["dwdz_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
+    vmin, vmax = _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    shear_local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
+    finite_shear = shear_local[np.isfinite(shear_local)]
+    if finite_shear.size:
+        q90 = float(np.nanquantile(np.abs(finite_shear), 0.9))
+        if np.isfinite(q90) and q90 > 0:
+            ax.contour(s, depth, np.abs(dwdz), levels=[q90], colors="0.15", linewidths=0.7, alpha=0.75)
+    ax.invert_yaxis()
+    ax.axvline(0, color="0.75", lw=0.8)
+    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
+    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
+    if from_z is not None:
+        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
+    if to_z is not None:
+        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
+    center_s = section.get("center_section_coord_km")
+    center_z = section.get("center_depth_m")
+    if center_s is not None and center_z is not None:
+        ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
+        ax.legend(loc="best", fontsize=7)
+    axis_name = str(section.get("section_axis", "section"))
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: W (omega)\n{axis_name}", fontsize=9)
     ax.set_xlabel("section distance from surface center (km)")
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
@@ -771,8 +819,8 @@ def _plot_9panel(
     has_first = bool(selected.has_abrupt_jump and first_fields is not None)
     has_second = bool(selected.has_second_abrupt_jump and second_fields is not None)
 
-    fig = plt.figure(figsize=(20, 11), constrained_layout=True)
-    gs = fig.add_gridspec(3, 5, height_ratios=[1.0, 1.0, 0.9], width_ratios=[0.9, 0.9, 1.05, 1.05, 1.05])
+    fig = plt.figure(figsize=(28, 12), constrained_layout=True)
+    gs = fig.add_gridspec(3, 6, height_ratios=[1.0, 1.0, 0.9], width_ratios=[0.9, 0.9, 1.05, 1.05, 1.05, 1.05])
     ax1 = fig.add_subplot(gs[0:2, 0])
     ax2 = fig.add_subplot(gs[0:2, 1])
     ax3 = fig.add_subplot(gs[0, 2])
@@ -781,6 +829,8 @@ def _plot_9panel(
     ax6 = fig.add_subplot(gs[1, 3])
     ax8 = fig.add_subplot(gs[0, 4])
     ax9 = fig.add_subplot(gs[1, 4])
+    ax10 = fig.add_subplot(gs[0, 5])
+    ax11 = fig.add_subplot(gs[1, 5])
     ax7 = fig.add_subplot(gs[2, :])
 
     for ax, col, title in [(ax1, "delta_x_km", "1  delta x from surface center"), (ax2, "delta_y_km", "2  delta y from surface center")]:
@@ -801,21 +851,25 @@ def _plot_9panel(
         yy = first_fields["yy"]
         marks = first_fields["marks"]
         first_title = f"first jump {selected.jump_from_depth_index}->{selected.jump_to_depth_index}"
+        first_section_title = f"J1 {selected.jump_from_depth_index}->{selected.jump_to_depth_index}"
         m3 = _plot_field(ax3, xx, yy, first_fields["speed"], f"3  {first_title}: speed |u',v'|", "magma", quiver=(first_fields["u"], first_fields["v"]), center_marks=marks)
         fig.colorbar(m3, ax=ax3, shrink=0.82, label="m/s")
         m4 = _plot_field(ax4, xx, yy, first_fields["pressure"], f"4  {first_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
         fig.colorbar(m4, ax=ax4, shrink=0.82, label="Pa proxy")
         if "w_section" in first_fields:
-            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_title}", selected, second=False)
+            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False)
             fig.colorbar(m8, ax=ax8, shrink=0.82, label="s^-1 diagnostic")
+            m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False)
+            fig.colorbar(m10, ax=ax10, shrink=0.82, label="m/s diagnostic")
         else:
             _hatch_unavailable(ax8, "first jump vertical w section unavailable")
+            _hatch_unavailable(ax10, "first jump omega w section unavailable")
         for ax in [ax3, ax4]:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(loc="upper right", fontsize=8)
     else:
-        for ax in [ax3, ax4, ax8]:
+        for ax in [ax3, ax4, ax8, ax10]:
             _hatch_unavailable(ax, "no first abrupt layer discontinuity detected")
 
     if has_second and second_fields is not None:
@@ -823,21 +877,25 @@ def _plot_9panel(
         yy = second_fields["yy"]
         marks = second_fields["marks"]
         second_title = f"second jump {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}"
+        second_section_title = f"J2 {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}"
         m5 = _plot_field(ax5, xx, yy, second_fields["speed"], f"5  {second_title}: speed |u',v'|", "magma", quiver=(second_fields["u"], second_fields["v"]), center_marks=marks)
         fig.colorbar(m5, ax=ax5, shrink=0.82, label="m/s")
         m6 = _plot_field(ax6, xx, yy, second_fields["pressure"], f"6  {second_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
         fig.colorbar(m6, ax=ax6, shrink=0.82, label="Pa proxy")
         if "w_section" in second_fields:
-            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_title}", selected, second=True)
+            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True)
             fig.colorbar(m9, ax=ax9, shrink=0.82, label="s^-1 diagnostic")
+            m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True)
+            fig.colorbar(m11, ax=ax11, shrink=0.82, label="m/s diagnostic")
         else:
             _hatch_unavailable(ax9, "second jump vertical w section unavailable")
+            _hatch_unavailable(ax11, "second jump omega w section unavailable")
         for ax in [ax5, ax6]:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(loc="upper right", fontsize=8)
     else:
-        for ax in [ax5, ax6, ax9]:
+        for ax in [ax5, ax6, ax9, ax11]:
             _hatch_unavailable(ax, "no second abrupt layer discontinuity detected")
 
     surface_track = track_layers[track_layers["depth_index"].astype(int).eq(0)].sort_values("date")
