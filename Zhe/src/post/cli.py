@@ -81,6 +81,34 @@ def analyze_double_core(args: argparse.Namespace) -> None:
     run(result_root=Path(args.result_root), shape=args.shape, orientation=args.orientation)
 
 
+def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] science: {PRODUCTION_POST_SCOPE}")
+        print(f"[post] results root: {args.results_root}")
+        print(f"[post] filter root: {args.filter_root}")
+        print(
+            "[dry-run] analyze jump-wshear relation for "
+            f"shapes={args.shapes}, output={args.output_dir}"
+        )
+        return
+    from .discontinuity_relation import analyze_jump_wshear_relation as run
+
+    run(
+        results_root=Path(args.results_root),
+        shape_dir_name=args.shape_dir_name,
+        filter_root=Path(args.filter_root),
+        output_dir=Path(args.output_dir),
+        shapes=args.shapes,
+        jump_ranks=args.jump_ranks,
+        half_width_deg=args.half_width_deg,
+        depth_padding_layers=args.w_shear_depth_padding_layers,
+        half_width_r=args.w_shear_half_width_r,
+        min_half_width_km=args.w_shear_min_half_width_km,
+        year_limit=args.year_limit,
+        resume=args.resume,
+    )
+
+
 def run_default(args: argparse.Namespace) -> None:
     _print_scope(args)
     plot_structure(args)
@@ -114,6 +142,22 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = subparsers.add_parser(name, parents=[common])
         child.set_defaults(func=func)
+    relation = subparsers.add_parser("analyze-jump-wshear-relation")
+    relation.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
+    relation.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
+    relation.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
+    relation.add_argument("--output-dir", type=Path, required=True)
+    relation.add_argument("--shapes", default=DEFAULT_SHAPE)
+    relation.add_argument("--jump-ranks", type=int, default=2)
+    relation.add_argument("--half-width-deg", type=float, default=2.0)
+    relation.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
+    relation.add_argument("--w-shear-half-width-r", type=float, default=1.2)
+    relation.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
+    relation.add_argument("--year-limit", type=int, default=None)
+    relation.add_argument("--chunk-days", type=int, default=14)
+    relation.add_argument("--resume", action="store_true")
+    relation.add_argument("--dry-run", action="store_true")
+    relation.set_defaults(func=analyze_jump_wshear_relation)
     return parser
 
 
