@@ -707,6 +707,42 @@ def _build_center_marks(
     return marks
 
 
+def _horizontal_layer_fields(
+    *,
+    filter_path: Path,
+    date: str,
+    surface_lon: float,
+    surface_lat: float,
+    layer_index: int,
+    half_width_deg: float,
+    marks: list[tuple[float, float, str, str, str]],
+) -> dict[str, np.ndarray]:
+    vel2 = _read_field_window(
+        path=filter_path,
+        date=date,
+        center_lon=surface_lon,
+        center_lat=surface_lat,
+        depth_index=layer_index,
+        half_width_deg=half_width_deg,
+        variables=("uo_glor", "vo_glor"),
+    )
+    lon = vel2["longitude"]
+    lat = vel2["latitude"]
+    x_m, y_m, xx, yy = _relative_xy(lon, lat, surface_lon, surface_lat)
+    u = vel2["uo_glor"]
+    v = vel2["vo_glor"]
+    return {
+        "xx": xx,
+        "yy": yy,
+        "u": u,
+        "v": v,
+        "speed": np.hypot(u, v),
+        "pressure": _pressure_proxy(u, v, x_m, y_m, _coriolis(surface_lat)),
+        "marks": marks,
+        "layer_index": np.array(layer_index),
+    }
+
+
 def _plot_vertical_w_section(
     ax,
     section: dict[str, np.ndarray],
@@ -819,19 +855,28 @@ def _plot_9panel(
     has_first = bool(selected.has_abrupt_jump and first_fields is not None)
     has_second = bool(selected.has_second_abrupt_jump and second_fields is not None)
 
-    fig = plt.figure(figsize=(28, 12), constrained_layout=True)
-    gs = fig.add_gridspec(3, 6, height_ratios=[1.0, 1.0, 0.9], width_ratios=[0.9, 0.9, 1.05, 1.05, 1.05, 1.05])
-    ax1 = fig.add_subplot(gs[0:2, 0])
-    ax2 = fig.add_subplot(gs[0:2, 1])
-    ax3 = fig.add_subplot(gs[0, 2])
-    ax4 = fig.add_subplot(gs[0, 3])
-    ax5 = fig.add_subplot(gs[1, 2])
-    ax6 = fig.add_subplot(gs[1, 3])
-    ax8 = fig.add_subplot(gs[0, 4])
-    ax9 = fig.add_subplot(gs[1, 4])
-    ax10 = fig.add_subplot(gs[0, 5])
-    ax11 = fig.add_subplot(gs[1, 5])
-    ax7 = fig.add_subplot(gs[2, :])
+    fig = plt.figure(figsize=(32, 18), constrained_layout=True)
+    gs = fig.add_gridspec(
+        5,
+        6,
+        height_ratios=[1.0, 1.0, 1.0, 1.0, 0.85],
+        width_ratios=[0.9, 0.9, 1.05, 1.05, 1.05, 1.05],
+    )
+    ax1 = fig.add_subplot(gs[0:4, 0])
+    ax2 = fig.add_subplot(gs[0:4, 1])
+    ax3u = fig.add_subplot(gs[0, 2])
+    ax4u = fig.add_subplot(gs[0, 3])
+    ax3l = fig.add_subplot(gs[1, 2])
+    ax4l = fig.add_subplot(gs[1, 3])
+    ax5u = fig.add_subplot(gs[2, 2])
+    ax6u = fig.add_subplot(gs[2, 3])
+    ax5l = fig.add_subplot(gs[3, 2])
+    ax6l = fig.add_subplot(gs[3, 3])
+    ax8 = fig.add_subplot(gs[0:2, 4])
+    ax10 = fig.add_subplot(gs[0:2, 5])
+    ax9 = fig.add_subplot(gs[2:4, 4])
+    ax11 = fig.add_subplot(gs[2:4, 5])
+    ax7 = fig.add_subplot(gs[4, :])
 
     for ax, col, title in [(ax1, "delta_x_km", "1  delta x from surface center"), (ax2, "delta_y_km", "2  delta y from surface center")]:
         ax.plot(offsets[col], offsets["depth_m"], "-o", color="#244a9b", lw=1.8, ms=4)
@@ -846,16 +891,65 @@ def _plot_9panel(
         ax.set_title(title)
         ax.grid(alpha=0.25)
 
+    def _plot_horizontal_diagnostics(
+        speed_ax,
+        pressure_ax,
+        layer_fields: dict[str, np.ndarray] | None,
+        *,
+        speed_label: str,
+        pressure_label: str,
+    ) -> None:
+        if layer_fields is None:
+            _hatch_unavailable(speed_ax, "horizontal layer unavailable")
+            _hatch_unavailable(pressure_ax, "horizontal layer unavailable")
+            return
+        xx = layer_fields["xx"]
+        yy = layer_fields["yy"]
+        marks = layer_fields["marks"]
+        m_speed = _plot_field(
+            speed_ax,
+            xx,
+            yy,
+            layer_fields["speed"],
+            speed_label,
+            "magma",
+            quiver=(layer_fields["u"], layer_fields["v"]),
+            center_marks=marks,
+        )
+        fig.colorbar(m_speed, ax=speed_ax, shrink=0.82, label="m/s")
+        m_pressure = _plot_field(
+            pressure_ax,
+            xx,
+            yy,
+            layer_fields["pressure"],
+            pressure_label,
+            "RdBu_r",
+            symmetric=True,
+            center_marks=marks,
+        )
+        fig.colorbar(m_pressure, ax=pressure_ax, shrink=0.82, label="Pa proxy")
+        for ax in [speed_ax, pressure_ax]:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc="upper right", fontsize=8)
+
     if has_first and first_fields is not None:
-        xx = first_fields["xx"]
-        yy = first_fields["yy"]
-        marks = first_fields["marks"]
         first_title = f"first jump {selected.jump_from_depth_index}->{selected.jump_to_depth_index}"
         first_section_title = f"J1 {selected.jump_from_depth_index}->{selected.jump_to_depth_index}"
-        m3 = _plot_field(ax3, xx, yy, first_fields["speed"], f"3  {first_title}: speed |u',v'|", "magma", quiver=(first_fields["u"], first_fields["v"]), center_marks=marks)
-        fig.colorbar(m3, ax=ax3, shrink=0.82, label="m/s")
-        m4 = _plot_field(ax4, xx, yy, first_fields["pressure"], f"4  {first_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
-        fig.colorbar(m4, ax=ax4, shrink=0.82, label="Pa proxy")
+        _plot_horizontal_diagnostics(
+            ax3u,
+            ax4u,
+            first_fields.get("upper_horizontal"),
+            speed_label=f"3U  {first_title} upper/from: speed |u',v'|",
+            pressure_label=f"4U  {first_title} upper/from: geostrophic p' proxy",
+        )
+        _plot_horizontal_diagnostics(
+            ax3l,
+            ax4l,
+            first_fields.get("lower_horizontal"),
+            speed_label=f"3L  {first_title} lower/to: speed |u',v'|",
+            pressure_label=f"4L  {first_title} lower/to: geostrophic p' proxy",
+        )
         if "w_section" in first_fields:
             m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False)
             fig.colorbar(m8, ax=ax8, shrink=0.82, label="s^-1 diagnostic")
@@ -864,24 +958,27 @@ def _plot_9panel(
         else:
             _hatch_unavailable(ax8, "first jump vertical w section unavailable")
             _hatch_unavailable(ax10, "first jump omega w section unavailable")
-        for ax in [ax3, ax4]:
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(loc="upper right", fontsize=8)
     else:
-        for ax in [ax3, ax4, ax8, ax10]:
+        for ax in [ax3u, ax4u, ax3l, ax4l, ax8, ax10]:
             _hatch_unavailable(ax, "no first abrupt layer discontinuity detected")
 
     if has_second and second_fields is not None:
-        xx = second_fields["xx"]
-        yy = second_fields["yy"]
-        marks = second_fields["marks"]
         second_title = f"second jump {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}"
         second_section_title = f"J2 {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}"
-        m5 = _plot_field(ax5, xx, yy, second_fields["speed"], f"5  {second_title}: speed |u',v'|", "magma", quiver=(second_fields["u"], second_fields["v"]), center_marks=marks)
-        fig.colorbar(m5, ax=ax5, shrink=0.82, label="m/s")
-        m6 = _plot_field(ax6, xx, yy, second_fields["pressure"], f"6  {second_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
-        fig.colorbar(m6, ax=ax6, shrink=0.82, label="Pa proxy")
+        _plot_horizontal_diagnostics(
+            ax5u,
+            ax6u,
+            second_fields.get("upper_horizontal"),
+            speed_label=f"5U  {second_title} upper/from: speed |u',v'|",
+            pressure_label=f"6U  {second_title} upper/from: geostrophic p' proxy",
+        )
+        _plot_horizontal_diagnostics(
+            ax5l,
+            ax6l,
+            second_fields.get("lower_horizontal"),
+            speed_label=f"5L  {second_title} lower/to: speed |u',v'|",
+            pressure_label=f"6L  {second_title} lower/to: geostrophic p' proxy",
+        )
         if "w_section" in second_fields:
             m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True)
             fig.colorbar(m9, ax=ax9, shrink=0.82, label="s^-1 diagnostic")
@@ -890,12 +987,8 @@ def _plot_9panel(
         else:
             _hatch_unavailable(ax9, "second jump vertical w section unavailable")
             _hatch_unavailable(ax11, "second jump omega w section unavailable")
-        for ax in [ax5, ax6]:
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(loc="upper right", fontsize=8)
     else:
-        for ax in [ax5, ax6, ax9, ax11]:
+        for ax in [ax5u, ax6u, ax5l, ax6l, ax9, ax11]:
             _hatch_unavailable(ax, "no second abrupt layer discontinuity detected")
 
     surface_track = track_layers[track_layers["depth_index"].astype(int).eq(0)].sort_values("date")
@@ -973,31 +1066,32 @@ def _make_jump_cross_section_fields(
     surface = offsets.iloc[0]
     surface_lon = float(surface["longitude"])
     surface_lat = float(surface["latitude"])
-    layer_index = int(jump_to_depth_index)
-
-    vel2 = _read_field_window(
-        path=filter_path,
-        date=selected.date,
-        center_lon=surface_lon,
-        center_lat=surface_lat,
-        depth_index=layer_index,
-        half_width_deg=half_width_deg,
-        variables=("uo_glor", "vo_glor"),
-    )
-
-    lon = vel2["longitude"]
-    lat = vel2["latitude"]
-    x_m, y_m, xx, yy = _relative_xy(lon, lat, surface_lon, surface_lat)
-    u = vel2["uo_glor"]
-    v = vel2["vo_glor"]
-    speed = np.hypot(u, v)
-    pressure = _pressure_proxy(u, v, x_m, y_m, _coriolis(surface_lat))
     marks = _build_center_marks(
         offsets,
         surface_lon,
         surface_lat,
         jump_from_depth_index,
         jump_to_depth_index,
+    )
+    upper_horizontal = None
+    if jump_from_depth_index is not None:
+        upper_horizontal = _horizontal_layer_fields(
+            filter_path=filter_path,
+            date=selected.date,
+            surface_lon=surface_lon,
+            surface_lat=surface_lat,
+            layer_index=int(jump_from_depth_index),
+            half_width_deg=half_width_deg,
+            marks=marks,
+        )
+    lower_horizontal = _horizontal_layer_fields(
+        filter_path=filter_path,
+        date=selected.date,
+        surface_lon=surface_lon,
+        surface_lat=surface_lat,
+        layer_index=int(jump_to_depth_index),
+        half_width_deg=half_width_deg,
+        marks=marks,
     )
     filter_column = _read_column_window(
         path=filter_path,
@@ -1034,13 +1128,8 @@ def _make_jump_cross_section_fields(
     )
 
     return {
-        "xx": xx,
-        "yy": yy,
-        "u": u,
-        "v": v,
-        "speed": speed,
-        "pressure": pressure,
-        "marks": marks,
+        "upper_horizontal": upper_horizontal,
+        "lower_horizontal": lower_horizontal,
         "w_section": w_section,
     }
 
