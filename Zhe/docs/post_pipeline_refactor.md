@@ -32,7 +32,7 @@ python -m src.post.cli run-default --shape coherent --orientation both
 
 `src/Location/run_representative_stirring_transport.py`、`src/Location/run_coherent_stirring_transport.py` 和 `src/experiments/temp/run_aggregate_product_stirring.py` 现在是兼容 wrapper，真实实现位于 `src.post.transport`。
 
-Li2026/MITgcm/Nencioli/Hua 论文复刻、7-panel 单涡诊断、一次性方法对比图仍属于 `legacy/` 或 `src/experiments/`，不进入正式 post 主链。
+Li2026/MITgcm/Nencioli/Hua 论文复刻、9-panel 单涡间断点审查图、一次性方法对比图仍属于 `legacy/` 或 `src/experiments/`，不进入正式 post 主链。
 
 ## 后续清理
 
