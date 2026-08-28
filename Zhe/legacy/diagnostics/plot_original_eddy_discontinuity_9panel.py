@@ -340,6 +340,12 @@ def _vertical_velocity_proxy(u3: np.ndarray, v3: np.ndarray, depth: np.ndarray, 
     return w
 
 
+def _vertical_gradient_w(w: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    if len(depth) < 2:
+        return np.zeros_like(w)
+    return np.gradient(w, depth, axis=0, edge_order=1)
+
+
 def _sigma0(theta: np.ndarray, salinity: np.ndarray) -> tuple[np.ndarray, str]:
     try:
         import gsw
@@ -471,8 +477,21 @@ def _plot_vertical_w_section(
     s = section["section_coord_km"]
     depth = section["depth"]
     w = section["w_section"]
-    vmin, vmax = _finite_limits(w)
-    mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    dwdz = section["dwdz_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
+    vmin, vmax = _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    w_local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
+    finite_w = w_local[np.isfinite(w_local)]
+    if finite_w.size:
+        levels = np.linspace(float(np.nanquantile(finite_w, 0.1)), float(np.nanquantile(finite_w, 0.9)), 7)
+        levels = levels[np.isfinite(levels)]
+        if np.unique(levels).size >= 3:
+            ax.contour(s, depth, w, levels=np.unique(levels), colors="0.2", linewidths=0.55, alpha=0.65)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -487,7 +506,9 @@ def _plot_vertical_w_section(
         ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
         ax.legend(loc="best", fontsize=7)
     axis_name = str(section.get("section_axis", "section"))
-    ax.set_title(f"{title}: vertical w proxy ({axis_name})", fontsize=10)
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: vertical shear of w proxy ({axis_name})", fontsize=10)
     ax.set_xlabel("section distance from surface center (km)")
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
@@ -631,6 +652,9 @@ def _make_jump_cross_section_fields(
     half_width_deg: float,
     jump_from_depth_index: int | None,
     jump_to_depth_index: int | None,
+    w_shear_depth_padding_layers: int,
+    w_shear_half_width_r: float,
+    w_shear_min_half_width_km: float,
 ) -> dict[str, np.ndarray] | None:
     if jump_to_depth_index is None:
         return None
@@ -683,6 +707,10 @@ def _make_jump_cross_section_fields(
         surface_lat=surface_lat,
         jump_from_depth_index=jump_from_depth_index,
         jump_to_depth_index=jump_to_depth_index,
+        radius_m=selected.radius_m,
+        depth_padding_layers=w_shear_depth_padding_layers,
+        half_width_r=w_shear_half_width_r,
+        min_half_width_km=w_shear_min_half_width_km,
     )
 
     return {
@@ -705,12 +733,17 @@ def _make_vertical_w_section(
     surface_lat: float,
     jump_from_depth_index: int | None,
     jump_to_depth_index: int | None,
+    radius_m: float,
+    depth_padding_layers: int,
+    half_width_r: float,
+    min_half_width_km: float,
 ) -> dict[str, np.ndarray]:
     lon = column["longitude"]
     lat = column["latitude"]
     depth = column["depth"]
     x_m, y_m, _, _ = _relative_xy(lon, lat, surface_lon, surface_lat)
     w = _vertical_velocity_proxy(column["uo_glor"], column["vo_glor"], depth, x_m, y_m)
+    dwdz = _vertical_gradient_w(w, depth)
 
     centers = object_layers.sort_values("depth_index").copy()
     center_x = centers["delta_x_km"].to_numpy(dtype="f8")
@@ -750,17 +783,43 @@ def _make_vertical_w_section(
     else:
         ix = int(np.nanargmin(np.abs(x_m / 1000.0 - target_x)))
         section = w[:, :, ix]
+        dwdz_section = dwdz[:, :, ix]
         section_coord = y_m / 1000.0
         center_coord = center_y
         axis = f"y-z at x={x_m[ix] / 1000.0:.1f} km"
+        center_target = target_y
+
+    if abs(dx) >= abs(dy):
+        dwdz_section = dwdz[:, iy, :]
+        center_target = target_x
+
+    if jump_from_depth_index is not None and jump_to_depth_index is not None:
+        k_min = max(0, min(jump_from_depth_index, jump_to_depth_index) - max(0, depth_padding_layers))
+        k_max = min(len(depth) - 1, max(jump_from_depth_index, jump_to_depth_index) + max(0, depth_padding_layers))
+    elif jump_to_depth_index is not None:
+        k_min = max(0, jump_to_depth_index - max(0, depth_padding_layers))
+        k_max = min(len(depth) - 1, jump_to_depth_index + max(0, depth_padding_layers))
+    else:
+        k_min = 0
+        k_max = min(len(depth) - 1, max(1, 2 * max(0, depth_padding_layers)))
+    x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+    xlim = np.array([center_target - x_half, center_target + x_half], dtype="f8")
+    coord_min = float(np.nanmin(section_coord))
+    coord_max = float(np.nanmax(section_coord))
+    xlim[0] = max(xlim[0], coord_min)
+    xlim[1] = min(xlim[1], coord_max)
+    zlim = np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8")
 
     return {
         "section_coord_km": np.asarray(section_coord, dtype="f8"),
         "depth": np.asarray(depth, dtype="f8"),
         "w_section": np.asarray(section, dtype="f8"),
+        "dwdz_section": np.asarray(dwdz_section, dtype="f8"),
         "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
         "center_depth_m": np.asarray(center_z, dtype="f8"),
         "section_axis": axis,
+        "xlim_km": xlim,
+        "zlim_m": zlim,
     }
 
 
@@ -770,6 +829,9 @@ def _make_cross_section_fields(
     raw_root: Path,
     filter_root: Path,
     half_width_deg: float,
+    w_shear_depth_padding_layers: int,
+    w_shear_half_width_r: float,
+    w_shear_min_half_width_km: float,
 ) -> dict[str, dict[str, np.ndarray] | None]:
     del raw_root
     return {
@@ -780,6 +842,9 @@ def _make_cross_section_fields(
             half_width_deg=half_width_deg,
             jump_from_depth_index=selected.jump_from_depth_index if selected.has_abrupt_jump else None,
             jump_to_depth_index=selected.jump_to_depth_index if selected.has_abrupt_jump else None,
+            w_shear_depth_padding_layers=w_shear_depth_padding_layers,
+            w_shear_half_width_r=w_shear_half_width_r,
+            w_shear_min_half_width_km=w_shear_min_half_width_km,
         ),
         "second": _make_jump_cross_section_fields(
             selected=selected,
@@ -788,6 +853,9 @@ def _make_cross_section_fields(
             half_width_deg=half_width_deg,
             jump_from_depth_index=selected.second_jump_from_depth_index if selected.has_second_abrupt_jump else None,
             jump_to_depth_index=selected.second_jump_to_depth_index if selected.has_second_abrupt_jump else None,
+            w_shear_depth_padding_layers=w_shear_depth_padding_layers,
+            w_shear_half_width_r=w_shear_half_width_r,
+            w_shear_min_half_width_km=w_shear_min_half_width_km,
         ),
     }
 
@@ -861,6 +929,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--half-width-deg", type=float, default=2.0)
     parser.add_argument("--year-limit", type=int, default=None)
     parser.add_argument("--max-examples", type=int, default=1, help="Number of ranked original eddy object-days to plot.")
+    parser.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
+    parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
+    parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     return parser
 
 
@@ -882,6 +953,9 @@ def main() -> None:
             args.raw_root,
             args.filter_root,
             args.half_width_deg,
+            args.w_shear_depth_padding_layers,
+            args.w_shear_half_width_r,
+            args.w_shear_min_half_width_km,
         )
         _write_metadata(selected, args.output_dir)
         _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir)
@@ -907,6 +981,9 @@ def main() -> None:
             args.raw_root,
             args.filter_root,
             args.half_width_deg,
+            args.w_shear_depth_padding_layers,
+            args.w_shear_half_width_r,
+            args.w_shear_min_half_width_km,
         )
         _write_metadata(selected, child)
         _plot_9panel(selected, object_layers, track_layers, fields, child)
