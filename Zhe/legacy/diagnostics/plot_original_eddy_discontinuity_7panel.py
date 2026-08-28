@@ -35,6 +35,13 @@ class SelectedObject:
     jump_distance_km: float
     jump_distance_over_R: float
     has_abrupt_jump: bool
+    second_jump_from_depth_index: int | None
+    second_jump_to_depth_index: int | None
+    second_jump_from_depth_m: float | None
+    second_jump_to_depth_m: float | None
+    second_jump_distance_km: float
+    second_jump_distance_over_R: float
+    has_second_abrupt_jump: bool
 
 
 def _coriolis(lat_deg: float) -> float:
@@ -95,19 +102,22 @@ def _choose_object(
         x = (part["longitude"].to_numpy(dtype="f8") - lon0) * dx_m
         y = (part["latitude"].to_numpy(dtype="f8") - lat0) * dy_m
         jumps = np.hypot(np.diff(x), np.diff(y))
-        if jumps.size:
-            i = int(np.nanargmax(jumps))
-            jump_km = float(jumps[i] / 1000.0)
-            jump_r = float(jumps[i] / radius_m) if radius_m > 0 else np.nan
-            k0 = int(part.iloc[i]["depth_index"])
-            k1 = int(part.iloc[i + 1]["depth_index"])
-            z0 = float(part.iloc[i]["depth_m"])
-            z1 = float(part.iloc[i + 1]["depth_m"])
-        else:
-            jump_km = np.nan
-            jump_r = np.nan
-            k0 = k1 = -1
-            z0 = z1 = np.nan
+        ranked_jumps = np.argsort(jumps)[::-1] if jumps.size else np.array([], dtype=int)
+
+        def jump_record(rank: int) -> tuple[float, float, int, int, float, float]:
+            if ranked_jumps.size <= rank:
+                return np.nan, np.nan, -1, -1, np.nan, np.nan
+            idx = int(ranked_jumps[rank])
+            jump_km_value = float(jumps[idx] / 1000.0)
+            jump_r_value = float(jumps[idx] / radius_m) if radius_m > 0 else np.nan
+            from_k = int(part.iloc[idx]["depth_index"])
+            to_k = int(part.iloc[idx + 1]["depth_index"])
+            from_z = float(part.iloc[idx]["depth_m"])
+            to_z = float(part.iloc[idx + 1]["depth_m"])
+            return jump_km_value, jump_r_value, from_k, to_k, from_z, to_z
+
+        jump_km, jump_r, k0, k1, z0, z1 = jump_record(0)
+        jump2_km, jump2_r, k20, k21, z20, z21 = jump_record(1)
         rows.append(
             {
                 "eddy3d_object_id": int(object_id),
@@ -123,6 +133,12 @@ def _choose_object(
                 "jump_to_depth_m": z1,
                 "jump_distance_km": jump_km,
                 "jump_distance_over_R": jump_r,
+                "second_jump_from_depth_index": k20,
+                "second_jump_to_depth_index": k21,
+                "second_jump_from_depth_m": z20,
+                "second_jump_to_depth_m": z21,
+                "second_jump_distance_km": jump2_km,
+                "second_jump_distance_over_R": jump2_r,
             }
         )
     candidates = pd.DataFrame(rows)
@@ -145,6 +161,13 @@ def _choose_object(
         jump_distance_km=float(best["jump_distance_km"]),
         jump_distance_over_R=float(best["jump_distance_over_R"]),
         has_abrupt_jump=bool(float(best["jump_distance_over_R"]) >= abrupt_threshold_over_R),
+        second_jump_from_depth_index=int(best["second_jump_from_depth_index"]) if int(best["second_jump_from_depth_index"]) >= 0 else None,
+        second_jump_to_depth_index=int(best["second_jump_to_depth_index"]) if int(best["second_jump_to_depth_index"]) >= 0 else None,
+        second_jump_from_depth_m=float(best["second_jump_from_depth_m"]) if np.isfinite(float(best["second_jump_from_depth_m"])) else None,
+        second_jump_to_depth_m=float(best["second_jump_to_depth_m"]) if np.isfinite(float(best["second_jump_to_depth_m"])) else None,
+        second_jump_distance_km=float(best["second_jump_distance_km"]) if np.isfinite(float(best["second_jump_distance_km"])) else np.nan,
+        second_jump_distance_over_R=float(best["second_jump_distance_over_R"]) if np.isfinite(float(best["second_jump_distance_over_R"])) else np.nan,
+        has_second_abrupt_jump=bool(np.isfinite(float(best["second_jump_distance_over_R"])) and float(best["second_jump_distance_over_R"]) >= abrupt_threshold_over_R),
     )
     obj = allowed[allowed["eddy3d_object_id"].astype(int).eq(selected.eddy3d_object_id)].sort_values("depth_index").copy()
     track = centers[centers["track3d_id"].astype(int).eq(selected.track3d_id)].copy()
@@ -382,13 +405,15 @@ def _plot_7panel(
     selected: SelectedObject,
     object_layers: pd.DataFrame,
     track_layers: pd.DataFrame,
-    fields: dict[str, np.ndarray] | None,
+    fields: dict[str, dict[str, np.ndarray] | None],
     output_dir: Path,
-    density_note: str,
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
-    has_abrupt = bool(selected.has_abrupt_jump and fields is not None)
+    first_fields = fields.get("first")
+    second_fields = fields.get("second")
+    has_first = bool(selected.has_abrupt_jump and first_fields is not None)
+    has_second = bool(selected.has_second_abrupt_jump and second_fields is not None)
 
     fig = plt.figure(figsize=(16, 11), constrained_layout=True)
     gs = fig.add_gridspec(3, 4, height_ratios=[1.0, 1.0, 0.9], width_ratios=[0.95, 0.95, 1.1, 1.1])
@@ -413,25 +438,39 @@ def _plot_7panel(
         ax.set_title(title)
         ax.grid(alpha=0.25)
 
-    if has_abrupt and fields is not None:
-        xx = fields["xx"]
-        yy = fields["yy"]
-        marks = fields["marks"]
-        m3 = _plot_field(ax3, xx, yy, fields["speed"], "3  horizontal speed |u',v'|", "magma", quiver=(fields["u"], fields["v"]), center_marks=marks)
+    if has_first and first_fields is not None:
+        xx = first_fields["xx"]
+        yy = first_fields["yy"]
+        marks = first_fields["marks"]
+        first_title = f"first jump {selected.jump_from_depth_index}->{selected.jump_to_depth_index}"
+        m3 = _plot_field(ax3, xx, yy, first_fields["speed"], f"3  {first_title}: speed |u',v'|", "magma", quiver=(first_fields["u"], first_fields["v"]), center_marks=marks)
         fig.colorbar(m3, ax=ax3, shrink=0.82, label="m/s")
-        m4 = _plot_field(ax4, xx, yy, fields["pressure"], "4  geostrophic pressure proxy p'", "RdBu_r", symmetric=True, center_marks=marks)
+        m4 = _plot_field(ax4, xx, yy, first_fields["pressure"], f"4  {first_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
         fig.colorbar(m4, ax=ax4, shrink=0.82, label="Pa proxy")
-        m5 = _plot_field(ax5, xx, yy, fields["wdiag"], "5  continuity vertical velocity proxy", "RdBu_r", symmetric=True, center_marks=marks)
-        fig.colorbar(m5, ax=ax5, shrink=0.82, label="m/s proxy")
-        m6 = _plot_field(ax6, xx, yy, fields["sigma0"], f"6  density: {density_note}", "viridis", center_marks=marks)
-        fig.colorbar(m6, ax=ax6, shrink=0.82, label="kg m$^{-3}$ proxy")
-        for ax in [ax3, ax4, ax5, ax6]:
+        for ax in [ax3, ax4]:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(loc="upper right", fontsize=8)
     else:
-        for ax in [ax3, ax4, ax5, ax6]:
-            _hatch_unavailable(ax, "no abrupt layer discontinuity detected")
+        for ax in [ax3, ax4]:
+            _hatch_unavailable(ax, "no first abrupt layer discontinuity detected")
+
+    if has_second and second_fields is not None:
+        xx = second_fields["xx"]
+        yy = second_fields["yy"]
+        marks = second_fields["marks"]
+        second_title = f"second jump {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}"
+        m5 = _plot_field(ax5, xx, yy, second_fields["speed"], f"5  {second_title}: speed |u',v'|", "magma", quiver=(second_fields["u"], second_fields["v"]), center_marks=marks)
+        fig.colorbar(m5, ax=ax5, shrink=0.82, label="m/s")
+        m6 = _plot_field(ax6, xx, yy, second_fields["pressure"], f"6  {second_title}: geostrophic p' proxy", "RdBu_r", symmetric=True, center_marks=marks)
+        fig.colorbar(m6, ax=ax6, shrink=0.82, label="Pa proxy")
+        for ax in [ax5, ax6]:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc="upper right", fontsize=8)
+    else:
+        for ax in [ax5, ax6]:
+            _hatch_unavailable(ax, "no second abrupt layer discontinuity detected")
 
     surface_track = track_layers[track_layers["depth_index"].astype(int).eq(0)].sort_values("date")
     if surface_track.empty:
@@ -451,6 +490,11 @@ def _plot_7panel(
             f"jump {selected.jump_from_depth_index}->{selected.jump_to_depth_index}, "
             f"{selected.jump_distance_km:.1f} km = {selected.jump_distance_over_R:.2f} R"
         )
+    if selected.has_second_abrupt_jump:
+        jump_text += (
+            f"; second {selected.second_jump_from_depth_index}->{selected.second_jump_to_depth_index}, "
+            f"{selected.second_jump_distance_km:.1f} km = {selected.second_jump_distance_over_R:.2f} R"
+        )
     fig.suptitle(
         "Original eddy discontinuity diagnostic, not representative vortex\n"
         f"object {selected.eddy3d_object_id}, track {selected.track3d_id}, {selected.date}, "
@@ -464,27 +508,27 @@ def _plot_7panel(
     plt.close(fig)
 
 
-def _make_cross_section_fields(
+def _make_jump_cross_section_fields(
+    *,
     selected: SelectedObject,
     object_layers: pd.DataFrame,
-    raw_root: Path,
     filter_root: Path,
     half_width_deg: float,
-) -> tuple[dict[str, np.ndarray] | None, str]:
-    if not selected.has_abrupt_jump or selected.jump_to_depth_index is None:
-        return None, ""
-
+    jump_from_depth_index: int | None,
+    jump_to_depth_index: int | None,
+) -> dict[str, np.ndarray] | None:
+    if jump_to_depth_index is None:
+        return None
     year = str(selected.date)[:4]
     filter_path = filter_root / f"global_phy_{year}_bandpass_30_180d.nc"
-    raw_path = raw_root / f"global_phy_{year}.nc"
-    if not filter_path.exists() or not raw_path.exists():
-        return None, "missing raw/filter files"
+    if not filter_path.exists():
+        return None
 
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
     surface_lon = float(surface["longitude"])
     surface_lat = float(surface["latitude"])
-    layer_index = int(selected.jump_to_depth_index)
+    layer_index = int(jump_to_depth_index)
 
     vel2 = _read_field_window(
         path=filter_path,
@@ -495,47 +539,59 @@ def _make_cross_section_fields(
         half_width_deg=half_width_deg,
         variables=("uo_glor", "vo_glor"),
     )
-    raw2 = _read_field_window(
-        path=raw_path,
-        date=selected.date,
-        center_lon=surface_lon,
-        center_lat=surface_lat,
-        depth_index=layer_index,
-        half_width_deg=half_width_deg,
-        variables=("thetao_glor", "so_glor"),
-    )
-    vel3 = _read_velocity_column(filter_path, selected.date, surface_lon, surface_lat, half_width_deg)
 
     lon = vel2["longitude"]
     lat = vel2["latitude"]
     x_m, y_m, xx, yy = _relative_xy(lon, lat, surface_lon, surface_lat)
-    k = _nearest_layer_index(vel3["depth"], layer_index)
     u = vel2["uo_glor"]
     v = vel2["vo_glor"]
     speed = np.hypot(u, v)
     pressure = _pressure_proxy(u, v, x_m, y_m, _coriolis(surface_lat))
-    wdiag = _vertical_velocity_proxy(vel3["uo_glor"], vel3["vo_glor"], vel3["depth"], x_m, y_m)[k]
-    sigma0, density_note = _sigma0(raw2["thetao_glor"], raw2["so_glor"])
     marks = _build_center_marks(
         offsets,
         surface_lon,
         surface_lat,
-        selected.jump_from_depth_index,
-        selected.jump_to_depth_index,
+        jump_from_depth_index,
+        jump_to_depth_index,
     )
 
-    fields = {
+    return {
         "xx": xx,
         "yy": yy,
         "u": u,
         "v": v,
         "speed": speed,
         "pressure": pressure,
-        "wdiag": wdiag,
-        "sigma0": sigma0,
         "marks": marks,
     }
-    return fields, density_note
+
+
+def _make_cross_section_fields(
+    selected: SelectedObject,
+    object_layers: pd.DataFrame,
+    raw_root: Path,
+    filter_root: Path,
+    half_width_deg: float,
+) -> dict[str, dict[str, np.ndarray] | None]:
+    del raw_root
+    return {
+        "first": _make_jump_cross_section_fields(
+            selected=selected,
+            object_layers=object_layers,
+            filter_root=filter_root,
+            half_width_deg=half_width_deg,
+            jump_from_depth_index=selected.jump_from_depth_index if selected.has_abrupt_jump else None,
+            jump_to_depth_index=selected.jump_to_depth_index if selected.has_abrupt_jump else None,
+        ),
+        "second": _make_jump_cross_section_fields(
+            selected=selected,
+            object_layers=object_layers,
+            filter_root=filter_root,
+            half_width_deg=half_width_deg,
+            jump_from_depth_index=selected.second_jump_from_depth_index if selected.has_second_abrupt_jump else None,
+            jump_to_depth_index=selected.second_jump_to_depth_index if selected.has_second_abrupt_jump else None,
+        ),
+    }
 
 
 def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
@@ -554,6 +610,13 @@ def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
         "jump_from_depth_m": selected.jump_from_depth_m,
         "jump_to_depth_m": selected.jump_to_depth_m,
         "has_abrupt_jump": selected.has_abrupt_jump,
+        "second_jump_distance_km": selected.second_jump_distance_km,
+        "second_jump_distance_over_R": selected.second_jump_distance_over_R,
+        "second_jump_from_depth_index": selected.second_jump_from_depth_index,
+        "second_jump_to_depth_index": selected.second_jump_to_depth_index,
+        "second_jump_from_depth_m": selected.second_jump_from_depth_m,
+        "second_jump_to_depth_m": selected.second_jump_to_depth_m,
+        "has_second_abrupt_jump": selected.has_second_abrupt_jump,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "selected_object_metadata.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -586,17 +649,15 @@ def main() -> None:
         abrupt_threshold_over_R=args.abrupt_threshold_over_r,
         year_limit=args.year_limit,
     )
-    fields, density_note = _make_cross_section_fields(
+    fields = _make_cross_section_fields(
         selected,
         object_layers,
         args.raw_root,
         args.filter_root,
         args.half_width_deg,
     )
-    if not density_note:
-        density_note = "not used"
     _write_metadata(selected, args.output_dir)
-    _plot_7panel(selected, object_layers, track_layers, fields, args.output_dir, density_note)
+    _plot_7panel(selected, object_layers, track_layers, fields, args.output_dir)
     print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
 
 
