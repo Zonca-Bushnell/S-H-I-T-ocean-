@@ -221,6 +221,10 @@ def write_runtime_config(args: argparse.Namespace, paths: Paths) -> None:
             "depth_policy": strict_depth_policy_text(allow_noncontiguous_depth=bool(args.allow_noncontiguous_depth)),
             "require_boundary_monotonic_rotation": bool(args.require_boundary_monotonic_rotation),
             "boundary_monotonic_exception_limit": int(args.boundary_monotonic_exception_limit),
+            "subgrid_center_refinement": not bool(args.disable_subgrid_center_refinement),
+            "subgrid_target_degree": float(args.subgrid_target_degree),
+            "subgrid_window_radius_cells": int(args.subgrid_window_radius_cells),
+            "subgrid_min_finite_fraction": float(args.subgrid_min_finite_fraction),
             "production_science_mouthful": PRODUCTION_SCIENCE_MOUTHFUL,
         },
     }
@@ -285,10 +289,18 @@ def detection_command(args: argparse.Namespace, paths: Paths, start: str, end: s
         str(params["min_finite_fraction"]),
         "--direction-exception-extra",
         str(params["direction_exception_extra"]),
+        "--subgrid-target-degree",
+        str(args.subgrid_target_degree),
+        "--subgrid-window-radius-cells",
+        str(args.subgrid_window_radius_cells),
+        "--subgrid-min-finite-fraction",
+        str(args.subgrid_min_finite_fraction),
         "--preload-day-uv",
         "--write-object-voxels",
         "--resume",
     ]
+    if bool(args.disable_subgrid_center_refinement):
+        cmd.append("--disable-subgrid-center-refinement")
     if not bool(args.allow_noncontiguous_depth):
         cmd.append("--stop-at-first-failed-layer")
     if bool(args.require_boundary_monotonic_rotation):
@@ -610,6 +622,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Legacy/diagnostic mode. Disable the production boundary-monotonic velocity-vector constraint.",
     )
     parser.add_argument("--boundary-monotonic-exception-limit", type=int, default=0)
+    parser.add_argument(
+        "--disable-subgrid-center-refinement",
+        action="store_true",
+        help="Legacy/diagnostic mode. Keep original grid-cell centers instead of local 1/24 degree refined velocity centers.",
+    )
+    parser.add_argument("--subgrid-target-degree", type=float, default=float(HUA_B3_START2_DETECTION_PARAMS["subgrid_target_degree"]))
+    parser.add_argument("--subgrid-window-radius-cells", type=int, default=int(HUA_B3_START2_DETECTION_PARAMS["subgrid_window_radius_cells"]))
+    parser.add_argument("--subgrid-min-finite-fraction", type=float, default=float(HUA_B3_START2_DETECTION_PARAMS["subgrid_min_finite_fraction"]))
     parser.add_argument(
         "--stages",
         default="detect,tracking,catalog_shape,representative",

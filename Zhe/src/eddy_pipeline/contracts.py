@@ -15,9 +15,14 @@ STRICT_CONTIGUOUS_COMPLETION_MODE = "hua_surface_contiguous_passed_layers_only"
 NONCONTIGUOUS_COMPLETION_MODE = "hua_passed_layers_only"
 PRODUCTION_SCIENCE_MOUTHFUL = (
     "hua_b3_start2 + 30-180d bandpass + boundary_monotonic + "
-    "strict_contiguous + life30 + coherent_only + ME_LIUTEX "
-    "azimuth_preserved + global_ls_alpha"
+    "strict_contiguous + local_1_24deg_refined_velocity_center + "
+    "life30 + coherent_only + ME_LIUTEX azimuth_preserved + "
+    "global_ls_alpha"
 )
+SUBGRID_REFINED_CENTER_LABEL = "local_1_24deg_refined_velocity_center"
+SUBGRID_REFINED_TARGET_DEGREE = 1.0 / 24.0
+SUBGRID_REFINED_WINDOW_RADIUS_CELLS = 2
+SUBGRID_REFINED_MIN_FINITE_FRACTION = 0.6
 
 HUA_B3_START2_DETECTION_PARAMS = {
     "surface_search_cells": 3,
@@ -32,6 +37,10 @@ HUA_B3_START2_DETECTION_PARAMS = {
     "min_reversal_fraction": 0.55,
     "min_finite_fraction": 0.75,
     "direction_exception_extra": 2,
+    "subgrid_center_refinement": True,
+    "subgrid_target_degree": SUBGRID_REFINED_TARGET_DEGREE,
+    "subgrid_window_radius_cells": SUBGRID_REFINED_WINDOW_RADIUS_CELLS,
+    "subgrid_min_finite_fraction": SUBGRID_REFINED_MIN_FINITE_FRACTION,
 }
 
 

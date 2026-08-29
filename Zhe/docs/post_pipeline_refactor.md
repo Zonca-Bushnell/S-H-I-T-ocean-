@@ -57,3 +57,14 @@ python -m src.post.original_eddy_panels --output-dir <output>
 `Zhe/legacy/diagnostics/plot_original_eddy_discontinuity_9panel.py`
 现在只保留为兼容 wrapper，真实实现不再放在 `legacy`。
 
+## 1/24° refined center 对 post 的影响
+
+post 不重新判断涡旋中心，只消费 catalog 中的生产中心：
+
+- `layer_centers_completed.longitude/latitude` 是当前生产中心。
+- 在新 `result_boundary_monotonic_subgrid_1_24deg` 口径下，这两个字段来自局地 1/24° refined velocity center。
+- `longitude_grid/latitude_grid` 保留旧 1/4°格点中心，只用于审计“格点锁定”是否造成看起来竖直或跳变的中心线。
+- `plot-original-eddy-panels` 增加 `--show-grid-centers`，可在 `delta x(z)`、`delta y(z)` 面板叠加旧格点中心线；默认关闭。
+
+因此，shape、representative、transport、double-core 和原始涡旋 panel 图在读取新 catalog 时会自动使用 refined 中心，不需要在 post 阶段再次插值。
+

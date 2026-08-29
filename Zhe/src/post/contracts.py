@@ -6,8 +6,9 @@ from pathlib import Path
 
 PRODUCTION_POST_SCOPE = (
     "hua_b3_start2 + 30-180d bandpass + boundary_monotonic + "
-    "strict_contiguous + life30 + coherent_only + ME_LIUTEX "
-    "azimuth_preserved + global_ls_alpha"
+    "strict_contiguous + optional local_1_24deg_refined_velocity_center + "
+    "life30 + coherent_only + ME_LIUTEX azimuth_preserved + "
+    "global_ls_alpha"
 )
 
 DEFAULT_RESULT_ROOT = Path("/root/autodl-fs/kuroshiou/result_boundary_monotonic")
