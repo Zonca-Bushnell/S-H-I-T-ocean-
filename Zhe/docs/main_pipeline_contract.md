@@ -85,3 +85,22 @@ result_boundary_monotonic/
 - 灏?Filter 鍏ュ彛鏀规垚鍖哄煙鏃犲叧鍛藉悕锛屼緥濡?`build_bandpass_filter.py`銆?
 - 淇濈暀鏃у叆鍙?wrapper锛屼絾鍦?help 鏂囨鍜屾枃妗ｄ腑鏍囪 legacy銆?
 
+## 7. 1/24° 局地亚网格中心口径
+
+从 `result_boundary_monotonic_subgrid_1_24deg` 开始，生产中心定义更新为：
+
+```text
+原网格 Hua b3_start2 圆周判据
++ boundary-monotonic
++ strict-contiguous
++ 通过层局地 1/24° refined velocity center
+```
+
+具体含义：
+
+- Hua 圆周切向性、两侧反转、边界速度向量单调旋转、object voxel 和 overlap tracking 仍在原 1/4°网格执行。
+- 只有 `hua_pass=True` 的层会在原格点速度弱中心附近开局地窗口，对 `sqrt(u'^2+v'^2)` 做 NaN-aware 线性插值到 1/24°等效网格，并用加密网格速度最小点作为生产中心。
+- `center_lon`、`center_lat` 是 refined 后的生产中心；旧格点中心保存在 `center_lon_grid`、`center_lat_grid`、`speed_min_i_grid`、`speed_min_j_grid`。
+- catalog 中 `longitude`、`latitude` 默认继承 refined 中心；shape、代表涡和 post 图像无需额外开关即可使用新中心。
+- 这不是全场 1/24°重采样，不写 1/24° Filter NetCDF；插值只发生在通过层的局地窗口中。
+

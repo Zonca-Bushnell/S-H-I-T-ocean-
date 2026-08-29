@@ -37,6 +37,12 @@ def _make_object_map(frame_objects: pd.DataFrame) -> pd.DataFrame:
     return objects
 
 
+def _optional_series(df: pd.DataFrame, column: str, default) -> pd.Series:
+    if column in df.columns:
+        return df[column]
+    return pd.Series(default, index=df.index)
+
+
 def _build_catalog(detection_dir: Path, tracking_dir: Path, catalog_dir: Path, *, strict_contiguous: bool = True) -> dict[str, int]:
     catalog_dir.mkdir(parents=True, exist_ok=True)
     centers = _read(detection_dir / "centers_hua_style.parquet")
@@ -99,6 +105,18 @@ def _build_catalog(detection_dir: Path, tracking_dir: Path, catalog_dir: Path, *
             "method": hua_method_name(strict_contiguous=strict_contiguous),
             "reversal_passed": passed["opposite_reversal_fraction"].astype(float) >= 0.55,
             "eddy3d_object_id": passed["eddy3d_object_id"].astype(np.int64),
+            "longitude_grid": _optional_series(passed, "center_lon_grid", np.nan).astype(float),
+            "latitude_grid": _optional_series(passed, "center_lat_grid", np.nan).astype(float),
+            "longitude_refined": _optional_series(passed, "center_lon_refined", passed["center_lon"]).astype(float),
+            "latitude_refined": _optional_series(passed, "center_lat_refined", passed["center_lat"]).astype(float),
+            "speed_min_i_grid": _optional_series(passed, "speed_min_i_grid", np.nan).astype(float),
+            "speed_min_j_grid": _optional_series(passed, "speed_min_j_grid", np.nan).astype(float),
+            "center_i_refined": _optional_series(passed, "center_i_refined", np.nan).astype(float),
+            "center_j_refined": _optional_series(passed, "center_j_refined", np.nan).astype(float),
+            "refined_offset_km": _optional_series(passed, "refined_offset_km", 0.0).astype(float),
+            "refined_ok": _optional_series(passed, "refined_ok", False).fillna(False).astype(bool),
+            "subgrid_fit_quality": _optional_series(passed, "subgrid_fit_quality", "legacy_no_subgrid").astype(str),
+            "core_speed_grid": _optional_series(passed, "center_speed_grid_ms", passed["center_speed_ms"]).astype(float),
         }
     ).sort_values(["date", "eddy3d_object_id", "depth_index"])
 
@@ -114,8 +132,17 @@ def _build_catalog(detection_dir: Path, tracking_dir: Path, catalog_dir: Path, *
             "depth_m",
             "longitude",
             "latitude",
+            "longitude_grid",
+            "latitude_grid",
+            "longitude_refined",
+            "latitude_refined",
             "radius_m",
             "polarity",
+            "refined_ok",
+            "refined_offset_km",
+            "subgrid_fit_quality",
+            "core_speed",
+            "core_speed_grid",
         ]
     ].sort_values(["date", "track3d_id", "eddy3d_object_id", "depth_index"])
 

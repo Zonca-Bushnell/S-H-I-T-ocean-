@@ -183,6 +183,100 @@ def _seeded_speed_min(speed: np.ndarray, seed_i: int, seed_j: int, radius_cells:
     return _iterative_speed_min(speed, int(ii), int(jj))
 
 
+def _fill_nearest_finite(field: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    finite = np.isfinite(field)
+    if not finite.any():
+        return np.asarray(field, dtype="float64"), finite
+    if finite.all():
+        return np.asarray(field, dtype="float64"), finite
+    _, indices = ndimage.distance_transform_edt(~finite, return_indices=True)
+    filled = np.asarray(field, dtype="float64")[tuple(indices)]
+    return filled, finite
+
+
+def _interp_1d_from_fraction(coord: np.ndarray, index_fraction: float) -> float:
+    grid = np.arange(coord.size, dtype="float64")
+    return float(np.interp(float(index_fraction), grid, np.asarray(coord, dtype="float64")))
+
+
+def _refine_speed_min_subgrid(
+    speed: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    center_i: int,
+    center_j: int,
+    *,
+    target_degree: float,
+    window_radius_cells: int,
+    min_finite_fraction: float,
+) -> dict[str, object]:
+    grid_lon = float(lon[center_i])
+    grid_lat = float(lat[center_j])
+    grid_speed = float(speed[center_j, center_i]) if np.isfinite(speed[center_j, center_i]) else np.nan
+    fallback = {
+        "center_i_refined": float(center_i),
+        "center_j_refined": float(center_j),
+        "center_lon_refined": grid_lon,
+        "center_lat_refined": grid_lat,
+        "refined_speed_ms": grid_speed,
+        "refined_offset_km": 0.0,
+        "refined_ok": False,
+        "subgrid_fit_quality": "fallback_grid",
+    }
+    if target_degree <= 0 or window_radius_cells < 1:
+        return fallback | {"subgrid_fit_quality": "disabled"}
+    x0 = max(0, int(center_i) - int(window_radius_cells))
+    x1 = min(speed.shape[1] - 1, int(center_i) + int(window_radius_cells))
+    y0 = max(0, int(center_j) - int(window_radius_cells))
+    y1 = min(speed.shape[0] - 1, int(center_j) + int(window_radius_cells))
+    if x1 <= x0 or y1 <= y0:
+        return fallback | {"subgrid_fit_quality": "window_too_small"}
+    window = np.asarray(speed[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    finite = np.isfinite(window)
+    if float(finite.mean()) < float(min_finite_fraction):
+        return fallback | {"subgrid_fit_quality": "insufficient_finite"}
+
+    filled, finite_mask = _fill_nearest_finite(window)
+    dlon = float(np.nanmedian(np.abs(np.diff(lon)))) if lon.size > 1 else 0.0
+    dlat = float(np.nanmedian(np.abs(np.diff(lat)))) if lat.size > 1 else 0.0
+    if dlon <= 0 or dlat <= 0:
+        return fallback | {"subgrid_fit_quality": "invalid_grid_spacing"}
+    step_i = max(float(target_degree) / dlon, 1.0e-3)
+    step_j = max(float(target_degree) / dlat, 1.0e-3)
+    xi = np.arange(0.0, float(x1 - x0) + 0.5 * step_i, step_i, dtype="float64")
+    yj = np.arange(0.0, float(y1 - y0) + 0.5 * step_j, step_j, dtype="float64")
+    if xi.size < 3 or yj.size < 3:
+        return fallback | {"subgrid_fit_quality": "refined_grid_too_small"}
+    yy, xx = np.meshgrid(yj, xi, indexing="ij")
+    coords = np.vstack([yy.ravel(), xx.ravel()])
+    dense = ndimage.map_coordinates(filled, coords, order=1, mode="nearest").reshape(yy.shape)
+    valid_weight = ndimage.map_coordinates(finite_mask.astype("float64"), coords, order=1, mode="nearest").reshape(yy.shape)
+    dense = np.where(valid_weight >= 0.999, dense, np.nan)
+    if not np.isfinite(dense).any():
+        return fallback | {"subgrid_fit_quality": "no_refined_finite"}
+    local_pick = int(np.nanargmin(dense))
+    pick_j, pick_i = np.unravel_index(local_pick, dense.shape)
+    if pick_i in (0, dense.shape[1] - 1) or pick_j in (0, dense.shape[0] - 1):
+        return fallback | {"subgrid_fit_quality": "minimum_on_refined_boundary"}
+
+    refined_i = float(x0 + xi[pick_i])
+    refined_j = float(y0 + yj[pick_j])
+    refined_lon = _interp_1d_from_fraction(lon, refined_i)
+    refined_lat = _interp_1d_from_fraction(lat, refined_j)
+    dx_km, dy_km = _grid_spacing_km(lon, lat)
+    offset_km = math.hypot((refined_i - center_i) * dx_km, (refined_j - center_j) * dy_km)
+    return {
+        "center_i_refined": refined_i,
+        "center_j_refined": refined_j,
+        "center_lon_refined": refined_lon,
+        "center_lat_refined": refined_lat,
+        "refined_speed_ms": float(dense[pick_j, pick_i]),
+        "refined_offset_km": float(offset_km),
+        "refined_ok": True,
+        "subgrid_fit_quality": "linear_interp_1_24deg",
+    }
+
+
 def _circle_check(
     u: np.ndarray,
     v: np.ndarray,
@@ -492,8 +586,33 @@ def _detect_day(
                 prev_i, prev_j = center_i, center_j
             else:
                 stopped = True
-            lat_value = float(lat[center_j])
-            lon_value = float(lon[center_i])
+            grid_lat_value = float(lat[center_j])
+            grid_lon_value = float(lon[center_i])
+            refined = (
+                _refine_speed_min_subgrid(
+                    speed,
+                    lon,
+                    lat,
+                    center_i,
+                    center_j,
+                    target_degree=float(args.subgrid_target_degree),
+                    window_radius_cells=int(args.subgrid_window_radius_cells),
+                    min_finite_fraction=float(args.subgrid_min_finite_fraction),
+                )
+                if bool(check["hua_pass"]) and not args.disable_subgrid_center_refinement
+                else {
+                    "center_i_refined": float(center_i),
+                    "center_j_refined": float(center_j),
+                    "center_lon_refined": grid_lon_value,
+                    "center_lat_refined": grid_lat_value,
+                    "refined_speed_ms": float(center_speed),
+                    "refined_offset_km": 0.0,
+                    "refined_ok": False,
+                    "subgrid_fit_quality": "not_attempted",
+                }
+            )
+            lat_value = float(refined["center_lat_refined"])
+            lon_value = float(refined["center_lon_refined"])
             polarity = _extremum_polarity(str(seed["ssh_extremum_type"]), lat_value, float(check.get("circulation_sign", np.nan)))
             row = {
                 "date": day.isoformat(),
@@ -509,13 +628,27 @@ def _detect_day(
                 "seed_lon": float(lon[seed_i]),
                 "seed_lat": float(lat[seed_j]),
                 "ssh_value_m": float(seed["ssh_value_m"]),
-                "speed_min_i": int(center_i),
-                "speed_min_j": int(center_j),
+                "speed_min_i": int(round(float(refined["center_i_refined"]))),
+                "speed_min_j": int(round(float(refined["center_j_refined"]))),
+                "speed_min_i_grid": int(center_i),
+                "speed_min_j_grid": int(center_j),
+                "center_lon_grid": grid_lon_value,
+                "center_lat_grid": grid_lat_value,
                 "center_lon": lon_value,
                 "center_lat": lat_value,
-                "center_x_from_seed_km": float((center_i - seed_i) * dx_km),
-                "center_y_from_seed_km": float((center_j - seed_j) * dy_km),
-                "center_speed_ms": float(center_speed),
+                "center_i_refined": float(refined["center_i_refined"]),
+                "center_j_refined": float(refined["center_j_refined"]),
+                "center_lon_refined": float(refined["center_lon_refined"]),
+                "center_lat_refined": float(refined["center_lat_refined"]),
+                "center_x_from_seed_km": float((float(refined["center_i_refined"]) - seed_i) * dx_km),
+                "center_y_from_seed_km": float((float(refined["center_j_refined"]) - seed_j) * dy_km),
+                "center_x_from_seed_grid_km": float((center_i - seed_i) * dx_km),
+                "center_y_from_seed_grid_km": float((center_j - seed_j) * dy_km),
+                "center_speed_ms": float(refined["refined_speed_ms"] if bool(refined["refined_ok"]) else center_speed),
+                "center_speed_grid_ms": float(center_speed),
+                "refined_offset_km": float(refined["refined_offset_km"]),
+                "refined_ok": bool(refined["refined_ok"]),
+                "subgrid_fit_quality": str(refined["subgrid_fit_quality"]),
                 "local_min_steps": int(min_steps),
                 "stopped_after_failure": bool(stopped),
                 **check,
@@ -531,6 +664,12 @@ def _detect_day(
                         "depth_m": float(depth[depth_index]),
                         "center_lon": lon_value,
                         "center_lat": lat_value,
+                        "center_lon_grid": grid_lon_value,
+                        "center_lat_grid": grid_lat_value,
+                        "center_lon_refined": float(refined["center_lon_refined"]),
+                        "center_lat_refined": float(refined["center_lat_refined"]),
+                        "refined_ok": bool(refined["refined_ok"]),
+                        "refined_offset_km": float(refined["refined_offset_km"]),
                         "radius_km": float(check["accepted_radius_cells"]) * float(np.nanmean([dx_km, dy_km])),
                         "polarity": polarity,
                     }
@@ -897,6 +1036,24 @@ def run(args: argparse.Namespace) -> None:
             "n_objects": int(centers["hua_object_id"].nunique()),
             "parameters": {**vars(args), "detection_params": params.__dict__},
         }
+        if "refined_ok" in centers.columns:
+            passed_refined = centers[centers["hua_pass"].astype(bool)].copy()
+            offsets = passed_refined["refined_offset_km"].astype(float) if "refined_offset_km" in passed_refined.columns else pd.Series(dtype=float)
+            finite_offsets = offsets[np.isfinite(offsets)]
+            summary.update(
+                {
+                    "subgrid_refined_enabled": bool(not args.disable_subgrid_center_refinement),
+                    "subgrid_target_degree": float(args.subgrid_target_degree),
+                    "subgrid_refined_ok_rows": int(passed_refined["refined_ok"].fillna(False).astype(bool).sum()),
+                    "subgrid_refined_ok_fraction_of_passed": float(
+                        passed_refined["refined_ok"].fillna(False).astype(bool).mean()
+                    )
+                    if len(passed_refined)
+                    else 0.0,
+                    "subgrid_refined_offset_km_median": float(np.nanmedian(finite_offsets)) if finite_offsets.size else 0.0,
+                    "subgrid_refined_offset_km_p90": float(np.nanquantile(finite_offsets, 0.9)) if finite_offsets.size else 0.0,
+                }
+            )
     (output_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     if rejection.empty:
         rejection.to_csv(output_dir / "rejection_reasons.csv", index=False)
@@ -929,6 +1086,29 @@ def main() -> None:
     parser.add_argument("--direction-exception-extra", type=int, default=0)
     parser.add_argument("--require-boundary-monotonic-rotation", action="store_true")
     parser.add_argument("--boundary-monotonic-exception-limit", type=int, default=0)
+    parser.add_argument(
+        "--disable-subgrid-center-refinement",
+        action="store_true",
+        help="Keep the original 1/4 degree grid-cell velocity minimum as the production center.",
+    )
+    parser.add_argument(
+        "--subgrid-target-degree",
+        type=float,
+        default=1.0 / 24.0,
+        help="Local refined-center interpolation spacing in degrees; default is 1/24 degree.",
+    )
+    parser.add_argument(
+        "--subgrid-window-radius-cells",
+        type=int,
+        default=2,
+        help="Half-width, in original grid cells, used around each passed Hua center for local refinement.",
+    )
+    parser.add_argument(
+        "--subgrid-min-finite-fraction",
+        type=float,
+        default=0.6,
+        help="Minimum finite-data fraction in the local refinement window.",
+    )
     parser.add_argument("--preload-day-uv", action="store_true")
     parser.add_argument("--write-object-voxels", action="store_true")
     parser.add_argument("--partial-only", action="store_true")
