@@ -158,6 +158,8 @@ def plot_original_eddy_panels(args: argparse.Namespace) -> None:
         cmd.extend(["--selected-metadata", str(args.selected_metadata)])
     if args.no_horizontal_smoothing:
         cmd.append("--no-horizontal-smoothing")
+    if args.show_grid_centers:
+        cmd.append("--show-grid-centers")
     if args.dry_run:
         print(f"[post] science: {PRODUCTION_POST_SCOPE}")
         print(f"[post] results root: {args.results_root}")
@@ -238,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     panels.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
     panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     panels.add_argument("--no-horizontal-smoothing", action="store_true")
+    panels.add_argument("--show-grid-centers", action="store_true")
     panels.add_argument("--selected-metadata", type=Path, default=None)
     panels.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     panels.add_argument("--dry-run", action="store_true")

@@ -725,6 +725,11 @@ def _object_offsets_km(object_layers: pd.DataFrame) -> pd.DataFrame:
     dx_m, dy_m = _meters_per_degree(float(surface["latitude"]))
     obj["delta_x_km"] = (obj["longitude"] - float(surface["longitude"])) * dx_m / 1000.0
     obj["delta_y_km"] = (obj["latitude"] - float(surface["latitude"])) * dy_m / 1000.0
+    if {"longitude_grid", "latitude_grid"}.issubset(obj.columns):
+        surface_grid_lon = float(surface["longitude_grid"]) if np.isfinite(float(surface["longitude_grid"])) else float(surface["longitude"])
+        surface_grid_lat = float(surface["latitude_grid"]) if np.isfinite(float(surface["latitude_grid"])) else float(surface["latitude"])
+        obj["delta_x_grid_km"] = (obj["longitude_grid"] - surface_grid_lon) * dx_m / 1000.0
+        obj["delta_y_grid_km"] = (obj["latitude_grid"] - surface_grid_lat) * dy_m / 1000.0
     return obj
 
 
@@ -822,12 +827,6 @@ def _plot_vertical_w_section(
     mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
@@ -865,12 +864,6 @@ def _plot_vertical_w_value_section(
     mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
@@ -910,12 +903,6 @@ def _plot_normal_horizontal_velocity_section(
         ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
@@ -954,6 +941,7 @@ def _plot_9panel(
     output_name_stem: str = "original_eddy_discontinuity_9panel",
     right_panel_mode: str = "omega_w",
     horizontal_smooth_sigma_cells: float = 0.8,
+    show_grid_centers: bool = False,
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -1011,6 +999,19 @@ def _plot_9panel(
     offset_xlim = max(1.0, offset_abs * 1.08)
     for ax, col, title in [(ax1, "delta_x_km", "1  delta x from surface center"), (ax2, "delta_y_km", "2  delta y from surface center")]:
         ax.plot(offsets[col], offsets["depth_m"], "-o", color="#244a9b", lw=1.8, ms=4)
+        grid_col = "delta_x_grid_km" if col == "delta_x_km" else "delta_y_grid_km"
+        if show_grid_centers and grid_col in offsets.columns:
+            ax.plot(
+                offsets[grid_col],
+                offsets["depth_m"],
+                "--s",
+                color="0.45",
+                lw=1.2,
+                ms=3,
+                alpha=0.85,
+                label="original grid center",
+            )
+            ax.legend(loc="best", fontsize=8)
         ax.axvline(0, color="0.75", lw=0.8)
         if selected.jump_from_depth_m is not None:
             ax.axhline(selected.jump_from_depth_m, color="tab:red", ls="--", lw=1.0, alpha=0.8)
@@ -1706,6 +1707,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--no-horizontal-smoothing", action="store_true")
+    parser.add_argument("--show-grid-centers", action="store_true", help="Overlay original 1/4 degree grid-cell centers when audit columns exist.")
     parser.add_argument("--selected-metadata", type=Path, default=None, help="Reuse a selected_objects_metadata.csv object list instead of re-ranking candidates.")
     parser.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     return parser
@@ -1746,6 +1748,7 @@ def main() -> None:
             args.output_name_stem,
             args.right_panel_mode,
             horizontal_smooth_sigma_cells,
+            args.show_grid_centers,
         )
         print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
         return
@@ -1792,6 +1795,7 @@ def main() -> None:
             args.output_name_stem,
             args.right_panel_mode,
             horizontal_smooth_sigma_cells,
+            args.show_grid_centers,
         )
         rows.append(_metadata_payload(selected, child, horizontal_smooth_sigma_cells))
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
