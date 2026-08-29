@@ -820,6 +820,7 @@ def _plot_vertical_w_section(
     local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
     vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    _draw_visible_section_contours(ax, s, depth, dwdz)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -863,6 +864,7 @@ def _plot_vertical_w_value_section(
     local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
     vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    _draw_visible_section_contours(ax, s, depth, w)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -905,9 +907,10 @@ def _plot_normal_horizontal_velocity_section(
     local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
     vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, u_perp, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    _draw_visible_section_contours(ax, s, depth, u_perp)
     finite = local[np.isfinite(local)]
     if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
-        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
+        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=2.4, alpha=0.98)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -943,6 +946,24 @@ def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str)
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = values[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else values
     return np.asarray(local, dtype="f8")
+
+
+def _symmetric_contour_levels(values: np.ndarray, *, count: int = 7) -> np.ndarray:
+    finite = np.asarray(values, dtype="f8")
+    finite = finite[np.isfinite(finite)]
+    if finite.size < 4:
+        return np.array([], dtype="f8")
+    vmax = float(np.nanpercentile(np.abs(finite), 92.0))
+    if not np.isfinite(vmax) or vmax <= 0:
+        return np.array([], dtype="f8")
+    levels = np.linspace(-vmax, vmax, count)
+    return levels[np.abs(levels) > vmax * 1e-6]
+
+
+def _draw_visible_section_contours(ax, s: np.ndarray, depth: np.ndarray, field: np.ndarray) -> None:
+    levels = _symmetric_contour_levels(field)
+    if levels.size:
+        ax.contour(s, depth, field, levels=levels, colors="0.25", linewidths=0.45, alpha=0.65)
 
 
 def _plot_9panel(
