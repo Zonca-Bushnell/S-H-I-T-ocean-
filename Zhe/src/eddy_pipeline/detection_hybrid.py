@@ -599,8 +599,8 @@ def _detect_day(
             refined = (
                 _refine_speed_min_subgrid(
                     speed,
-                    u_layer,
-                    v_layer,
+                    u,
+                    v,
                     lon,
                     lat,
                     center_i,
