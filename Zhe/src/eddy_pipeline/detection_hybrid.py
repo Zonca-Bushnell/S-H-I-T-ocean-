@@ -199,6 +199,42 @@ def _interp_1d_from_fraction(coord: np.ndarray, index_fraction: float) -> float:
     return float(np.interp(float(index_fraction), grid, np.asarray(coord, dtype="float64")))
 
 
+def _quadratic_speed_surface(
+    speed_window: np.ndarray,
+    finite: np.ndarray,
+    xi: np.ndarray,
+    yj: np.ndarray,
+) -> tuple[np.ndarray | None, str]:
+    yy0, xx0 = np.indices(speed_window.shape, dtype="float64")
+    x = xx0[finite].ravel()
+    y = yy0[finite].ravel()
+    z = np.square(np.asarray(speed_window, dtype="float64")[finite].ravel())
+    if z.size < 9:
+        return None, "quadratic_insufficient_points"
+    design = np.column_stack([x * x, y * y, x * y, x, y, np.ones_like(x)])
+    try:
+        coeff, *_ = np.linalg.lstsq(design, z, rcond=None)
+    except np.linalg.LinAlgError:
+        return None, "quadratic_lstsq_failed"
+    a, b, c, *_ = coeff
+    hessian = np.array([[2.0 * a, c], [c, 2.0 * b]], dtype="float64")
+    eig = np.linalg.eigvalsh(hessian)
+    if not np.all(np.isfinite(eig)) or float(np.nanmin(eig)) <= 0.0:
+        return None, "quadratic_not_convex"
+    yy, xx = np.meshgrid(yj, xi, indexing="ij")
+    dense_sq = (
+        coeff[0] * xx * xx
+        + coeff[1] * yy * yy
+        + coeff[2] * xx * yy
+        + coeff[3] * xx
+        + coeff[4] * yy
+        + coeff[5]
+    )
+    if not np.isfinite(dense_sq).any():
+        return None, "quadratic_no_finite"
+    return np.sqrt(np.maximum(dense_sq, 0.0)), "quadratic_speed2_1_24deg"
+
+
 def _refine_speed_min_subgrid(
     speed: np.ndarray,
     u: np.ndarray,
@@ -260,6 +296,12 @@ def _refine_speed_min_subgrid(
     dense = np.hypot(dense_u, dense_v)
     valid_weight = ndimage.map_coordinates(finite_mask.astype("float64"), coords, order=1, mode="nearest").reshape(yy.shape)
     dense = np.where(valid_weight >= 0.999, dense, np.nan)
+    quadratic_dense, quadratic_quality = _quadratic_speed_surface(speed_window, finite, xi, yj)
+    if quadratic_dense is not None:
+        dense = np.where(np.isfinite(dense), quadratic_dense, np.nan)
+        fit_quality = quadratic_quality
+    else:
+        fit_quality = "uv_vector_linear_interp_1_24deg"
     if not np.isfinite(dense).any():
         return fallback | {"subgrid_fit_quality": "no_refined_finite"}
     local_pick = int(np.nanargmin(dense))
@@ -281,7 +323,7 @@ def _refine_speed_min_subgrid(
         "refined_speed_ms": float(dense[pick_j, pick_i]),
         "refined_offset_km": float(offset_km),
         "refined_ok": True,
-        "subgrid_fit_quality": "uv_vector_linear_interp_1_24deg",
+        "subgrid_fit_quality": fit_quality,
     }
 
 
