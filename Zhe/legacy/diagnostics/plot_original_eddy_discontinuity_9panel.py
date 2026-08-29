@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from netCDF4 import Dataset, num2date
+from scipy.ndimage import gaussian_filter
 
 
 RHO0 = 1025.0
@@ -607,6 +608,32 @@ def _finite_limits(values: np.ndarray, quantile: float = 0.98) -> tuple[float, f
     return -vmax, vmax
 
 
+def _shared_finite_limits(values: list[np.ndarray], quantile: float = 0.98) -> tuple[float, float]:
+    finite_parts = [np.asarray(part[np.isfinite(part)], dtype="f8") for part in values if part is not None]
+    finite_parts = [part for part in finite_parts if part.size]
+    if not finite_parts:
+        return 0.0, 1.0
+    return _finite_limits(np.concatenate(finite_parts), quantile=quantile)
+
+
+def _nan_gaussian_smooth(field: np.ndarray, sigma_cells: float) -> np.ndarray:
+    if sigma_cells <= 0:
+        return np.asarray(field, dtype="f8")
+    values = np.asarray(field, dtype="f8")
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return values.copy()
+    filled = np.where(finite, values, 0.0)
+    weights = finite.astype("f8")
+    smoothed = gaussian_filter(filled, sigma=float(sigma_cells), mode="nearest")
+    weight_sum = gaussian_filter(weights, sigma=float(sigma_cells), mode="nearest")
+    out = np.full_like(values, np.nan, dtype="f8")
+    good = weight_sum > 1.0e-8
+    out[good] = smoothed[good] / weight_sum[good]
+    out[~finite] = np.nan
+    return out
+
+
 def _mark_center(ax, x_km: float, y_km: float, label: str, color: str, marker: str = "x") -> None:
     ax.scatter([x_km], [y_km], s=90, marker=marker, c=color, linewidths=2.0, label=label, zorder=8)
 
@@ -645,6 +672,8 @@ def _plot_field(
     symmetric: bool = False,
     quiver: tuple[np.ndarray, np.ndarray] | None = None,
     center_marks: list[tuple[float, float, str, str, str]] | None = None,
+    contour: bool = True,
+    contour_color: str = "0.25",
 ):
     if symmetric:
         vmin, vmax = _finite_limits(field)
@@ -653,6 +682,14 @@ def _plot_field(
         vmin = float(np.nanquantile(finite, 0.02)) if finite.size else 0.0
         vmax = float(np.nanquantile(finite, 0.98)) if finite.size else 1.0
     mesh = ax.pcolormesh(xx, yy, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    if contour:
+        finite = field[np.isfinite(field)]
+        if finite.size:
+            lo = float(np.nanquantile(finite, 0.10))
+            hi = float(np.nanquantile(finite, 0.90))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                levels = np.linspace(lo, hi, 7)
+                ax.contour(xx, yy, field, levels=levels, colors=contour_color, linewidths=0.55, alpha=0.7)
     if quiver is not None:
         u, v = quiver
         step = max(1, int(max(u.shape) / 18))
@@ -667,6 +704,19 @@ def _plot_field(
     ax.set_xlabel("east from surface center (km)")
     ax.set_ylabel("north from surface center (km)")
     return mesh
+
+
+def _layer_depth_label(layer_fields: dict[str, np.ndarray] | None) -> str:
+    if layer_fields is None:
+        return ""
+    layer_index = int(np.asarray(layer_fields.get("layer_index", -1)).item())
+    depth_value = layer_fields.get("layer_depth_m")
+    if depth_value is None:
+        return f"k={layer_index}"
+    depth_m = float(np.asarray(depth_value).item())
+    if not np.isfinite(depth_m):
+        return f"k={layer_index}"
+    return f"k={layer_index}, z={depth_m:.0f} m"
 
 
 def _object_offsets_km(object_layers: pd.DataFrame) -> pd.DataFrame:
@@ -716,6 +766,7 @@ def _horizontal_layer_fields(
     layer_index: int,
     half_width_deg: float,
     marks: list[tuple[float, float, str, str, str]],
+    object_layers: pd.DataFrame | None = None,
 ) -> dict[str, np.ndarray]:
     vel2 = _read_field_window(
         path=filter_path,
@@ -731,6 +782,11 @@ def _horizontal_layer_fields(
     x_m, y_m, xx, yy = _relative_xy(lon, lat, surface_lon, surface_lat)
     u = vel2["uo_glor"]
     v = vel2["vo_glor"]
+    layer_depth_m = np.nan
+    if object_layers is not None and "depth_m" in object_layers.columns:
+        row = object_layers[object_layers["depth_index"].astype(int).eq(int(layer_index))]
+        if not row.empty:
+            layer_depth_m = float(row.iloc[0]["depth_m"])
     return {
         "xx": xx,
         "yy": yy,
@@ -740,6 +796,7 @@ def _horizontal_layer_fields(
         "pressure": _pressure_proxy(u, v, x_m, y_m, _coriolis(surface_lat)),
         "marks": marks,
         "layer_index": np.array(layer_index),
+        "layer_depth_m": np.array(layer_depth_m),
     }
 
 
@@ -750,6 +807,7 @@ def _plot_vertical_w_section(
     selected: SelectedObject,
     *,
     second: bool = False,
+    value_limits: tuple[float, float] | None = None,
 ):
     s = section["section_coord_km"]
     depth = section["depth"]
@@ -760,15 +818,8 @@ def _plot_vertical_w_section(
     xmask = (s >= xlim[0]) & (s <= xlim[1])
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
-    vmin, vmax = _finite_limits(local)
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
-    w_local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
-    finite_w = w_local[np.isfinite(w_local)]
-    if finite_w.size:
-        levels = np.linspace(float(np.nanquantile(finite_w, 0.1)), float(np.nanquantile(finite_w, 0.9)), 7)
-        levels = levels[np.isfinite(levels)]
-        if np.unique(levels).size >= 3:
-            ax.contour(s, depth, w, levels=np.unique(levels), colors="0.2", linewidths=0.55, alpha=0.65)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -799,6 +850,7 @@ def _plot_vertical_w_value_section(
     selected: SelectedObject,
     *,
     second: bool = False,
+    value_limits: tuple[float, float] | None = None,
 ):
     s = section["section_coord_km"]
     depth = section["depth"]
@@ -809,14 +861,8 @@ def _plot_vertical_w_value_section(
     xmask = (s >= xlim[0]) & (s <= xlim[1])
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
-    vmin, vmax = _finite_limits(local)
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
-    shear_local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
-    finite_shear = shear_local[np.isfinite(shear_local)]
-    if finite_shear.size:
-        q90 = float(np.nanquantile(np.abs(finite_shear), 0.9))
-        if np.isfinite(q90) and q90 > 0:
-            ax.contour(s, depth, np.abs(dwdz), levels=[q90], colors="0.15", linewidths=0.7, alpha=0.75)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -840,6 +886,65 @@ def _plot_vertical_w_value_section(
     return mesh
 
 
+def _plot_normal_horizontal_velocity_section(
+    ax,
+    section: dict[str, np.ndarray],
+    title: str,
+    selected: SelectedObject,
+    *,
+    second: bool = False,
+    value_limits: tuple[float, float] | None = None,
+):
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    u_perp = section["normal_horizontal_velocity_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, u_perp, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    finite = local[np.isfinite(local)]
+    if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
+        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
+    ax.invert_yaxis()
+    ax.axvline(0, color="0.75", lw=0.8)
+    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
+    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
+    if from_z is not None:
+        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
+    if to_z is not None:
+        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
+    center_s = section.get("center_section_coord_km")
+    center_z = section.get("center_depth_m")
+    if center_s is not None and center_z is not None:
+        ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
+        ax.legend(loc="best", fontsize=7)
+    axis_name = str(section.get("section_axis", "section"))
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: normal horizontal velocity u_perp\n{axis_name}", fontsize=9)
+    ax.set_xlabel("distance along jump direction from layer center (km)")
+    ax.set_ylabel("depth (m)")
+    ax.grid(alpha=0.2)
+    return mesh
+
+
+def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str) -> np.ndarray:
+    if section is None or value_key not in section:
+        return np.array([], dtype="f8")
+    values = section[value_key]
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = values[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else values
+    return np.asarray(local, dtype="f8")
+
+
 def _plot_9panel(
     selected: SelectedObject,
     object_layers: pd.DataFrame,
@@ -847,6 +952,8 @@ def _plot_9panel(
     fields: dict[str, dict[str, np.ndarray] | None],
     output_dir: Path,
     output_name_stem: str = "original_eddy_discontinuity_9panel",
+    right_panel_mode: str = "omega_w",
+    horizontal_smooth_sigma_cells: float = 0.8,
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -878,6 +985,30 @@ def _plot_9panel(
     ax11 = fig.add_subplot(gs[2:4, 5])
     ax7 = fig.add_subplot(gs[4, :])
 
+    normal_sections = []
+    dwdz_sections = []
+    w_sections = []
+    for part, available in [(first_fields, has_first), (second_fields, has_second)]:
+        if not available or part is None:
+            continue
+        if right_panel_mode == "normal_horizontal_velocity":
+            for key in ("upper_velocity_section", "lower_velocity_section"):
+                if key in part:
+                    normal_sections.append(_section_local_values(part[key], "normal_horizontal_velocity_section"))
+        elif "w_section" in part:
+            dwdz_sections.append(_section_local_values(part["w_section"], "dwdz_section"))
+            w_sections.append(_section_local_values(part["w_section"], "w_section"))
+    normal_limits = _shared_finite_limits(normal_sections) if normal_sections else None
+    dwdz_limits = _shared_finite_limits(dwdz_sections) if dwdz_sections else None
+    w_limits = _shared_finite_limits(w_sections) if w_sections else None
+    normal_meshes, normal_axes = [], []
+    dwdz_meshes, dwdz_axes = [], []
+    w_meshes, w_axes = [], []
+
+    offset_values = np.abs(offsets[["delta_x_km", "delta_y_km"]].to_numpy(dtype="f8"))
+    offset_values = offset_values[np.isfinite(offset_values)]
+    offset_abs = float(np.nanmax(offset_values)) if offset_values.size else 1.0
+    offset_xlim = max(1.0, offset_abs * 1.08)
     for ax, col, title in [(ax1, "delta_x_km", "1  delta x from surface center"), (ax2, "delta_y_km", "2  delta y from surface center")]:
         ax.plot(offsets[col], offsets["depth_m"], "-o", color="#244a9b", lw=1.8, ms=4)
         ax.axvline(0, color="0.75", lw=0.8)
@@ -888,6 +1019,7 @@ def _plot_9panel(
         ax.invert_yaxis()
         ax.set_xlabel("offset (km)")
         ax.set_ylabel("depth (m)")
+        ax.set_xlim(-offset_xlim, offset_xlim)
         ax.set_title(title)
         ax.grid(alpha=0.25)
 
@@ -906,26 +1038,30 @@ def _plot_9panel(
         xx = layer_fields["xx"]
         yy = layer_fields["yy"]
         marks = layer_fields["marks"]
+        speed_field = _nan_gaussian_smooth(layer_fields["speed"], horizontal_smooth_sigma_cells)
+        pressure_field = _nan_gaussian_smooth(layer_fields["pressure"], horizontal_smooth_sigma_cells)
         m_speed = _plot_field(
             speed_ax,
             xx,
             yy,
-            layer_fields["speed"],
-            speed_label,
-            "magma",
+            speed_field,
+            f"{speed_label}\n{_layer_depth_label(layer_fields)}",
+            "coolwarm",
             quiver=(layer_fields["u"], layer_fields["v"]),
             center_marks=marks,
+            contour=False,
         )
         fig.colorbar(m_speed, ax=speed_ax, shrink=0.82, label="m/s")
         m_pressure = _plot_field(
             pressure_ax,
             xx,
             yy,
-            layer_fields["pressure"],
-            pressure_label,
+            pressure_field,
+            f"{pressure_label}\n{_layer_depth_label(layer_fields)}",
             "RdBu_r",
             symmetric=True,
             center_marks=marks,
+            contour=False,
         )
         fig.colorbar(m_pressure, ax=pressure_ax, shrink=0.82, label="Pa proxy")
         for ax in [speed_ax, pressure_ax]:
@@ -950,11 +1086,18 @@ def _plot_9panel(
             speed_label=f"3L  {first_title} lower/to: speed |u',v'|",
             pressure_label=f"4L  {first_title} lower/to: geostrophic p' proxy",
         )
-        if "w_section" in first_fields:
-            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False)
-            fig.colorbar(m8, ax=ax8, shrink=0.82, label="s^-1 diagnostic")
-            m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False)
-            fig.colorbar(m10, ax=ax10, shrink=0.82, label="m/s diagnostic")
+        if right_panel_mode == "normal_horizontal_velocity" and "upper_velocity_section" in first_fields:
+            m8 = _plot_normal_horizontal_velocity_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False, value_limits=normal_limits)
+            m10 = _plot_normal_horizontal_velocity_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=normal_limits)
+            normal_meshes.extend([m8, m10])
+            normal_axes.extend([ax8, ax10])
+        elif "w_section" in first_fields:
+            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False, value_limits=dwdz_limits)
+            m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False, value_limits=w_limits)
+            dwdz_meshes.append(m8)
+            dwdz_axes.append(ax8)
+            w_meshes.append(m10)
+            w_axes.append(ax10)
         else:
             _hatch_unavailable(ax8, "first jump vertical w section unavailable")
             _hatch_unavailable(ax10, "first jump omega w section unavailable")
@@ -979,17 +1122,31 @@ def _plot_9panel(
             speed_label=f"5L  {second_title} lower/to: speed |u',v'|",
             pressure_label=f"6L  {second_title} lower/to: geostrophic p' proxy",
         )
-        if "w_section" in second_fields:
-            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True)
-            fig.colorbar(m9, ax=ax9, shrink=0.82, label="s^-1 diagnostic")
-            m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True)
-            fig.colorbar(m11, ax=ax11, shrink=0.82, label="m/s diagnostic")
+        if right_panel_mode == "normal_horizontal_velocity" and "upper_velocity_section" in second_fields:
+            m9 = _plot_normal_horizontal_velocity_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True, value_limits=normal_limits)
+            m11 = _plot_normal_horizontal_velocity_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=normal_limits)
+            normal_meshes.extend([m9, m11])
+            normal_axes.extend([ax9, ax11])
+        elif "w_section" in second_fields:
+            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True, value_limits=dwdz_limits)
+            m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True, value_limits=w_limits)
+            dwdz_meshes.append(m9)
+            dwdz_axes.append(ax9)
+            w_meshes.append(m11)
+            w_axes.append(ax11)
         else:
             _hatch_unavailable(ax9, "second jump vertical w section unavailable")
             _hatch_unavailable(ax11, "second jump omega w section unavailable")
     else:
         for ax in [ax5u, ax6u, ax5l, ax6l, ax9, ax11]:
             _hatch_unavailable(ax, "no second abrupt layer discontinuity detected")
+
+    if normal_meshes:
+        fig.colorbar(normal_meshes[0], ax=normal_axes, shrink=0.82, label="m/s")
+    if dwdz_meshes:
+        fig.colorbar(dwdz_meshes[0], ax=dwdz_axes, shrink=0.82, label="s^-1 diagnostic")
+    if w_meshes:
+        fig.colorbar(w_meshes[0], ax=w_axes, shrink=0.82, label="m/s diagnostic")
 
     surface_track = track_layers[track_layers["depth_index"].astype(int).eq(0)].sort_values("date")
     if surface_track.empty:
@@ -1017,7 +1174,8 @@ def _plot_9panel(
     fig.suptitle(
         "Original eddy discontinuity diagnostic, not representative vortex\n"
         f"object {selected.eddy3d_object_id}, track {selected.track3d_id}, {selected.date}, "
-        f"{selected.shape_class}/{selected.polarity}; {jump_text}",
+        f"{selected.shape_class}/{selected.polarity}; {jump_text}; "
+        f"display smoothing sigma={horizontal_smooth_sigma_cells:g} grid",
         fontsize=15,
     )
 
@@ -1051,6 +1209,7 @@ def _make_jump_cross_section_fields(
     w_shear_half_width_r: float,
     w_shear_min_half_width_km: float,
     w_section_mode: str,
+    right_panel_mode: str,
 ) -> dict[str, np.ndarray] | None:
     if jump_to_depth_index is None:
         return None
@@ -1059,7 +1218,7 @@ def _make_jump_cross_section_fields(
     raw_path = _year_raw_path(raw_root, year)
     if not filter_path.exists():
         return None
-    if not raw_path.exists():
+    if right_panel_mode == "omega_w" and not raw_path.exists():
         raise FileNotFoundError(f"Raw file required for omega-equation density: {raw_path}")
 
     offsets = _object_offsets_km(object_layers)
@@ -1083,6 +1242,7 @@ def _make_jump_cross_section_fields(
             layer_index=int(jump_from_depth_index),
             half_width_deg=half_width_deg,
             marks=marks,
+            object_layers=object_layers,
         )
     lower_horizontal = _horizontal_layer_fields(
         filter_path=filter_path,
@@ -1092,6 +1252,7 @@ def _make_jump_cross_section_fields(
         layer_index=int(jump_to_depth_index),
         half_width_deg=half_width_deg,
         marks=marks,
+        object_layers=object_layers,
     )
     filter_column = _read_column_window(
         path=filter_path,
@@ -1101,6 +1262,39 @@ def _make_jump_cross_section_fields(
         half_width_deg=half_width_deg,
         variables=("uo_glor", "vo_glor", "zos_glor"),
     )
+    out = {
+        "upper_horizontal": upper_horizontal,
+        "lower_horizontal": lower_horizontal,
+    }
+    if right_panel_mode == "normal_horizontal_velocity":
+        out["upper_velocity_section"] = _make_normal_horizontal_velocity_section(
+            object_layers=offsets,
+            column=filter_column,
+            surface_lon=surface_lon,
+            surface_lat=surface_lat,
+            jump_from_depth_index=jump_from_depth_index,
+            jump_to_depth_index=jump_to_depth_index,
+            anchor_depth_index=jump_from_depth_index,
+            radius_m=selected.radius_m,
+            depth_padding_layers=w_shear_depth_padding_layers,
+            half_width_r=w_shear_half_width_r,
+            min_half_width_km=w_shear_min_half_width_km,
+        )
+        out["lower_velocity_section"] = _make_normal_horizontal_velocity_section(
+            object_layers=offsets,
+            column=filter_column,
+            surface_lon=surface_lon,
+            surface_lat=surface_lat,
+            jump_from_depth_index=jump_from_depth_index,
+            jump_to_depth_index=jump_to_depth_index,
+            anchor_depth_index=jump_to_depth_index,
+            radius_m=selected.radius_m,
+            depth_padding_layers=w_shear_depth_padding_layers,
+            half_width_r=w_shear_half_width_r,
+            min_half_width_km=w_shear_min_half_width_km,
+        )
+        return out
+
     raw_column = _read_column_window(
         path=raw_path,
         date=selected.date,
@@ -1110,7 +1304,7 @@ def _make_jump_cross_section_fields(
         variables=("thetao_glor", "so_glor"),
     )
     omega = _omega_w_diagnostic(filter_column, raw_column, surface_lon, surface_lat)
-    w_section = _make_vertical_w_section(
+    out["w_section"] = _make_vertical_w_section(
         object_layers=offsets,
         column=filter_column,
         w_field=np.asarray(omega["omega_w"], dtype="f8"),
@@ -1126,12 +1320,7 @@ def _make_jump_cross_section_fields(
         min_half_width_km=w_shear_min_half_width_km,
         section_mode=w_section_mode,
     )
-
-    return {
-        "upper_horizontal": upper_horizontal,
-        "lower_horizontal": lower_horizontal,
-        "w_section": w_section,
-    }
+    return out
 
 
 def _make_vertical_w_section(
@@ -1252,6 +1441,88 @@ def _make_vertical_w_section(
     }
 
 
+def _make_normal_horizontal_velocity_section(
+    *,
+    object_layers: pd.DataFrame,
+    column: dict[str, np.ndarray],
+    surface_lon: float,
+    surface_lat: float,
+    jump_from_depth_index: int | None,
+    jump_to_depth_index: int | None,
+    anchor_depth_index: int | None,
+    radius_m: float,
+    depth_padding_layers: int,
+    half_width_r: float,
+    min_half_width_km: float,
+) -> dict[str, np.ndarray]:
+    lon = column["longitude"]
+    lat = column["latitude"]
+    depth = column["depth"]
+    x_m, y_m, _, _ = _relative_xy(lon, lat, surface_lon, surface_lat)
+    u = np.asarray(column["uo_glor"], dtype="f8")
+    v = np.asarray(column["vo_glor"], dtype="f8")
+
+    centers = object_layers.sort_values("depth_index").copy()
+    center_x = centers["delta_x_km"].to_numpy(dtype="f8")
+    center_y = centers["delta_y_km"].to_numpy(dtype="f8")
+    center_z = centers["depth_m"].to_numpy(dtype="f8")
+
+    def layer_xy(depth_index: int | None) -> tuple[float, float] | None:
+        if depth_index is None:
+            return None
+        row = centers[centers["depth_index"].astype(int).eq(int(depth_index))]
+        if row.empty:
+            return None
+        return float(row.iloc[0]["delta_x_km"]), float(row.iloc[0]["delta_y_km"])
+
+    p0 = layer_xy(jump_from_depth_index)
+    p1 = layer_xy(jump_to_depth_index)
+    if p0 is not None and p1 is not None:
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+    elif p1 is not None:
+        dx, dy = p1
+    else:
+        dx, dy = 1.0, 0.0
+    norm = float(np.hypot(dx, dy))
+    if not np.isfinite(norm) or norm <= 1e-9:
+        ex, ey = 1.0, 0.0
+    else:
+        ex, ey = dx / norm, dy / norm
+    nx, ny = -ey, ex
+
+    anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+    x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+    max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+    section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+    x_line = anchor[0] + section_coord * ex
+    y_line = anchor[1] + section_coord * ey
+    normal_velocity = u * nx + v * ny
+    normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
+    center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
+
+    if anchor_depth_index is not None:
+        k_min = max(0, int(anchor_depth_index) - max(0, depth_padding_layers))
+        k_max = min(len(depth) - 1, int(anchor_depth_index) + max(0, depth_padding_layers))
+    elif jump_from_depth_index is not None and jump_to_depth_index is not None:
+        k_min = max(0, min(jump_from_depth_index, jump_to_depth_index) - max(0, depth_padding_layers))
+        k_max = min(len(depth) - 1, max(jump_from_depth_index, jump_to_depth_index) + max(0, depth_padding_layers))
+    else:
+        k_min = 0
+        k_max = min(len(depth) - 1, max(1, 2 * max(0, depth_padding_layers)))
+
+    return {
+        "section_coord_km": np.asarray(section_coord, dtype="f8"),
+        "depth": np.asarray(depth, dtype="f8"),
+        "normal_horizontal_velocity_section": np.asarray(normal_velocity_section, dtype="f8"),
+        "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
+        "center_depth_m": np.asarray(center_z, dtype="f8"),
+        "section_axis": "jump-parallel section; color is cross-section horizontal u_perp",
+        "xlim_km": np.array([-x_half, x_half], dtype="f8"),
+        "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
+    }
+
+
 def _make_cross_section_fields(
     selected: SelectedObject,
     object_layers: pd.DataFrame,
@@ -1262,6 +1533,7 @@ def _make_cross_section_fields(
     w_shear_half_width_r: float,
     w_shear_min_half_width_km: float,
     w_section_mode: str,
+    right_panel_mode: str,
 ) -> dict[str, dict[str, np.ndarray] | None]:
     return {
         "first": _make_jump_cross_section_fields(
@@ -1276,6 +1548,7 @@ def _make_cross_section_fields(
             w_shear_half_width_r=w_shear_half_width_r,
             w_shear_min_half_width_km=w_shear_min_half_width_km,
             w_section_mode=w_section_mode,
+            right_panel_mode=right_panel_mode,
         ),
         "second": _make_jump_cross_section_fields(
             selected=selected,
@@ -1289,11 +1562,12 @@ def _make_cross_section_fields(
             w_shear_half_width_r=w_shear_half_width_r,
             w_shear_min_half_width_km=w_shear_min_half_width_km,
             w_section_mode=w_section_mode,
+            right_panel_mode=right_panel_mode,
         ),
     }
 
 
-def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
+def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smooth_sigma_cells: float | None = None) -> None:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
@@ -1317,13 +1591,19 @@ def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
         "second_jump_to_depth_m": selected.second_jump_to_depth_m,
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
     }
+    if horizontal_smooth_sigma_cells is not None:
+        payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "selected_object_metadata.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     pd.DataFrame([payload]).to_csv(output_dir / "selected_object_metadata.csv", index=False)
 
 
-def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, object]:
-    return {
+def _metadata_payload(
+    selected: SelectedObject,
+    output_dir: Path,
+    horizontal_smooth_sigma_cells: float | None = None,
+) -> dict[str, object]:
+    payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
         "date": selected.date,
@@ -1347,6 +1627,9 @@ def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, o
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
         "output_dir": str(output_dir),
     }
+    if horizontal_smooth_sigma_cells is not None:
+        payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
+    return payload
 
 
 def _selected_from_metadata_row(row: pd.Series, abrupt_threshold_over_R: float) -> SelectedObject:
@@ -1420,6 +1703,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
+    parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
+    parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
+    parser.add_argument("--no-horizontal-smoothing", action="store_true")
     parser.add_argument("--selected-metadata", type=Path, default=None, help="Reuse a selected_objects_metadata.csv object list instead of re-ranking candidates.")
     parser.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     return parser
@@ -1427,6 +1713,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
+    horizontal_smooth_sigma_cells = 0.0 if args.no_horizontal_smoothing else max(0.0, float(args.horizontal_smooth_sigma_cells))
     centers, shape_tracks = _load_catalog(args.results_root, args.shape_dir_name)
     if args.selected_metadata is None and args.max_examples <= 1:
         selected, object_layers, track_layers = _choose_object(
@@ -1447,9 +1734,19 @@ def main() -> None:
             args.w_shear_half_width_r,
             args.w_shear_min_half_width_km,
             args.w_section_mode,
+            args.right_panel_mode,
         )
-        _write_metadata(selected, args.output_dir)
-        _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir, args.output_name_stem)
+        _write_metadata(selected, args.output_dir, horizontal_smooth_sigma_cells)
+        _plot_9panel(
+            selected,
+            object_layers,
+            track_layers,
+            fields,
+            args.output_dir,
+            args.output_name_stem,
+            args.right_panel_mode,
+            horizontal_smooth_sigma_cells,
+        )
         print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
         return
 
@@ -1483,10 +1780,20 @@ def main() -> None:
             args.w_shear_half_width_r,
             args.w_shear_min_half_width_km,
             args.w_section_mode,
+            args.right_panel_mode,
         )
-        _write_metadata(selected, child)
-        _plot_9panel(selected, object_layers, track_layers, fields, child, args.output_name_stem)
-        rows.append(_metadata_payload(selected, child))
+        _write_metadata(selected, child, horizontal_smooth_sigma_cells)
+        _plot_9panel(
+            selected,
+            object_layers,
+            track_layers,
+            fields,
+            child,
+            args.output_name_stem,
+            args.right_panel_mode,
+            horizontal_smooth_sigma_cells,
+        )
+        rows.append(_metadata_payload(selected, child, horizontal_smooth_sigma_cells))
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
 
     summary = pd.DataFrame(rows)
