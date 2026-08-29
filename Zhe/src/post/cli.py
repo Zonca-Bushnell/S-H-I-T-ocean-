@@ -97,6 +97,7 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
         results_root=Path(args.results_root),
         shape_dir_name=args.shape_dir_name,
         filter_root=Path(args.filter_root),
+        raw_root=Path(args.raw_root) if args.raw_root else None,
         output_dir=Path(args.output_dir),
         shapes=args.shapes,
         jump_ranks=args.jump_ranks,
@@ -105,6 +106,7 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
         half_width_r=args.w_shear_half_width_r,
         min_half_width_km=args.w_shear_min_half_width_km,
         section_modes=args.section_modes,
+        vertical_velocity_method=args.vertical_velocity_method,
         year_limit=args.year_limit,
         resume=args.resume,
     )
@@ -147,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     relation.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
     relation.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
     relation.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
+    relation.add_argument("--raw-root", type=Path, default=None)
     relation.add_argument("--output-dir", type=Path, required=True)
     relation.add_argument("--shapes", default=DEFAULT_SHAPE)
     relation.add_argument("--jump-ranks", type=int, default=2)
@@ -155,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     relation.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     relation.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     relation.add_argument("--section-modes", default="parallel")
+    relation.add_argument("--vertical-velocity-method", choices=["proxy", "omega"], default="proxy")
     relation.add_argument("--year-limit", type=int, default=None)
     relation.add_argument("--chunk-days", type=int, default=14)
     relation.add_argument("--resume", action="store_true")
