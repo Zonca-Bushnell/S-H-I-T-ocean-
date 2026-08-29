@@ -607,6 +607,14 @@ def _finite_limits(values: np.ndarray, quantile: float = 0.98) -> tuple[float, f
     return -vmax, vmax
 
 
+def _shared_finite_limits(values: list[np.ndarray], quantile: float = 0.98) -> tuple[float, float]:
+    finite_parts = [np.asarray(part[np.isfinite(part)], dtype="f8") for part in values if part is not None]
+    finite_parts = [part for part in finite_parts if part.size]
+    if not finite_parts:
+        return 0.0, 1.0
+    return _finite_limits(np.concatenate(finite_parts), quantile=quantile)
+
+
 def _mark_center(ax, x_km: float, y_km: float, label: str, color: str, marker: str = "x") -> None:
     ax.scatter([x_km], [y_km], s=90, marker=marker, c=color, linewidths=2.0, label=label, zorder=8)
 
@@ -679,6 +687,19 @@ def _plot_field(
     return mesh
 
 
+def _layer_depth_label(layer_fields: dict[str, np.ndarray] | None) -> str:
+    if layer_fields is None:
+        return ""
+    layer_index = int(np.asarray(layer_fields.get("layer_index", -1)).item())
+    depth_value = layer_fields.get("layer_depth_m")
+    if depth_value is None:
+        return f"k={layer_index}"
+    depth_m = float(np.asarray(depth_value).item())
+    if not np.isfinite(depth_m):
+        return f"k={layer_index}"
+    return f"k={layer_index}, z={depth_m:.0f} m"
+
+
 def _object_offsets_km(object_layers: pd.DataFrame) -> pd.DataFrame:
     obj = object_layers.sort_values("depth_index").copy()
     surface = obj.iloc[0]
@@ -726,6 +747,7 @@ def _horizontal_layer_fields(
     layer_index: int,
     half_width_deg: float,
     marks: list[tuple[float, float, str, str, str]],
+    object_layers: pd.DataFrame | None = None,
 ) -> dict[str, np.ndarray]:
     vel2 = _read_field_window(
         path=filter_path,
@@ -741,6 +763,11 @@ def _horizontal_layer_fields(
     x_m, y_m, xx, yy = _relative_xy(lon, lat, surface_lon, surface_lat)
     u = vel2["uo_glor"]
     v = vel2["vo_glor"]
+    layer_depth_m = np.nan
+    if object_layers is not None and "depth_m" in object_layers.columns:
+        row = object_layers[object_layers["depth_index"].astype(int).eq(int(layer_index))]
+        if not row.empty:
+            layer_depth_m = float(row.iloc[0]["depth_m"])
     return {
         "xx": xx,
         "yy": yy,
@@ -750,6 +777,7 @@ def _horizontal_layer_fields(
         "pressure": _pressure_proxy(u, v, x_m, y_m, _coriolis(surface_lat)),
         "marks": marks,
         "layer_index": np.array(layer_index),
+        "layer_depth_m": np.array(layer_depth_m),
     }
 
 
@@ -760,6 +788,7 @@ def _plot_vertical_w_section(
     selected: SelectedObject,
     *,
     second: bool = False,
+    value_limits: tuple[float, float] | None = None,
 ):
     s = section["section_coord_km"]
     depth = section["depth"]
@@ -770,15 +799,8 @@ def _plot_vertical_w_section(
     xmask = (s >= xlim[0]) & (s <= xlim[1])
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
-    vmin, vmax = _finite_limits(local)
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
-    w_local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
-    finite_w = w_local[np.isfinite(w_local)]
-    if finite_w.size:
-        levels = np.linspace(float(np.nanquantile(finite_w, 0.1)), float(np.nanquantile(finite_w, 0.9)), 7)
-        levels = levels[np.isfinite(levels)]
-        if np.unique(levels).size >= 3:
-            ax.contour(s, depth, w, levels=np.unique(levels), colors="0.2", linewidths=0.55, alpha=0.65)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -809,6 +831,7 @@ def _plot_vertical_w_value_section(
     selected: SelectedObject,
     *,
     second: bool = False,
+    value_limits: tuple[float, float] | None = None,
 ):
     s = section["section_coord_km"]
     depth = section["depth"]
@@ -819,14 +842,8 @@ def _plot_vertical_w_value_section(
     xmask = (s >= xlim[0]) & (s <= xlim[1])
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = w[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else w
-    vmin, vmax = _finite_limits(local)
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
-    shear_local = dwdz[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else dwdz
-    finite_shear = shear_local[np.isfinite(shear_local)]
-    if finite_shear.size:
-        q90 = float(np.nanquantile(np.abs(finite_shear), 0.9))
-        if np.isfinite(q90) and q90 > 0:
-            ax.contour(s, depth, np.abs(dwdz), levels=[q90], colors="0.15", linewidths=0.7, alpha=0.75)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -857,6 +874,7 @@ def _plot_normal_horizontal_velocity_section(
     selected: SelectedObject,
     *,
     second: bool = False,
+    value_limits: tuple[float, float] | None = None,
 ):
     s = section["section_coord_km"]
     depth = section["depth"]
@@ -866,16 +884,11 @@ def _plot_normal_horizontal_velocity_section(
     xmask = (s >= xlim[0]) & (s <= xlim[1])
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
-    vmin, vmax = _finite_limits(local)
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, u_perp, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     finite = local[np.isfinite(local)]
-    if finite.size:
-        vmax_local = float(np.nanquantile(np.abs(finite), 0.90))
-        levels = np.array([-vmax_local, 0.0, vmax_local], dtype="f8")
-        levels = levels[np.isfinite(levels)]
-        levels = np.unique(levels)
-        if levels.size >= 2 and vmax_local > 0:
-            ax.contour(s, depth, u_perp, levels=levels, colors="0.15", linewidths=0.65, alpha=0.8)
+    if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
+        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
@@ -897,6 +910,20 @@ def _plot_normal_horizontal_velocity_section(
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
     return mesh
+
+
+def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str) -> np.ndarray:
+    if section is None or value_key not in section:
+        return np.array([], dtype="f8")
+    values = section[value_key]
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = values[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else values
+    return np.asarray(local, dtype="f8")
 
 
 def _plot_9panel(
@@ -938,6 +965,30 @@ def _plot_9panel(
     ax11 = fig.add_subplot(gs[2:4, 5])
     ax7 = fig.add_subplot(gs[4, :])
 
+    normal_sections = []
+    dwdz_sections = []
+    w_sections = []
+    for part, available in [(first_fields, has_first), (second_fields, has_second)]:
+        if not available or part is None:
+            continue
+        if right_panel_mode == "normal_horizontal_velocity":
+            for key in ("upper_velocity_section", "lower_velocity_section"):
+                if key in part:
+                    normal_sections.append(_section_local_values(part[key], "normal_horizontal_velocity_section"))
+        elif "w_section" in part:
+            dwdz_sections.append(_section_local_values(part["w_section"], "dwdz_section"))
+            w_sections.append(_section_local_values(part["w_section"], "w_section"))
+    normal_limits = _shared_finite_limits(normal_sections) if normal_sections else None
+    dwdz_limits = _shared_finite_limits(dwdz_sections) if dwdz_sections else None
+    w_limits = _shared_finite_limits(w_sections) if w_sections else None
+    normal_meshes, normal_axes = [], []
+    dwdz_meshes, dwdz_axes = [], []
+    w_meshes, w_axes = [], []
+
+    offset_values = np.abs(offsets[["delta_x_km", "delta_y_km"]].to_numpy(dtype="f8"))
+    offset_values = offset_values[np.isfinite(offset_values)]
+    offset_abs = float(np.nanmax(offset_values)) if offset_values.size else 1.0
+    offset_xlim = max(1.0, offset_abs * 1.08)
     for ax, col, title in [(ax1, "delta_x_km", "1  delta x from surface center"), (ax2, "delta_y_km", "2  delta y from surface center")]:
         ax.plot(offsets[col], offsets["depth_m"], "-o", color="#244a9b", lw=1.8, ms=4)
         ax.axvline(0, color="0.75", lw=0.8)
@@ -948,6 +999,7 @@ def _plot_9panel(
         ax.invert_yaxis()
         ax.set_xlabel("offset (km)")
         ax.set_ylabel("depth (m)")
+        ax.set_xlim(-offset_xlim, offset_xlim)
         ax.set_title(title)
         ax.grid(alpha=0.25)
 
@@ -971,11 +1023,11 @@ def _plot_9panel(
             xx,
             yy,
             layer_fields["speed"],
-            speed_label,
-            "magma",
+            f"{speed_label}\n{_layer_depth_label(layer_fields)}",
+            "coolwarm",
             quiver=(layer_fields["u"], layer_fields["v"]),
             center_marks=marks,
-            contour_color="0.85",
+            contour=False,
         )
         fig.colorbar(m_speed, ax=speed_ax, shrink=0.82, label="m/s")
         m_pressure = _plot_field(
@@ -983,11 +1035,11 @@ def _plot_9panel(
             xx,
             yy,
             layer_fields["pressure"],
-            pressure_label,
+            f"{pressure_label}\n{_layer_depth_label(layer_fields)}",
             "RdBu_r",
             symmetric=True,
             center_marks=marks,
-            contour_color="0.2",
+            contour=False,
         )
         fig.colorbar(m_pressure, ax=pressure_ax, shrink=0.82, label="Pa proxy")
         for ax in [speed_ax, pressure_ax]:
@@ -1013,15 +1065,17 @@ def _plot_9panel(
             pressure_label=f"4L  {first_title} lower/to: geostrophic p' proxy",
         )
         if right_panel_mode == "normal_horizontal_velocity" and "upper_velocity_section" in first_fields:
-            m8 = _plot_normal_horizontal_velocity_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False)
-            fig.colorbar(m8, ax=ax8, shrink=0.82, label="m/s")
-            m10 = _plot_normal_horizontal_velocity_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False)
-            fig.colorbar(m10, ax=ax10, shrink=0.82, label="m/s")
+            m8 = _plot_normal_horizontal_velocity_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False, value_limits=normal_limits)
+            m10 = _plot_normal_horizontal_velocity_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=normal_limits)
+            normal_meshes.extend([m8, m10])
+            normal_axes.extend([ax8, ax10])
         elif "w_section" in first_fields:
-            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False)
-            fig.colorbar(m8, ax=ax8, shrink=0.82, label="s^-1 diagnostic")
-            m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False)
-            fig.colorbar(m10, ax=ax10, shrink=0.82, label="m/s diagnostic")
+            m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False, value_limits=dwdz_limits)
+            m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False, value_limits=w_limits)
+            dwdz_meshes.append(m8)
+            dwdz_axes.append(ax8)
+            w_meshes.append(m10)
+            w_axes.append(ax10)
         else:
             _hatch_unavailable(ax8, "first jump vertical w section unavailable")
             _hatch_unavailable(ax10, "first jump omega w section unavailable")
@@ -1047,21 +1101,30 @@ def _plot_9panel(
             pressure_label=f"6L  {second_title} lower/to: geostrophic p' proxy",
         )
         if right_panel_mode == "normal_horizontal_velocity" and "upper_velocity_section" in second_fields:
-            m9 = _plot_normal_horizontal_velocity_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True)
-            fig.colorbar(m9, ax=ax9, shrink=0.82, label="m/s")
-            m11 = _plot_normal_horizontal_velocity_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True)
-            fig.colorbar(m11, ax=ax11, shrink=0.82, label="m/s")
+            m9 = _plot_normal_horizontal_velocity_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True, value_limits=normal_limits)
+            m11 = _plot_normal_horizontal_velocity_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=normal_limits)
+            normal_meshes.extend([m9, m11])
+            normal_axes.extend([ax9, ax11])
         elif "w_section" in second_fields:
-            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True)
-            fig.colorbar(m9, ax=ax9, shrink=0.82, label="s^-1 diagnostic")
-            m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True)
-            fig.colorbar(m11, ax=ax11, shrink=0.82, label="m/s diagnostic")
+            m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True, value_limits=dwdz_limits)
+            m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True, value_limits=w_limits)
+            dwdz_meshes.append(m9)
+            dwdz_axes.append(ax9)
+            w_meshes.append(m11)
+            w_axes.append(ax11)
         else:
             _hatch_unavailable(ax9, "second jump vertical w section unavailable")
             _hatch_unavailable(ax11, "second jump omega w section unavailable")
     else:
         for ax in [ax5u, ax6u, ax5l, ax6l, ax9, ax11]:
             _hatch_unavailable(ax, "no second abrupt layer discontinuity detected")
+
+    if normal_meshes:
+        fig.colorbar(normal_meshes[0], ax=normal_axes, shrink=0.82, label="m/s")
+    if dwdz_meshes:
+        fig.colorbar(dwdz_meshes[0], ax=dwdz_axes, shrink=0.82, label="s^-1 diagnostic")
+    if w_meshes:
+        fig.colorbar(w_meshes[0], ax=w_axes, shrink=0.82, label="m/s diagnostic")
 
     surface_track = track_layers[track_layers["depth_index"].astype(int).eq(0)].sort_values("date")
     if surface_track.empty:
@@ -1156,6 +1219,7 @@ def _make_jump_cross_section_fields(
             layer_index=int(jump_from_depth_index),
             half_width_deg=half_width_deg,
             marks=marks,
+            object_layers=object_layers,
         )
     lower_horizontal = _horizontal_layer_fields(
         filter_path=filter_path,
@@ -1165,6 +1229,7 @@ def _make_jump_cross_section_fields(
         layer_index=int(jump_to_depth_index),
         half_width_deg=half_width_deg,
         marks=marks,
+        object_layers=object_layers,
     )
     filter_column = _read_column_window(
         path=filter_path,
