@@ -827,12 +827,6 @@ def _plot_vertical_w_section(
     mesh = ax.pcolormesh(s, depth, dwdz, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
@@ -870,12 +864,6 @@ def _plot_vertical_w_value_section(
     mesh = ax.pcolormesh(s, depth, w, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
@@ -915,12 +903,6 @@ def _plot_normal_horizontal_velocity_section(
         ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
-    from_z = selected.second_jump_from_depth_m if second else selected.jump_from_depth_m
-    to_z = selected.second_jump_to_depth_m if second else selected.jump_to_depth_m
-    if from_z is not None:
-        ax.axhline(from_z, color="tab:red", ls="--", lw=1.0, alpha=0.8)
-    if to_z is not None:
-        ax.axhline(to_z, color="tab:red", ls=":", lw=1.0, alpha=0.8)
     center_s = section.get("center_section_coord_km")
     center_z = section.get("center_depth_m")
     if center_s is not None and center_z is not None:
