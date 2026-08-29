@@ -645,6 +645,8 @@ def _plot_field(
     symmetric: bool = False,
     quiver: tuple[np.ndarray, np.ndarray] | None = None,
     center_marks: list[tuple[float, float, str, str, str]] | None = None,
+    contour: bool = True,
+    contour_color: str = "0.25",
 ):
     if symmetric:
         vmin, vmax = _finite_limits(field)
@@ -653,6 +655,14 @@ def _plot_field(
         vmin = float(np.nanquantile(finite, 0.02)) if finite.size else 0.0
         vmax = float(np.nanquantile(finite, 0.98)) if finite.size else 1.0
     mesh = ax.pcolormesh(xx, yy, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    if contour:
+        finite = field[np.isfinite(field)]
+        if finite.size:
+            lo = float(np.nanquantile(finite, 0.10))
+            hi = float(np.nanquantile(finite, 0.90))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                levels = np.linspace(lo, hi, 7)
+                ax.contour(xx, yy, field, levels=levels, colors=contour_color, linewidths=0.55, alpha=0.7)
     if quiver is not None:
         u, v = quiver
         step = max(1, int(max(u.shape) / 18))
@@ -915,6 +925,7 @@ def _plot_9panel(
             "magma",
             quiver=(layer_fields["u"], layer_fields["v"]),
             center_marks=marks,
+            contour_color="0.85",
         )
         fig.colorbar(m_speed, ax=speed_ax, shrink=0.82, label="m/s")
         m_pressure = _plot_field(
@@ -926,6 +937,7 @@ def _plot_9panel(
             "RdBu_r",
             symmetric=True,
             center_marks=marks,
+            contour_color="0.2",
         )
         fig.colorbar(m_pressure, ax=pressure_ax, shrink=0.82, label="Pa proxy")
         for ax in [speed_ax, pressure_ax]:
