@@ -37,3 +37,23 @@ Li2026/MITgcm/Nencioli/Hua 璁烘枃澶嶅埢銆?-panel 鍗曟丁闂存柇鐐瑰
 
 `src.post.transport` 浠嶆部鐢ㄩ儴鍒?`src.Legacy.First_temp` 鏁板€煎伐鍏蜂互淇濇寔缁撴灉涓嶅彉銆備笅涓€姝ヨ嫢瑕佺户缁伐绋嬪寲锛屽簲鎶?QG/PV銆佹彃鍊煎拰缃戞牸宸ュ叿鎶藉埌绋冲畾宸ュ叿妯″潡锛屽啀鍑忓皯瀵?`First_temp` 鐨勪緷璧栥€?
 
+## 原始涡旋个例图入口
+
+`src.post.original_eddy_panels` 是正式后处理中的原始涡旋间断点审查图入口，负责生成 9-panel/扩展 panel 图，包括：
+
+- 垂向中心偏移 `delta x(z)`、`delta y(z)`；
+- 第一、第二间断点上下层水平速度场与地转压强代理；
+- Omega-w、`dW/dz` 或 `u_perp` 剖面诊断；
+- 生命周期轨迹图。
+
+正式调用方式：
+
+```bash
+python -m src.post.cli plot-original-eddy-panels --output-dir <output>
+python -m src.post.original_eddy_panels --output-dir <output>
+```
+
+`Zhe/legacy/diagnostics/plot_original_eddy_discontinuity_7panel.py` 和
+`Zhe/legacy/diagnostics/plot_original_eddy_discontinuity_9panel.py`
+现在只保留为兼容 wrapper，真实实现不再放在 `legacy`。
+

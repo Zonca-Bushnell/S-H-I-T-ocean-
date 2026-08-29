@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import runpy
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-def main() -> None:
-    target = Path(__file__).with_name("plot_original_eddy_discontinuity_9panel.py")
-    runpy.run_path(str(target), run_name="__main__")
+from src.post.original_eddy_panels import main
 
 
 if __name__ == "__main__":
