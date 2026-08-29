@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from netCDF4 import Dataset, num2date
+from scipy.ndimage import gaussian_filter
 
 
 RHO0 = 1025.0
@@ -615,6 +616,24 @@ def _shared_finite_limits(values: list[np.ndarray], quantile: float = 0.98) -> t
     return _finite_limits(np.concatenate(finite_parts), quantile=quantile)
 
 
+def _nan_gaussian_smooth(field: np.ndarray, sigma_cells: float) -> np.ndarray:
+    if sigma_cells <= 0:
+        return np.asarray(field, dtype="f8")
+    values = np.asarray(field, dtype="f8")
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return values.copy()
+    filled = np.where(finite, values, 0.0)
+    weights = finite.astype("f8")
+    smoothed = gaussian_filter(filled, sigma=float(sigma_cells), mode="nearest")
+    weight_sum = gaussian_filter(weights, sigma=float(sigma_cells), mode="nearest")
+    out = np.full_like(values, np.nan, dtype="f8")
+    good = weight_sum > 1.0e-8
+    out[good] = smoothed[good] / weight_sum[good]
+    out[~finite] = np.nan
+    return out
+
+
 def _mark_center(ax, x_km: float, y_km: float, label: str, color: str, marker: str = "x") -> None:
     ax.scatter([x_km], [y_km], s=90, marker=marker, c=color, linewidths=2.0, label=label, zorder=8)
 
@@ -934,6 +953,7 @@ def _plot_9panel(
     output_dir: Path,
     output_name_stem: str = "original_eddy_discontinuity_9panel",
     right_panel_mode: str = "omega_w",
+    horizontal_smooth_sigma_cells: float = 0.8,
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -1018,11 +1038,13 @@ def _plot_9panel(
         xx = layer_fields["xx"]
         yy = layer_fields["yy"]
         marks = layer_fields["marks"]
+        speed_field = _nan_gaussian_smooth(layer_fields["speed"], horizontal_smooth_sigma_cells)
+        pressure_field = _nan_gaussian_smooth(layer_fields["pressure"], horizontal_smooth_sigma_cells)
         m_speed = _plot_field(
             speed_ax,
             xx,
             yy,
-            layer_fields["speed"],
+            speed_field,
             f"{speed_label}\n{_layer_depth_label(layer_fields)}",
             "coolwarm",
             quiver=(layer_fields["u"], layer_fields["v"]),
@@ -1034,7 +1056,7 @@ def _plot_9panel(
             pressure_ax,
             xx,
             yy,
-            layer_fields["pressure"],
+            pressure_field,
             f"{pressure_label}\n{_layer_depth_label(layer_fields)}",
             "RdBu_r",
             symmetric=True,
@@ -1152,7 +1174,8 @@ def _plot_9panel(
     fig.suptitle(
         "Original eddy discontinuity diagnostic, not representative vortex\n"
         f"object {selected.eddy3d_object_id}, track {selected.track3d_id}, {selected.date}, "
-        f"{selected.shape_class}/{selected.polarity}; {jump_text}",
+        f"{selected.shape_class}/{selected.polarity}; {jump_text}; "
+        f"display smoothing sigma={horizontal_smooth_sigma_cells:g} grid",
         fontsize=15,
     )
 
@@ -1544,7 +1567,7 @@ def _make_cross_section_fields(
     }
 
 
-def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
+def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smooth_sigma_cells: float | None = None) -> None:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
@@ -1568,13 +1591,19 @@ def _write_metadata(selected: SelectedObject, output_dir: Path) -> None:
         "second_jump_to_depth_m": selected.second_jump_to_depth_m,
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
     }
+    if horizontal_smooth_sigma_cells is not None:
+        payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "selected_object_metadata.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     pd.DataFrame([payload]).to_csv(output_dir / "selected_object_metadata.csv", index=False)
 
 
-def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, object]:
-    return {
+def _metadata_payload(
+    selected: SelectedObject,
+    output_dir: Path,
+    horizontal_smooth_sigma_cells: float | None = None,
+) -> dict[str, object]:
+    payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
         "date": selected.date,
@@ -1598,6 +1627,9 @@ def _metadata_payload(selected: SelectedObject, output_dir: Path) -> dict[str, o
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
         "output_dir": str(output_dir),
     }
+    if horizontal_smooth_sigma_cells is not None:
+        payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
+    return payload
 
 
 def _selected_from_metadata_row(row: pd.Series, abrupt_threshold_over_R: float) -> SelectedObject:
@@ -1672,6 +1704,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
     parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
+    parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
+    parser.add_argument("--no-horizontal-smoothing", action="store_true")
     parser.add_argument("--selected-metadata", type=Path, default=None, help="Reuse a selected_objects_metadata.csv object list instead of re-ranking candidates.")
     parser.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     return parser
@@ -1679,6 +1713,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
+    horizontal_smooth_sigma_cells = 0.0 if args.no_horizontal_smoothing else max(0.0, float(args.horizontal_smooth_sigma_cells))
     centers, shape_tracks = _load_catalog(args.results_root, args.shape_dir_name)
     if args.selected_metadata is None and args.max_examples <= 1:
         selected, object_layers, track_layers = _choose_object(
@@ -1701,8 +1736,17 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, args.output_dir)
-        _plot_9panel(selected, object_layers, track_layers, fields, args.output_dir, args.output_name_stem, args.right_panel_mode)
+        _write_metadata(selected, args.output_dir, horizontal_smooth_sigma_cells)
+        _plot_9panel(
+            selected,
+            object_layers,
+            track_layers,
+            fields,
+            args.output_dir,
+            args.output_name_stem,
+            args.right_panel_mode,
+            horizontal_smooth_sigma_cells,
+        )
         print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
         return
 
@@ -1738,9 +1782,18 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, child)
-        _plot_9panel(selected, object_layers, track_layers, fields, child, args.output_name_stem, args.right_panel_mode)
-        rows.append(_metadata_payload(selected, child))
+        _write_metadata(selected, child, horizontal_smooth_sigma_cells)
+        _plot_9panel(
+            selected,
+            object_layers,
+            track_layers,
+            fields,
+            child,
+            args.output_name_stem,
+            args.right_panel_mode,
+            horizontal_smooth_sigma_cells,
+        )
+        rows.append(_metadata_payload(selected, child, horizontal_smooth_sigma_cells))
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
 
     summary = pd.DataFrame(rows)
