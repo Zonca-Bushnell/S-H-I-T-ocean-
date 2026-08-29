@@ -99,7 +99,7 @@ result_boundary_monotonic/
 具体含义：
 
 - Hua 圆周切向性、两侧反转、边界速度向量单调旋转、object voxel 和 overlap tracking 仍在原 1/4°网格执行。
-- 只有 `hua_pass=True` 的层会在原格点速度弱中心附近开局地窗口，对 `sqrt(u'^2+v'^2)` 做 NaN-aware 线性插值到 1/24°等效网格，并用加密网格速度最小点作为生产中心。
+- 只有 `hua_pass=True` 的层会在原格点速度弱中心附近开局地窗口，对 `u'`、`v'` 做 NaN-aware 线性插值到 1/24°等效网格，再计算 `sqrt(u'^2+v'^2)` 并取加密网格速度最小点作为生产中心。
 - `center_lon`、`center_lat` 是 refined 后的生产中心；旧格点中心保存在 `center_lon_grid`、`center_lat_grid`、`speed_min_i_grid`、`speed_min_j_grid`。
 - catalog 中 `longitude`、`latitude` 默认继承 refined 中心；shape、代表涡和 post 图像无需额外开关即可使用新中心。
 - 这不是全场 1/24°重采样，不写 1/24° Filter NetCDF；插值只发生在通过层的局地窗口中。

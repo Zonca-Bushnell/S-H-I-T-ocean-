@@ -201,6 +201,8 @@ def _interp_1d_from_fraction(coord: np.ndarray, index_fraction: float) -> float:
 
 def _refine_speed_min_subgrid(
     speed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
     lon: np.ndarray,
     lat: np.ndarray,
     center_i: int,
@@ -231,12 +233,16 @@ def _refine_speed_min_subgrid(
     y1 = min(speed.shape[0] - 1, int(center_j) + int(window_radius_cells))
     if x1 <= x0 or y1 <= y0:
         return fallback | {"subgrid_fit_quality": "window_too_small"}
-    window = np.asarray(speed[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
-    finite = np.isfinite(window)
+    speed_window = np.asarray(speed[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    u_window = np.asarray(u[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    v_window = np.asarray(v[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    finite = np.isfinite(speed_window) & np.isfinite(u_window) & np.isfinite(v_window)
     if float(finite.mean()) < float(min_finite_fraction):
         return fallback | {"subgrid_fit_quality": "insufficient_finite"}
 
-    filled, finite_mask = _fill_nearest_finite(window)
+    filled_u, finite_u = _fill_nearest_finite(u_window)
+    filled_v, finite_v = _fill_nearest_finite(v_window)
+    finite_mask = finite & finite_u & finite_v
     dlon = float(np.nanmedian(np.abs(np.diff(lon)))) if lon.size > 1 else 0.0
     dlat = float(np.nanmedian(np.abs(np.diff(lat)))) if lat.size > 1 else 0.0
     if dlon <= 0 or dlat <= 0:
@@ -249,7 +255,9 @@ def _refine_speed_min_subgrid(
         return fallback | {"subgrid_fit_quality": "refined_grid_too_small"}
     yy, xx = np.meshgrid(yj, xi, indexing="ij")
     coords = np.vstack([yy.ravel(), xx.ravel()])
-    dense = ndimage.map_coordinates(filled, coords, order=1, mode="nearest").reshape(yy.shape)
+    dense_u = ndimage.map_coordinates(filled_u, coords, order=1, mode="nearest").reshape(yy.shape)
+    dense_v = ndimage.map_coordinates(filled_v, coords, order=1, mode="nearest").reshape(yy.shape)
+    dense = np.hypot(dense_u, dense_v)
     valid_weight = ndimage.map_coordinates(finite_mask.astype("float64"), coords, order=1, mode="nearest").reshape(yy.shape)
     dense = np.where(valid_weight >= 0.999, dense, np.nan)
     if not np.isfinite(dense).any():
@@ -273,7 +281,7 @@ def _refine_speed_min_subgrid(
         "refined_speed_ms": float(dense[pick_j, pick_i]),
         "refined_offset_km": float(offset_km),
         "refined_ok": True,
-        "subgrid_fit_quality": "linear_interp_1_24deg",
+        "subgrid_fit_quality": "uv_vector_linear_interp_1_24deg",
     }
 
 
@@ -591,6 +599,8 @@ def _detect_day(
             refined = (
                 _refine_speed_min_subgrid(
                     speed,
+                    u_layer,
+                    v_layer,
                     lon,
                     lat,
                     center_i,
