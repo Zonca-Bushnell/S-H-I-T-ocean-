@@ -900,6 +900,22 @@ def _plot_normal_horizontal_velocity_section(
     vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, u_perp, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     finite = local[np.isfinite(local)]
+    if finite.size:
+        contour_levels = np.linspace(float(vmin), float(vmax), 11)
+        contour_levels = contour_levels[np.isfinite(contour_levels)]
+        contour_levels = contour_levels[np.abs(contour_levels) > max(abs(float(vmax) - float(vmin)) * 0.01, 1e-12)]
+        if contour_levels.size >= 2:
+            ax.contour(
+                s,
+                depth,
+                u_perp,
+                levels=contour_levels,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.55,
+                alpha=0.72,
+            )
     if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
         ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
