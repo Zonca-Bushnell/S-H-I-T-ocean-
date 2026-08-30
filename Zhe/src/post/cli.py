@@ -236,7 +236,10 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
         print(f"[post] radial seed: {args.radial_seed_root}")
         print(f"[post] output: {args.output_dir}")
         print(f"[post] orientation: {args.orientation}")
-        print(f"[post] latest panel family: axis top-2 steps + upper/lower fields + {args.section_mode} sections")
+        print(
+            "[post] latest panel family: "
+            f"axis_source={args.axis_source} + axis top-2 steps + upper/lower fields + {args.section_mode} sections"
+        )
         print(f"[post] right panel mode: {args.right_panel_mode}")
         return
     from .representative_eddy_panels import plot_representative_eddy_panels as run
@@ -262,6 +265,8 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
             section_half_width_r=args.section_half_width_r,
             section_min_half_width_km=args.section_min_half_width_km,
             right_panel_mode=args.right_panel_mode,
+            axis_source=args.axis_source,
+            composite_hua_search_rmax=args.composite_hua_search_rmax,
         )
 
 
@@ -392,6 +397,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
         default="normal_horizontal_velocity",
     )
+    rep_panels.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
+    rep_panels.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
     rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
     rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from scipy.fft import dstn, idstn
 from scipy.interpolate import RegularGridInterpolator, griddata
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, minimum_filter
 
 
 RHO0 = 1025.0
@@ -91,6 +91,220 @@ def _axis_by_tau(
     if axis.empty:
         raise ValueError(f"No weighted representative axis for polarity={polarity}")
     return axis
+
+
+def _sample_cartesian_field(field: np.ndarray, x_grid: np.ndarray, y_grid: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    interp = RegularGridInterpolator(
+        (y_grid[:, 0], x_grid[0, :]),
+        field,
+        bounds_error=False,
+        fill_value=np.nan,
+    )
+    return interp(np.column_stack([y, x]))
+
+
+def _composite_hua_ring_check(
+    *,
+    u_grid: np.ndarray,
+    v_grid: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    center_x_km: float,
+    center_y_km: float,
+    radius_km: float,
+) -> dict[str, float | bool | str]:
+    angles = np.linspace(0.0, 2.0 * np.pi, 72, endpoint=False)
+    x = center_x_km + radius_km * np.cos(angles)
+    y = center_y_km + radius_km * np.sin(angles)
+    uu = _sample_cartesian_field(u_grid, x_grid, y_grid, x, y)
+    vv = _sample_cartesian_field(v_grid, x_grid, y_grid, x, y)
+    speed = np.hypot(uu, vv)
+    finite = np.isfinite(speed) & (speed > 1.0e-12)
+    finite_fraction = float(finite.mean())
+    if finite.sum() < 12:
+        return {
+            "composite_hua_pass": False,
+            "composite_hua_failure": "insufficient_ring_data",
+            "finite_fraction": finite_fraction,
+            "tangent_pass_fraction": np.nan,
+            "opposite_reversal_fraction": np.nan,
+            "direction_exception_count": np.nan,
+        }
+
+    tx = -np.sin(angles)
+    ty = np.cos(angles)
+    tangent_cos = np.abs((uu * tx + vv * ty) / np.maximum(speed, 1.0e-12))
+    tangent_fraction = float(np.nanmean((tangent_cos >= np.cos(np.deg2rad(30.0)))[finite]))
+
+    half = len(angles) // 2
+    reversal_ok = 0
+    reversal_total = 0
+    for n in range(half):
+        m = (n + half) % len(angles)
+        if finite[n] and finite[m]:
+            reversal_total += 1
+            reversal_ok += int(uu[n] * uu[m] + vv[n] * vv[m] < 0.0)
+    reversal_fraction = float(reversal_ok / reversal_total) if reversal_total else 0.0
+
+    velocity_angles = np.arctan2(vv, uu)
+    diffs = []
+    for n in range(len(angles)):
+        m = (n + 1) % len(angles)
+        if finite[n] and finite[m]:
+            diffs.append(float((velocity_angles[m] - velocity_angles[n] + np.pi) % (2.0 * np.pi) - np.pi))
+    diffs_arr = np.asarray(diffs, dtype="f8")
+    positive = int(np.sum(diffs_arr > 0.0))
+    negative = int(np.sum(diffs_arr < 0.0))
+    direction_exceptions = float(min(positive, negative))
+    boundary_monotonic_passed = direction_exceptions <= 2.0
+
+    passed = bool(finite_fraction >= 0.70 and tangent_fraction >= 0.55 and reversal_fraction >= 0.55 and boundary_monotonic_passed)
+    failure = "none"
+    if not passed:
+        if finite_fraction < 0.70:
+            failure = "finite_fraction"
+        elif tangent_fraction < 0.55:
+            failure = "tangent_alignment"
+        elif reversal_fraction < 0.55:
+            failure = "opposite_reversal"
+        else:
+            failure = "boundary_monotonic_rotation"
+    return {
+        "composite_hua_pass": passed,
+        "composite_hua_failure": failure,
+        "finite_fraction": finite_fraction,
+        "tangent_pass_fraction": tangent_fraction,
+        "opposite_reversal_fraction": reversal_fraction,
+        "direction_exception_count": direction_exceptions,
+    }
+
+
+def _speed_min_candidates(
+    speed_grid: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    radius_km: float,
+    search_rmax: float,
+    max_candidates: int = 40,
+) -> list[tuple[int, int]]:
+    search = np.isfinite(speed_grid) & (np.hypot(x_grid, y_grid) <= radius_km * float(search_rmax))
+    if not search.any():
+        return []
+    filled = np.where(search, speed_grid, np.inf)
+    local_min = filled == minimum_filter(filled, size=5, mode="nearest")
+    finite_values = speed_grid[search]
+    threshold = float(np.nanpercentile(finite_values, 35.0))
+    jj, ii = np.where(search & local_min & (speed_grid <= threshold))
+    candidates = [(int(j), int(i)) for j, i in zip(jj, ii)]
+    global_j, global_i = np.unravel_index(int(np.nanargmin(filled)), filled.shape)
+    candidates.append((int(global_j), int(global_i)))
+    candidates = list(dict.fromkeys(candidates))
+    candidates.sort(key=lambda item: float(speed_grid[item[0], item[1]]))
+    return candidates[:max_candidates]
+
+
+def _composite_hua_axis(
+    *,
+    radial: np.ndarray,
+    theta: np.ndarray,
+    depth: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    speed: np.ndarray,
+    radius_m: float,
+    grid_size: int,
+    search_rmax: float,
+) -> pd.DataFrame:
+    radius_km = float(radius_m) / 1000.0
+    rows = []
+    previous_xy: tuple[float, float] | None = None
+    for depth_index in range(len(depth)):
+        x_grid, y_grid, speed_grid = _regular_grid_from_polar(radial, theta, speed[depth_index], radius_m, grid_size)
+        _, _, u_grid = _regular_grid_from_polar(radial, theta, u[depth_index], radius_m, grid_size)
+        _, _, v_grid = _regular_grid_from_polar(radial, theta, v[depth_index], radius_m, grid_size)
+        candidates = _speed_min_candidates(speed_grid, x_grid, y_grid, radius_km, search_rmax)
+        if not candidates:
+            rows.append(
+                {
+                    "depth_index": int(depth_index),
+                    "depth_m": float(depth[depth_index]),
+                    "x_km": np.nan,
+                    "y_km": np.nan,
+                    "effective_weight": np.nan,
+                    "center_speed_ms": np.nan,
+                    "axis_source": "composite_hua",
+                    "composite_hua_pass": False,
+                    "composite_hua_failure": "no_search_data",
+                }
+            )
+            continue
+
+        finite_speed = speed_grid[np.isfinite(speed_grid)]
+        speed_scale = max(float(np.nanpercentile(finite_speed, 75.0)), 1.0e-9) if finite_speed.size else 1.0
+        scored = []
+        for j, i in candidates:
+            center_x = float(x_grid[j, i])
+            center_y = float(y_grid[j, i])
+            check = _composite_hua_ring_check(
+                u_grid=u_grid,
+                v_grid=v_grid,
+                x_grid=x_grid,
+                y_grid=y_grid,
+                center_x_km=center_x,
+                center_y_km=center_y,
+                radius_km=max(radius_km * 0.55, 20.0),
+            )
+            continuity = 0.0
+            if previous_xy is not None:
+                continuity = np.hypot(center_x - previous_xy[0], center_y - previous_xy[1]) / max(radius_km, 1.0)
+            radial_penalty = np.hypot(center_x, center_y) / max(radius_km, 1.0)
+            score = (
+                float(speed_grid[j, i]) / speed_scale
+                + 0.20 * radial_penalty**2
+                + 0.65 * continuity**2
+                + (0.0 if bool(check["composite_hua_pass"]) else 2.0)
+            )
+            scored.append((score, bool(check["composite_hua_pass"]), j, i, check))
+
+        scored.sort(key=lambda item: item[0])
+        pass_scored = [item for item in scored if item[1]]
+        _, _, j, i, check = (pass_scored[0] if pass_scored else scored[0])
+        center_x = float(x_grid[j, i])
+        center_y = float(y_grid[j, i])
+        previous_xy = (center_x, center_y)
+        rows.append(
+            {
+                "depth_index": int(depth_index),
+                "depth_m": float(depth[depth_index]),
+                "x_km": center_x,
+                "y_km": center_y,
+                "effective_weight": float(np.isfinite(speed_grid).sum()),
+                "center_speed_ms": float(speed_grid[j, i]),
+                "axis_source": "composite_hua",
+                "composite_hua_fallback": not bool(check["composite_hua_pass"]),
+                "candidate_count": int(len(candidates)),
+                **check,
+            }
+        )
+    axis = pd.DataFrame(rows)
+    axis = axis[np.isfinite(axis["x_km"]) & np.isfinite(axis["y_km"])].copy()
+    if axis.empty:
+        raise ValueError("No composite-Hua representative axis could be extracted")
+    return axis.sort_values("depth_index").reset_index(drop=True)
+
+
+def _axis_source_comparison(radial_axis: pd.DataFrame, composite_axis: pd.DataFrame) -> pd.DataFrame:
+    merged = radial_axis[["depth_index", "depth_m", "x_km", "y_km"]].merge(
+        composite_axis[["depth_index", "x_km", "y_km", "composite_hua_pass", "composite_hua_failure"]],
+        on="depth_index",
+        how="inner",
+        suffixes=("_radial_seed", "_composite_hua"),
+    )
+    merged["axis_source_offset_km"] = np.hypot(
+        merged["x_km_composite_hua"] - merged["x_km_radial_seed"],
+        merged["y_km_composite_hua"] - merged["y_km_radial_seed"],
+    )
+    return merged
 
 
 def _strongest_axis_steps(axis: pd.DataFrame, radius_m: float, max_steps: int = 2) -> list[AxisStep]:
@@ -726,6 +940,8 @@ def plot_representative_eddy_panels(
     section_half_width_r: float = 1.2,
     section_min_half_width_km: float = 75.0,
     right_panel_mode: str = "normal_horizontal_velocity",
+    axis_source: str = "radial_seed",
+    composite_hua_search_rmax: float = 1.5,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _load_npz(me_liutex_root)
@@ -746,10 +962,35 @@ def plot_representative_eddy_panels(
     orientation_label = "global-alpha TURN" if orientation == "turned" else "UNTURN east/north"
     written: list[Path] = []
     manifests: list[dict] = []
+    axis_comparisons: list[pd.DataFrame] = []
 
     for ip, polarity in enumerate(polarities):
         radius_m = radius_by_polarity.get(polarity, 80000.0)
-        axis = _axis_by_tau(radial_seed_root, polarity, float(tau_grid[tau_i]), axis_bandwidth, orientation)
+        radial_axis = _axis_by_tau(radial_seed_root, polarity, float(tau_grid[tau_i]), axis_bandwidth, orientation)
+        if axis_source == "composite_hua":
+            axis = _composite_hua_axis(
+                radial=radial,
+                theta=theta,
+                depth=depth,
+                u=u_mean[ip, tau_i],
+                v=v_mean[ip, tau_i],
+                speed=speed_mean[ip, tau_i],
+                radius_m=radius_m,
+                grid_size=grid_size,
+                search_rmax=composite_hua_search_rmax,
+            )
+            axis_path = output_dir / (
+                f"representative_composite_hua_axis_{orientation}_{polarity}_"
+                f"tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv"
+            )
+            axis.to_csv(axis_path, index=False)
+            comparison = _axis_source_comparison(radial_axis, axis)
+            comparison.insert(0, "polarity", polarity)
+            comparison.insert(1, "orientation", orientation)
+            comparison.insert(2, "tau", float(tau_grid[tau_i]))
+            axis_comparisons.append(comparison)
+        else:
+            axis = radial_axis
         steps = _strongest_axis_steps(axis, radius_m, max_steps=2)
         if not steps:
             continue
@@ -892,12 +1133,17 @@ def plot_representative_eddy_panels(
         _plot_support(axes["7"], count[ip], tau_grid, depth, "7  composite support, no trajectory")
         fig.suptitle(
             f"Representative eddy latest panel family: {polarity}, tau={float(tau_grid[tau_i]):.2f}, "
-            f"{orientation_label}, {section_mode} section, {right_panel_mode}; n_objects={int(n_objects[ip, tau_i])}, "
+            f"{orientation_label}, axis-source={axis_source}, {section_mode} section, {right_panel_mode}; "
+            f"n_objects={int(n_objects[ip, tau_i])}, "
             f"n_tracks={int(n_tracks[ip, tau_i])}; J1={steps[0].distance_km:.1f} km"
             + (f", J2={steps[1].distance_km:.1f} km" if len(steps) > 1 else ""),
             fontsize=15,
         )
-        stem = f"representative_latest_panel_{right_panel_mode}_{section_mode}_{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
+        axis_tag = "" if axis_source == "radial_seed" else f"_{axis_source}_axis"
+        stem = (
+            f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_"
+            f"{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
+        )
         png = output_dir / f"{stem}.png"
         pdf = output_dir / f"{stem}.pdf"
         fig.savefig(png, dpi=220)
@@ -909,7 +1155,12 @@ def plot_representative_eddy_panels(
                 "polarity": polarity,
                 "n_objects": int(n_objects[ip, tau_i]),
                 "n_tracks": int(n_tracks[ip, tau_i]),
+                "axis_source": axis_source,
                 "axis_steps": [step.__dict__ for step in steps],
+                "composite_hua_pass_count": (
+                    int(axis["composite_hua_pass"].sum()) if "composite_hua_pass" in axis.columns else None
+                ),
+                "composite_hua_layer_count": int(len(axis)),
                 "axis_curved_direction_fallback_count": int(
                     sum(
                         part.get("axis_curved_direction_fallback_count", 0)
@@ -934,6 +1185,8 @@ def plot_representative_eddy_panels(
         "orientation": orientation,
         "section_mode": section_mode,
         "right_panel_mode": right_panel_mode,
+        "axis_source": axis_source,
+        "composite_hua_search_rmax": composite_hua_search_rmax,
         "tau": float(tau_grid[tau_i]),
         "axis_step_definition": "top two adjacent-depth representative axis displacements at selected tau",
         "horizontal_smooth_sigma_cells": horizontal_smooth_sigma_cells,
@@ -941,10 +1194,17 @@ def plot_representative_eddy_panels(
         "polarity_summaries": manifests,
         "figures": [str(path) for path in written],
     }
-    (output_dir / f"representative_latest_panel_{right_panel_mode}_{section_mode}_{orientation}_manifest.json").write_text(
+    axis_tag = "" if axis_source == "radial_seed" else f"_{axis_source}_axis"
+    (output_dir / f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_{orientation}_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if axis_comparisons:
+        pd.concat(axis_comparisons, ignore_index=True).to_csv(
+            output_dir
+            / f"representative_axis_source_comparison_{right_panel_mode}_{section_mode}_{orientation}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv",
+            index=False,
+        )
     return written
 
 
@@ -964,6 +1224,8 @@ def main() -> None:
         choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
         default="normal_horizontal_velocity",
     )
+    parser.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
+    parser.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--section-depth-padding-layers", type=int, default=6)
     parser.add_argument("--section-half-width-r", type=float, default=1.2)
@@ -984,6 +1246,8 @@ def main() -> None:
         section_half_width_r=args.section_half_width_r,
         section_min_half_width_km=args.section_min_half_width_km,
         right_panel_mode=args.right_panel_mode,
+        axis_source=args.axis_source,
+        composite_hua_search_rmax=args.composite_hua_search_rmax,
     )
     print(json.dumps({"figures": [str(path) for path in written]}, ensure_ascii=False))
 
