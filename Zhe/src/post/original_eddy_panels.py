@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import ConnectionPatch, Rectangle
 from netCDF4 import Dataset, num2date
 from scipy.ndimage import gaussian_filter
 
@@ -932,6 +933,169 @@ def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str)
     return np.asarray(local, dtype="f8")
 
 
+def _add_jump_source_markers(
+    fig: plt.Figure,
+    ax_dx: plt.Axes,
+    ax_dy: plt.Axes,
+    *,
+    selected: SelectedObject,
+    offsets: pd.DataFrame,
+    offset_xlim: float,
+    first_upper_ax: plt.Axes,
+    first_lower_ax: plt.Axes,
+    second_upper_ax: plt.Axes,
+    second_lower_ax: plt.Axes,
+) -> None:
+    """Mark which depth segments in panels 1/2 are expanded in panels 3-6."""
+
+    depth_values = [
+        value
+        for value in (
+            selected.jump_from_depth_m,
+            selected.jump_to_depth_m,
+            selected.second_jump_from_depth_m,
+            selected.second_jump_to_depth_m,
+        )
+        if value is not None and np.isfinite(float(value))
+    ]
+    if not depth_values:
+        return
+    depth_pad = max(4.0, 0.006 * max(depth_values))
+
+    def marker_box(col: str, z_from: float, z_to: float) -> tuple[float, float, float, float]:
+        depths = offsets["depth_m"].to_numpy(dtype="f8")
+        values = offsets[col].to_numpy(dtype="f8")
+        wanted = np.array([z_from, z_to], dtype="f8")
+        picked: list[float] = []
+        for depth_value in wanted:
+            valid = np.isfinite(depths) & np.isfinite(values)
+            if not np.any(valid):
+                continue
+            idx = int(np.nanargmin(np.abs(depths[valid] - depth_value)))
+            picked.append(float(values[valid][idx]))
+        if not picked:
+            picked = [0.0]
+        x_pad = max(3.0, 0.055 * offset_xlim, 0.18 * (max(picked) - min(picked) if len(picked) > 1 else 0.0))
+        x_min = max(-0.98 * offset_xlim, min(picked) - x_pad)
+        x_max = min(0.98 * offset_xlim, max(picked) + x_pad)
+        if x_max <= x_min:
+            x_max = min(0.98 * offset_xlim, x_min + 2.0 * x_pad)
+        z_min = min(z_from, z_to) - depth_pad
+        z_max = max(z_from, z_to) + depth_pad
+        return x_min, z_min, x_max - x_min, z_max - z_min
+
+    specs = [
+        (
+            selected.has_abrupt_jump,
+            selected.jump_from_depth_m,
+            selected.jump_to_depth_m,
+            "J1: 3/4",
+            "#d62728",
+            first_upper_ax,
+            first_lower_ax,
+        ),
+        (
+            selected.has_second_abrupt_jump,
+            selected.second_jump_from_depth_m,
+            selected.second_jump_to_depth_m,
+            "J2: 5/6",
+            "#2ca02c",
+            second_upper_ax,
+            second_lower_ax,
+        ),
+    ]
+
+    for available, z_from, z_to, label, color, upper_ax, lower_ax in specs:
+        if not available or z_from is None or z_to is None:
+            continue
+        z_mid = 0.5 * (float(z_from) + float(z_to))
+        box_dx = marker_box("delta_x_km", float(z_from), float(z_to))
+        box_dy = marker_box("delta_y_km", float(z_from), float(z_to))
+        for ax, box in ((ax_dx, box_dx), (ax_dy, box_dy)):
+            ax.add_patch(
+                Rectangle(
+                    (box[0], box[1]),
+                    box[2],
+                    box[3],
+                    fill=True,
+                    facecolor=color,
+                    edgecolor=color,
+                    linewidth=1.35,
+                    linestyle="-",
+                    alpha=0.18,
+                    zorder=8,
+                )
+            )
+            ax.add_patch(
+                Rectangle(
+                    (box[0], box[1]),
+                    box[2],
+                    box[3],
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1.15,
+                    linestyle="-",
+                    alpha=0.95,
+                    zorder=9,
+                )
+            )
+        label_x = min(0.92 * offset_xlim, box_dy[0] + box_dy[2] + 0.035 * offset_xlim)
+        ax_dy.annotate(
+            label,
+            xy=(box_dy[0] + box_dy[2], z_mid),
+            xytext=(label_x, z_mid),
+            arrowprops={"arrowstyle": "-|>", "lw": 0.95, "color": color, "shrinkA": 1, "shrinkB": 2},
+            color=color,
+            fontsize=7.5,
+            va="center",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=10,
+        )
+        upper_ax.text(
+            0.025,
+            0.965,
+            label,
+            transform=upper_ax.transAxes,
+            color=color,
+            fontsize=7.5,
+            va="top",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=20,
+        )
+        lower_ax.text(
+            0.025,
+            0.965,
+            label,
+            transform=lower_ax.transAxes,
+            color=color,
+            fontsize=7.5,
+            va="top",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=20,
+        )
+        x_right = box_dy[0] + box_dy[2]
+        z_top = box_dy[1]
+        z_bottom = box_dy[1] + box_dy[3]
+        for z_anchor, target_ax, target_y in ((z_top, upper_ax, 0.74), (z_bottom, lower_ax, 0.26)):
+            connector = ConnectionPatch(
+                xyA=(x_right, z_anchor),
+                coordsA=ax_dy.transData,
+                xyB=(0.0, target_y),
+                coordsB=target_ax.transAxes,
+                arrowstyle="-|>",
+                lw=0.75,
+                color=color,
+                alpha=0.58,
+                mutation_scale=8,
+                connectionstyle="arc3,rad=-0.06",
+                zorder=6,
+            )
+            fig.add_artist(connector)
+
+
 def _plot_9panel(
     selected: SelectedObject,
     object_layers: pd.DataFrame,
@@ -1023,6 +1187,19 @@ def _plot_9panel(
         ax.set_xlim(-offset_xlim, offset_xlim)
         ax.set_title(title)
         ax.grid(alpha=0.25)
+
+    _add_jump_source_markers(
+        fig,
+        ax1,
+        ax2,
+        selected=selected,
+        offsets=offsets,
+        offset_xlim=offset_xlim,
+        first_upper_ax=ax3u,
+        first_lower_ax=ax3l,
+        second_upper_ax=ax5u,
+        second_lower_ax=ax5l,
+    )
 
     def _plot_horizontal_diagnostics(
         speed_ax,
