@@ -261,6 +261,44 @@ def _normal_velocity_section(
     min_half_width_km: float,
     anchor_depth_index: int | None = None,
 ) -> dict[str, np.ndarray]:
+    def axis_curved_centerline() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        sorted_axis = axis.sort_values("depth_index").reset_index(drop=True)
+        axis_depth = sorted_axis["depth_m"].to_numpy(dtype="f8")
+        axis_x = sorted_axis["x_km"].to_numpy(dtype="f8")
+        axis_y = sorted_axis["y_km"].to_numpy(dtype="f8")
+        if len(sorted_axis) >= 2:
+            center_x_full = np.interp(depth, axis_depth, axis_x)
+            center_y_full = np.interp(depth, axis_depth, axis_y)
+        else:
+            cx = float(axis_x[0]) if len(axis_x) else 0.0
+            cy = float(axis_y[0]) if len(axis_y) else 0.0
+            center_x_full = np.full_like(depth, cx, dtype="f8")
+            center_y_full = np.full_like(depth, cy, dtype="f8")
+        dx_dz = np.gradient(center_x_full, depth, edge_order=1)
+        dy_dz = np.gradient(center_y_full, depth, edge_order=1)
+        mag = np.hypot(dx_dz, dy_dz)
+        tx = np.full_like(depth, np.nan, dtype="f8")
+        ty = np.full_like(depth, np.nan, dtype="f8")
+        valid = np.isfinite(mag) & (mag > 1.0e-8)
+        tx[valid] = dx_dz[valid] / mag[valid]
+        ty[valid] = dy_dz[valid] / mag[valid]
+        fallback_count = int((~valid).sum())
+        last = (1.0, 0.0)
+        for i in range(len(depth)):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        last = (1.0, 0.0)
+        for i in range(len(depth) - 1, -1, -1):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        nx_axis = -ty
+        ny_axis = tx
+        return center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, fallback_count
+
     norm = float(np.hypot(step.dx_km, step.dy_km))
     if not np.isfinite(norm) or norm <= 1e-9:
         jump_ex, jump_ey = 1.0, 0.0
@@ -268,7 +306,13 @@ def _normal_velocity_section(
         jump_ex, jump_ey = step.dx_km / norm, step.dy_km / norm
     jump_nx, jump_ny = -jump_ey, jump_ex
 
-    if section_mode == "normal":
+    axis_fallback_count = 0
+    if section_mode == "axis_curved":
+        center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        axis_label = "axis-following curved section"
+        coord_label = "distance along local axis-normal section from layer center (km)"
+        velocity_label = "horizontal velocity normal to curved section, u_axis"
+    elif section_mode == "normal":
         section_ex, section_ey = jump_nx, jump_ny
         velocity_nx, velocity_ny = jump_ex, jump_ey
         anchor_x, anchor_y = step.mid_x_km, step.mid_y_km
@@ -289,18 +333,28 @@ def _normal_velocity_section(
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
     max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
     coord = np.linspace(-max_half, max_half, 181, dtype="f8")
-    x_line = anchor_x + coord * section_ex
-    y_line = anchor_y + coord * section_ey
-
-    normal_velocity = u_stack * velocity_nx + v_stack * velocity_ny
-    section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in normal_velocity])
     speed_stack = np.hypot(u_stack, v_stack)
-    speed_section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in speed_stack])
+    if section_mode == "axis_curved":
+        section = np.full((len(depth), len(coord)), np.nan, dtype="f8")
+        speed_section = np.full_like(section, np.nan)
+        for iz in range(len(depth)):
+            x_line = center_x_full[iz] + coord * nx_axis[iz]
+            y_line = center_y_full[iz] + coord * ny_axis[iz]
+            normal_velocity_layer = u_stack[iz] * tx[iz] + v_stack[iz] * ty[iz]
+            section[iz] = _section_from_grid(normal_velocity_layer, x_grid, y_grid, x_line, y_line)
+            speed_section[iz] = _section_from_grid(speed_stack[iz], x_grid, y_grid, x_line, y_line)
+        center_coord = np.zeros(len(axis), dtype="f8")
+    else:
+        x_line = anchor_x + coord * section_ex
+        y_line = anchor_y + coord * section_ey
+        normal_velocity = u_stack * velocity_nx + v_stack * velocity_ny
+        section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in normal_velocity])
+        speed_section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in speed_stack])
+        center_coord = (
+            (axis["x_km"].to_numpy(dtype="f8") - anchor_x) * section_ex
+            + (axis["y_km"].to_numpy(dtype="f8") - anchor_y) * section_ey
+        )
     signed_speed_section = np.sign(section) * speed_section
-    center_coord = (
-        (axis["x_km"].to_numpy(dtype="f8") - anchor_x) * section_ex
-        + (axis["y_km"].to_numpy(dtype="f8") - anchor_y) * section_ey
-    )
 
     k_min = max(0, min(step.from_depth_index, step.to_depth_index) - max(0, depth_padding_layers))
     k_max = min(len(depth) - 1, max(step.from_depth_index, step.to_depth_index) + max(0, depth_padding_layers))
@@ -317,6 +371,9 @@ def _normal_velocity_section(
         "section_axis": axis_label,
         "coordinate_label": coord_label,
         "velocity_label": velocity_label,
+        "axis_curved_direction_fallback_count": int(axis_fallback_count),
+        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
     }
 
 
@@ -826,6 +883,15 @@ def plot_representative_eddy_panels(
                 "n_objects": int(n_objects[ip, tau_i]),
                 "n_tracks": int(n_tracks[ip, tau_i]),
                 "axis_steps": [step.__dict__ for step in steps],
+                "axis_curved_direction_fallback_count": int(
+                    sum(
+                        part.get("axis_curved_direction_fallback_count", 0)
+                        for pair in section_pairs
+                        for part in pair
+                    )
+                ),
+                "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
+                "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
             }
         )
 
@@ -859,7 +925,7 @@ def main() -> None:
     parser.add_argument("--axis-bandwidth", type=float, default=0.075)
     parser.add_argument("--grid-size", type=int, default=121)
     parser.add_argument("--reference-lat", type=float, default=28.0)
-    parser.add_argument("--section-mode", choices=["parallel", "normal"], default="normal")
+    parser.add_argument("--section-mode", choices=["parallel", "normal", "axis_curved"], default="normal")
     parser.add_argument(
         "--right-panel-mode",
         choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],

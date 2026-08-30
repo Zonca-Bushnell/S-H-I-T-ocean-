@@ -1695,6 +1695,38 @@ def _make_vertical_w_section(
     center_y = centers["delta_y_km"].to_numpy(dtype="f8")
     center_z = centers["depth_m"].to_numpy(dtype="f8")
 
+    def axis_curved_centerline() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        if len(centers) >= 2:
+            center_x_full = np.interp(depth, center_z, center_x)
+            center_y_full = np.interp(depth, center_z, center_y)
+        else:
+            cx = float(center_x[0]) if len(center_x) else 0.0
+            cy = float(center_y[0]) if len(center_y) else 0.0
+            center_x_full = np.full_like(depth, cx, dtype="f8")
+            center_y_full = np.full_like(depth, cy, dtype="f8")
+        dx_dz = np.gradient(center_x_full, depth, edge_order=1)
+        dy_dz = np.gradient(center_y_full, depth, edge_order=1)
+        mag = np.hypot(dx_dz, dy_dz)
+        nx = np.full_like(depth, np.nan, dtype="f8")
+        ny = np.full_like(depth, np.nan, dtype="f8")
+        valid = np.isfinite(mag) & (mag > 1.0e-8)
+        nx[valid] = -dy_dz[valid] / mag[valid]
+        ny[valid] = dx_dz[valid] / mag[valid]
+        fallback_count = int((~valid).sum())
+        last = (1.0, 0.0)
+        for i in range(len(depth)):
+            if np.isfinite(nx[i]) and np.isfinite(ny[i]):
+                last = (float(nx[i]), float(ny[i]))
+            else:
+                nx[i], ny[i] = last
+        last = (1.0, 0.0)
+        for i in range(len(depth) - 1, -1, -1):
+            if np.isfinite(nx[i]) and np.isfinite(ny[i]):
+                last = (float(nx[i]), float(ny[i]))
+            else:
+                nx[i], ny[i] = last
+        return center_x_full, center_y_full, nx, ny, fallback_count
+
     def layer_xy(depth_index: int | None) -> tuple[float, float] | None:
         if depth_index is None:
             return None
@@ -1719,7 +1751,22 @@ def _make_vertical_w_section(
         target_x = float(np.nanmedian(center_x)) if center_x.size else 0.0
         target_y = float(np.nanmedian(center_y)) if center_y.size else 0.0
 
-    if section_mode == "normal":
+    axis_fallback_count = 0
+    if section_mode == "axis_curved":
+        center_x_full, center_y_full, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
+        dwdz_section = np.full_like(section, np.nan)
+        for iz in range(len(depth)):
+            x_line = center_x_full[iz] + section_coord * nx_axis[iz]
+            y_line = center_y_full[iz] + section_coord * ny_axis[iz]
+            section[iz] = _interp_section(w[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+            dwdz_section[iz] = _interp_section(dwdz[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+        center_coord = np.zeros(len(center_z), dtype="f8")
+        center_target = 0.0
+        axis = "axis-following curved section"
+    elif section_mode == "normal":
         norm = float(np.hypot(dx, dy))
         if not np.isfinite(norm) or norm <= 1e-9:
             ex, ey = 1.0, 0.0
@@ -1781,6 +1828,9 @@ def _make_vertical_w_section(
         "xlim_km": xlim,
         "zlim_m": zlim,
         "diagnostics": diagnostics,
+        "axis_curved_direction_fallback_count": int(axis_fallback_count),
+        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
     }
 
 
@@ -1811,6 +1861,40 @@ def _make_normal_horizontal_velocity_section(
     center_y = centers["delta_y_km"].to_numpy(dtype="f8")
     center_z = centers["depth_m"].to_numpy(dtype="f8")
 
+    def axis_curved_centerline() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        if len(centers) >= 2:
+            center_x_full = np.interp(depth, center_z, center_x)
+            center_y_full = np.interp(depth, center_z, center_y)
+        else:
+            cx = float(center_x[0]) if len(center_x) else 0.0
+            cy = float(center_y[0]) if len(center_y) else 0.0
+            center_x_full = np.full_like(depth, cx, dtype="f8")
+            center_y_full = np.full_like(depth, cy, dtype="f8")
+        dx_dz = np.gradient(center_x_full, depth, edge_order=1)
+        dy_dz = np.gradient(center_y_full, depth, edge_order=1)
+        mag = np.hypot(dx_dz, dy_dz)
+        tx = np.full_like(depth, np.nan, dtype="f8")
+        ty = np.full_like(depth, np.nan, dtype="f8")
+        valid = np.isfinite(mag) & (mag > 1.0e-8)
+        tx[valid] = dx_dz[valid] / mag[valid]
+        ty[valid] = dy_dz[valid] / mag[valid]
+        fallback_count = int((~valid).sum())
+        last = (1.0, 0.0)
+        for i in range(len(depth)):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        last = (1.0, 0.0)
+        for i in range(len(depth) - 1, -1, -1):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        nx_axis = -ty
+        ny_axis = tx
+        return center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, fallback_count
+
     def layer_xy(depth_index: int | None) -> tuple[float, float] | None:
         if depth_index is None:
             return None
@@ -1835,7 +1919,27 @@ def _make_normal_horizontal_velocity_section(
         jump_ex, jump_ey = dx / norm, dy / norm
     jump_nx, jump_ny = -jump_ey, jump_ex
 
-    if section_mode == "normal":
+    axis_fallback_count = 0
+    if section_mode == "axis_curved":
+        center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        normal_velocity_section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
+        horizontal_speed_section = np.full_like(normal_velocity_section, np.nan)
+        speed = np.hypot(u, v)
+        for iz in range(len(depth)):
+            x_line = center_x_full[iz] + section_coord * nx_axis[iz]
+            y_line = center_y_full[iz] + section_coord * ny_axis[iz]
+            normal_velocity_layer = u[iz] * tx[iz] + v[iz] * ty[iz]
+            normal_velocity_section[iz] = _interp_section(normal_velocity_layer[None, :, :], x_m, y_m, x_line, y_line)[0]
+            horizontal_speed_section[iz] = _interp_section(speed[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+        signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
+        center_coord = np.zeros(len(center_z), dtype="f8")
+        section_axis = "axis-following curved section"
+        velocity_label = "horizontal velocity normal to curved section, u_axis"
+        coordinate_label = "distance along local axis-normal section from layer center (km)"
+    elif section_mode == "normal":
         ex, ey = jump_nx, jump_ny
         nx, ny = jump_ex, jump_ey
         if p0 is not None and p1 is not None:
@@ -1853,16 +1957,17 @@ def _make_normal_horizontal_velocity_section(
         velocity_label = "horizontal velocity normal to section, u_perp"
         coordinate_label = "distance along jump direction from layer center (km)"
 
-    x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
-    max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
-    section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
-    x_line = anchor[0] + section_coord * ex
-    y_line = anchor[1] + section_coord * ey
-    normal_velocity = u * nx + v * ny
-    normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
-    horizontal_speed_section = _interp_section(np.hypot(u, v), x_m, y_m, x_line, y_line)
-    signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
-    center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
+    if section_mode != "axis_curved":
+        x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        x_line = anchor[0] + section_coord * ex
+        y_line = anchor[1] + section_coord * ey
+        normal_velocity = u * nx + v * ny
+        normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
+        horizontal_speed_section = _interp_section(np.hypot(u, v), x_m, y_m, x_line, y_line)
+        signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
+        center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
 
     if anchor_depth_index is not None:
         k_min = max(0, int(anchor_depth_index) - max(0, depth_padding_layers))
@@ -1887,6 +1992,9 @@ def _make_normal_horizontal_velocity_section(
         "coordinate_label": coordinate_label,
         "xlim_km": np.array([-x_half, x_half], dtype="f8"),
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
+        "axis_curved_direction_fallback_count": int(axis_fallback_count),
+        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
     }
 
 
@@ -1934,7 +2042,14 @@ def _make_cross_section_fields(
     }
 
 
-def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smooth_sigma_cells: float | None = None) -> None:
+def _write_metadata(
+    selected: SelectedObject,
+    output_dir: Path,
+    horizontal_smooth_sigma_cells: float | None = None,
+    *,
+    section_mode: str | None = None,
+    right_panel_mode: str | None = None,
+) -> None:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
@@ -1958,6 +2073,12 @@ def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smoot
         "second_jump_to_depth_m": selected.second_jump_to_depth_m,
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
     }
+    if section_mode is not None:
+        payload["section_mode"] = section_mode
+        payload["axis_curved_centerline_forced_to_zero"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_interpretation"] = "axis-following curved section" if section_mode == "axis_curved" else ""
+    if right_panel_mode is not None:
+        payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
         payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1969,6 +2090,9 @@ def _metadata_payload(
     selected: SelectedObject,
     output_dir: Path,
     horizontal_smooth_sigma_cells: float | None = None,
+    *,
+    section_mode: str | None = None,
+    right_panel_mode: str | None = None,
 ) -> dict[str, object]:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
@@ -1994,6 +2118,12 @@ def _metadata_payload(
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
         "output_dir": str(output_dir),
     }
+    if section_mode is not None:
+        payload["section_mode"] = section_mode
+        payload["axis_curved_centerline_forced_to_zero"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_interpretation"] = "axis-following curved section" if section_mode == "axis_curved" else ""
+    if right_panel_mode is not None:
+        payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
         payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     return payload
@@ -2069,7 +2199,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
     parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
-    parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
+    parser.add_argument("--w-section-mode", choices=["parallel", "normal", "axis_curved"], default="parallel")
     parser.add_argument(
         "--right-panel-mode",
         choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
@@ -2108,7 +2238,13 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, args.output_dir, horizontal_smooth_sigma_cells)
+        _write_metadata(
+            selected,
+            args.output_dir,
+            horizontal_smooth_sigma_cells,
+            section_mode=args.w_section_mode,
+            right_panel_mode=args.right_panel_mode,
+        )
         _plot_9panel(
             selected,
             object_layers,
@@ -2155,7 +2291,13 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, child, horizontal_smooth_sigma_cells)
+        _write_metadata(
+            selected,
+            child,
+            horizontal_smooth_sigma_cells,
+            section_mode=args.w_section_mode,
+            right_panel_mode=args.right_panel_mode,
+        )
         _plot_9panel(
             selected,
             object_layers,
@@ -2167,7 +2309,15 @@ def main() -> None:
             horizontal_smooth_sigma_cells,
             args.show_grid_centers,
         )
-        rows.append(_metadata_payload(selected, child, horizontal_smooth_sigma_cells))
+        rows.append(
+            _metadata_payload(
+                selected,
+                child,
+                horizontal_smooth_sigma_cells,
+                section_mode=args.w_section_mode,
+                right_panel_mode=args.right_panel_mode,
+            )
+        )
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
 
     summary = pd.DataFrame(rows)
