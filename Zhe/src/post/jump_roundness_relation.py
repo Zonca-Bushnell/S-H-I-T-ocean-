@@ -824,10 +824,6 @@ def main() -> None:
     )
 
 
-if __name__ == "__main__":
-    main()
-
-
 def _section_vectors(jump: JumpRow, mode: str) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], str]:
     dx = float(jump.to_x_km - jump.from_x_km)
     dy = float(jump.to_y_km - jump.from_y_km)
@@ -898,3 +894,323 @@ def _zero_line_metrics(column: dict[str, np.ndarray], jump: JumpRow, mode: str) 
         f"{mode}_center_projection_shift_km": center_shift,
         f"{mode}_center_projection_shift_over_R": center_shift / radius_km,
     }
+
+
+if __name__ == "__main__":
+    main()
+
+
+def _projection_rows_for_object(
+    object_layers: pd.DataFrame,
+    jump_ranks: int,
+    depth_padding_layers: int,
+) -> list[dict[str, object]]:
+    obj = _object_offsets_km(object_layers).sort_values("depth_index").reset_index(drop=True)
+    jumps = _jump_rows_for_object(obj, jump_ranks)
+    rows: list[dict[str, object]] = []
+    if not jumps:
+        return rows
+
+    depth_index = obj["depth_index"].to_numpy(dtype="i4")
+    x = obj["delta_x_km"].to_numpy(dtype="f8")
+    y = obj["delta_y_km"].to_numpy(dtype="f8")
+    radius_km = max(float(np.nanmedian(obj["radius_m"].to_numpy(dtype="f8"))) / 1000.0, 1.0)
+
+    for jump in jumps:
+        for mode in ("parallel", "normal"):
+            section_vec, plane_normal_vec, anchor, label = _section_vectors(jump, mode)
+            section_coord = (x - anchor[0]) * section_vec[0] + (y - anchor[1]) * section_vec[1]
+            offplane_coord = (x - anchor[0]) * plane_normal_vec[0] + (y - anchor[1]) * plane_normal_vec[1]
+
+            in_window = (
+                depth_index >= min(jump.from_depth_index, jump.to_depth_index) - int(depth_padding_layers)
+            ) & (
+                depth_index <= max(jump.from_depth_index, jump.to_depth_index) + int(depth_padding_layers)
+            )
+            window_off = np.abs(offplane_coord[in_window])
+            from_mask = depth_index == int(jump.from_depth_index)
+            to_mask = depth_index == int(jump.to_depth_index)
+            from_section = float(section_coord[from_mask][0]) if np.any(from_mask) else np.nan
+            to_section = float(section_coord[to_mask][0]) if np.any(to_mask) else np.nan
+            from_off = float(offplane_coord[from_mask][0]) if np.any(from_mask) else np.nan
+            to_off = float(offplane_coord[to_mask][0]) if np.any(to_mask) else np.nan
+            projected_jump = abs(to_section - from_section) if np.isfinite(from_section) and np.isfinite(to_section) else np.nan
+            hidden_jump = abs(to_off - from_off) if np.isfinite(from_off) and np.isfinite(to_off) else np.nan
+            compression = (
+                1.0 - projected_jump / float(jump.jump_distance_km)
+                if np.isfinite(projected_jump) and jump.jump_distance_km > 0
+                else np.nan
+            )
+            rows.append(
+                {
+                    "eddy3d_object_id": jump.eddy3d_object_id,
+                    "track3d_id": jump.track3d_id,
+                    "date": jump.date,
+                    "polarity": jump.polarity,
+                    "shape_class": jump.shape_class,
+                    "jump_rank": jump.jump_rank,
+                    "from_depth_index": jump.from_depth_index,
+                    "to_depth_index": jump.to_depth_index,
+                    "from_depth_m": jump.from_depth_m,
+                    "to_depth_m": jump.to_depth_m,
+                    "jump_distance_km": jump.jump_distance_km,
+                    "jump_distance_over_R": jump.jump_distance_over_R,
+                    "section_mode": mode,
+                    "section_label": label,
+                    "projected_jump_km": float(projected_jump),
+                    "projected_jump_over_R": projected_jump / radius_km if np.isfinite(projected_jump) else np.nan,
+                    "hidden_jump_km": float(hidden_jump),
+                    "hidden_jump_over_R": hidden_jump / radius_km if np.isfinite(hidden_jump) else np.nan,
+                    "projection_compression_fraction": float(compression),
+                    "from_offplane_km": from_off,
+                    "to_offplane_km": to_off,
+                    "window_offplane_mean_km": _finite_mean(window_off),
+                    "window_offplane_p90_km": _finite_quantile(window_off, 0.9),
+                    "window_offplane_max_km": _finite_max(window_off),
+                    "window_offplane_mean_over_R": _finite_mean(window_off) / radius_km,
+                    "window_offplane_p90_over_R": _finite_quantile(window_off, 0.9) / radius_km,
+                    "window_offplane_max_over_R": _finite_max(window_off) / radius_km,
+                    "n_window_layers": int(np.isfinite(window_off).sum()),
+                }
+            )
+    return rows
+
+
+def _roundness_join_keys() -> list[str]:
+    return ["eddy3d_object_id", "jump_rank", "from_depth_index", "to_depth_index"]
+
+
+def _join_roundness_metrics(projection: pd.DataFrame, roundness_metrics: Path | None) -> pd.DataFrame:
+    if roundness_metrics is None or not roundness_metrics.exists():
+        return projection
+    suffix_cols = [
+        "jump_relation_class",
+        "layer_roundness_score_mean",
+        "layer_disorder_score_mean",
+        "layer_crescent_m1_mean",
+        "layer_weak_core_count_max",
+        "parallel_zero_line_shift_over_R",
+        "normal_zero_line_shift_over_R",
+    ]
+    source = pd.read_csv(roundness_metrics, usecols=lambda col: col in set(_roundness_join_keys() + suffix_cols))
+    keep = [col for col in _roundness_join_keys() + suffix_cols if col in source.columns]
+    return projection.merge(source[keep], on=_roundness_join_keys(), how="left")
+
+
+def _projection_dominance(row: pd.Series) -> str:
+    relation = str(row.get("jump_relation_class", ""))
+    compression = float(row.get("projection_compression_fraction", np.nan))
+    hidden = float(row.get("window_offplane_p90_over_R", np.nan))
+    if row.get("section_mode") == "normal" and np.isfinite(compression) and compression > 0.75:
+        return "normal_projection_expected"
+    if relation == "zero_line_consistent_center_jump" and np.isfinite(hidden) and hidden >= 0.15:
+        return "offplane_projection_supported"
+    if relation == "zero_line_consistent_center_jump":
+        return "inplane_center_switch_likely"
+    if relation == "zero_line_jump_related":
+        return "zero_line_jump_related"
+    return "unclear"
+
+
+def _write_projection_outputs(projection: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    projection["projection_explanation_class"] = projection.apply(_projection_dominance, axis=1)
+    projection.to_csv(output_dir / "jump_projection_geometry_metrics.csv", index=False)
+    try:
+        projection.to_parquet(output_dir / "jump_projection_geometry_metrics.parquet", index=False)
+    except Exception:
+        pass
+
+    group_cols = ["shape_class", "section_mode"]
+    rows: list[dict[str, object]] = []
+    for keys, part in projection.groupby(group_cols, dropna=False):
+        shape, mode = keys
+        rows.append(
+            {
+                "shape_class": shape,
+                "section_mode": mode,
+                "n_rows": int(len(part)),
+                "median_jump_over_R": float(np.nanmedian(part["jump_distance_over_R"])),
+                "median_projected_jump_over_R": float(np.nanmedian(part["projected_jump_over_R"])),
+                "median_hidden_jump_over_R": float(np.nanmedian(part["hidden_jump_over_R"])),
+                "median_window_offplane_p90_over_R": float(np.nanmedian(part["window_offplane_p90_over_R"])),
+                "median_projection_compression_fraction": float(np.nanmedian(part["projection_compression_fraction"])),
+                "class_counts_json": json.dumps(
+                    {str(k): int(v) for k, v in part["projection_explanation_class"].value_counts().to_dict().items()},
+                    ensure_ascii=False,
+                ),
+            }
+        )
+    summary = pd.DataFrame(rows)
+    summary.to_csv(output_dir / "jump_projection_geometry_summary.csv", index=False)
+    (output_dir / "jump_projection_geometry_summary.json").write_text(
+        json.dumps(summary.to_dict(orient="records"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _plot_projection_outputs(projection, output_dir)
+    _write_projection_report(projection, summary, output_dir)
+    return summary
+
+
+def _plot_projection_outputs(projection: pd.DataFrame, output_dir: Path) -> None:
+    fig_dir = output_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    finite = projection.replace([np.inf, -np.inf], np.nan)
+
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    for (shape, mode), part in finite.groupby(["shape_class", "section_mode"], dropna=False):
+        ax.scatter(
+            part["jump_distance_over_R"],
+            part["window_offplane_p90_over_R"],
+            s=10,
+            alpha=0.25,
+            label=f"{shape} / {mode}",
+        )
+    ax.set_xlabel("center jump distance / R")
+    ax.set_ylabel("local centerline off-plane p90 / R")
+    ax.set_title("Does the section hide part of the 3D centerline motion?")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(fig_dir / "offplane_distance_vs_jump.png", dpi=220)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    finite.boxplot(
+        column="projection_compression_fraction",
+        by=["shape_class", "section_mode"],
+        ax=ax,
+        grid=False,
+        rot=25,
+    )
+    ax.set_ylabel("1 - projected jump / true jump")
+    ax.set_title("Projection compression by section mode")
+    fig.suptitle("")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "projection_compression_by_section_mode.png", dpi=220)
+    plt.close(fig)
+
+    if "jump_relation_class" in finite.columns:
+        fig, ax = plt.subplots(figsize=(8.0, 5.2))
+        finite.boxplot(
+            column="window_offplane_p90_over_R",
+            by=["jump_relation_class", "section_mode"],
+            ax=ax,
+            grid=False,
+            rot=30,
+        )
+        ax.set_ylabel("local centerline off-plane p90 / R")
+        ax.set_title("Off-plane distance by zero-line relation class")
+        fig.suptitle("")
+        fig.tight_layout()
+        fig.savefig(fig_dir / "offplane_by_zero_line_relation.png", dpi=220)
+        plt.close(fig)
+
+    matrix = pd.crosstab(
+        finite["section_mode"],
+        finite["projection_explanation_class"],
+        normalize="index",
+    )
+    fig, ax = plt.subplots(figsize=(8.0, 3.8))
+    im = ax.imshow(matrix.to_numpy(dtype="f8"), cmap="viridis", aspect="auto", vmin=0.0, vmax=1.0)
+    ax.set_xticks(np.arange(len(matrix.columns)), labels=matrix.columns, rotation=25, ha="right", fontsize=7)
+    ax.set_yticks(np.arange(len(matrix.index)), labels=matrix.index)
+    ax.set_title("Projection explanation classes")
+    fig.colorbar(im, ax=ax, label="row fraction")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "projection_explanation_matrix.png", dpi=220)
+    plt.close(fig)
+
+
+def _write_projection_report(projection: pd.DataFrame, summary: pd.DataFrame, output_dir: Path) -> None:
+    lines = [
+        "# 间断点剖面投影几何验证",
+        "",
+        "## 目的",
+        "",
+        "验证“零线连续但中心跳跃”是否可能来自三维中心线没有落在当前二维剖面内。这里不重新计算速度场，只用已有中心线几何与 roundness 诊断结果。",
+        "",
+        "## 定义",
+        "",
+        "- `jump-parallel`：剖面方向沿上下两层中心跳变向量，理论上包含这两个端点的连线。",
+        "- `jump-normal`：剖面方向垂直于跳变向量，并穿过两端点中点；它用于检查横切边界，天然会把真正的跳变方向投影到剖面外。",
+        "- `projected_jump`：真实 jump 在该剖面横轴上能看到的分量。",
+        "- `hidden_jump`：真实 jump 落在剖面外、图上被隐藏的分量。",
+        "- `window_offplane_p90`：间断点附近若干层中心线到该剖面的出平面距离，用于判断整段中心线是否离开剖面。",
+        "",
+        "## 核心统计",
+        "",
+    ]
+    for _, row in summary.iterrows():
+        lines.append(
+            f"- {row['shape_class']} / {row['section_mode']}: "
+            f"median projected J/R={row['median_projected_jump_over_R']:.3f}, "
+            f"median hidden J/R={row['median_hidden_jump_over_R']:.3f}, "
+            f"median compression={row['median_projection_compression_fraction']:.3f}, "
+            f"off-plane p90/R={row['median_window_offplane_p90_over_R']:.3f}"
+        )
+
+    normal = summary[summary["section_mode"].astype(str).eq("normal")]
+    parallel = summary[summary["section_mode"].astype(str).eq("parallel")]
+    normal_comp = float(np.nanmedian(normal["median_projection_compression_fraction"])) if not normal.empty else np.nan
+    parallel_comp = float(np.nanmedian(parallel["median_projection_compression_fraction"])) if not parallel.empty else np.nan
+    lines.extend(
+        [
+            "",
+            "## 初步判定",
+            "",
+            f"- `jump-normal` 的典型投影压缩为 {normal_comp:.3f}，这意味着 normal 剖面主要用于看横切边界，不能直接用来判断中心是否沿跳变方向连续。",
+            f"- `jump-parallel` 的典型投影压缩为 {parallel_comp:.3f}，它更接近真实跳变路径；如果这里仍然出现零线连续但中心跳，才更支持“二维弱核候选切换/不圆结构”。",
+            "- 因此，你的判断是对的：一部分视觉不一致确实来自三维点没有落在同一个二维剖面上，尤其是 `jump-normal` 图。最终解释必须同时看 projection geometry、速度场圆度和弱核多值性。",
+        ]
+    )
+    (output_dir / "jump_projection_geometry_summary_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def analyze_jump_projection_geometry(
+    *,
+    results_root: Path,
+    shape_dir_name: str,
+    output_dir: Path,
+    shapes: str,
+    jump_ranks: int,
+    depth_padding_layers: int,
+    year_limit: int | None,
+    selected_metadata: Path | None,
+    max_objectdays: int | None,
+    roundness_metrics: Path | None,
+) -> None:
+    shape_set = {part.strip() for part in shapes.split(",") if part.strip()}
+    layers = _shape_filtered_layers(results_root, shape_dir_name, shape_set, year_limit)
+    if selected_metadata is not None:
+        selected = pd.read_csv(selected_metadata)
+        keep_ids = set(selected["eddy3d_object_id"].astype(int).unique())
+        layers = layers[layers["eddy3d_object_id"].astype(int).isin(keep_ids)].copy()
+        if layers.empty:
+            raise ValueError("No layers matched --selected-metadata object ids")
+    if max_objectdays is not None:
+        keep_ids = list(layers["eddy3d_object_id"].astype(int).drop_duplicates().head(max_objectdays))
+        layers = layers[layers["eddy3d_object_id"].astype(int).isin(keep_ids)].copy()
+
+    rows: list[dict[str, object]] = []
+    for _, obj in layers.groupby("eddy3d_object_id", sort=False):
+        rows.extend(_projection_rows_for_object(obj, jump_ranks, depth_padding_layers))
+    if not rows:
+        raise RuntimeError("No projection metrics were produced")
+    projection = pd.DataFrame.from_records(rows)
+    projection = _join_roundness_metrics(projection, roundness_metrics)
+    summary = _write_projection_outputs(projection, output_dir)
+    print(
+        json.dumps(
+            {
+                "output_dir": str(output_dir),
+                "rows": int(len(projection)),
+                "objectdays": int(projection["eddy3d_object_id"].nunique()),
+                "tracks": int(projection["track3d_id"].nunique()),
+                "summary_rows": int(len(summary)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
