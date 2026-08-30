@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -20,6 +21,16 @@ RHO0 = 1025.0
 G = 9.81
 OMEGA = 7.2921159e-5
 EARTH_RADIUS_M = 6_371_000.0
+SECTION_DISPLAY_QUANTILE = 0.75
+
+
+def _emphasize_contours(contours) -> None:
+    for collection in contours.collections:
+        linewidth = np.asarray(collection.get_linewidth(), dtype="f8")
+        base_width = float(linewidth.flat[0]) if linewidth.size else 0.65
+        collection.set_path_effects(
+            [path_effects.withStroke(linewidth=base_width + 1.2, foreground="white", alpha=0.75)]
+        )
 
 
 @dataclass(frozen=True)
@@ -617,6 +628,20 @@ def _shared_finite_limits(values: list[np.ndarray], quantile: float = 0.98) -> t
     return _finite_limits(np.concatenate(finite_parts), quantile=quantile)
 
 
+def _shared_nonnegative_limits(values: list[np.ndarray], quantile: float = 0.98) -> tuple[float, float]:
+    finite_parts = [np.asarray(part[np.isfinite(part)], dtype="f8") for part in values if part is not None]
+    finite_parts = [part for part in finite_parts if part.size]
+    if not finite_parts:
+        return 0.0, 1.0
+    finite = np.concatenate(finite_parts)
+    vmax = float(np.nanquantile(finite, quantile))
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = float(np.nanmax(finite)) if finite.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = 1.0
+    return 0.0, vmax
+
+
 def _nan_gaussian_smooth(field: np.ndarray, sigma_cells: float) -> np.ndarray:
     if sigma_cells <= 0:
         return np.asarray(field, dtype="f8")
@@ -937,6 +962,121 @@ def _plot_normal_horizontal_velocity_section(
     return mesh
 
 
+def _plot_horizontal_speed_section(
+    ax,
+    section: dict[str, np.ndarray],
+    title: str,
+    selected: SelectedObject,
+    *,
+    second: bool = False,
+    value_limits: tuple[float, float] | None = None,
+):
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    speed = section["horizontal_speed_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = speed[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else speed
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, speed, shading="auto", cmap="coolwarm", vmin=vmin, vmax=vmax)
+    finite = local[np.isfinite(local)]
+    if finite.size:
+        levels = np.linspace(float(vmin), float(vmax), 9)
+        levels = levels[np.isfinite(levels)]
+        if np.unique(levels).size >= 3:
+            contours = ax.contour(
+                s,
+                depth,
+                speed,
+                levels=levels,
+                cmap="coolwarm",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.65,
+                alpha=0.82,
+            )
+            _emphasize_contours(contours)
+    ax.invert_yaxis()
+    ax.axvline(0, color="0.75", lw=0.8)
+    center_s = section.get("center_section_coord_km")
+    center_z = section.get("center_depth_m")
+    if center_s is not None and center_z is not None:
+        ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
+        ax.legend(loc="best", fontsize=7)
+    axis_name = str(section.get("section_axis", "section"))
+    coordinate_label = str(section.get("coordinate_label", "section distance (km)"))
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: horizontal speed |u_h|\n{axis_name}", fontsize=9)
+    ax.set_xlabel(coordinate_label)
+    ax.set_ylabel("depth (m)")
+    ax.grid(alpha=0.2)
+    return mesh
+
+
+def _plot_signed_horizontal_speed_section(
+    ax,
+    section: dict[str, np.ndarray],
+    title: str,
+    selected: SelectedObject,
+    *,
+    second: bool = False,
+    value_limits: tuple[float, float] | None = None,
+):
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    signed_speed = section["signed_horizontal_speed_section"]
+    u_perp = section["normal_horizontal_velocity_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = signed_speed[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else signed_speed
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, signed_speed, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    finite = local[np.isfinite(local)]
+    if finite.size:
+        levels = np.linspace(float(vmin), float(vmax), 11)
+        levels = levels[np.isfinite(levels)]
+        span = max(abs(float(vmin)), abs(float(vmax)))
+        levels = levels[np.abs(levels) > max(span * 0.10, 1e-12)]
+        if levels.size >= 2:
+            contours = ax.contour(
+                s,
+                depth,
+                signed_speed,
+                levels=levels,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.65,
+                alpha=0.82,
+            )
+            _emphasize_contours(contours)
+    u_perp_local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
+    u_perp_finite = u_perp_local[np.isfinite(u_perp_local)]
+    if u_perp_finite.size and float(np.nanmin(u_perp_finite)) < 0.0 < float(np.nanmax(u_perp_finite)):
+        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.02", linewidths=2.8, alpha=0.98)
+    ax.invert_yaxis()
+    ax.axvline(0, color="0.75", lw=0.8)
+    center_s = section.get("center_section_coord_km")
+    center_z = section.get("center_depth_m")
+    if center_s is not None and center_z is not None:
+        ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
+        ax.legend(loc="best", fontsize=7)
+    axis_name = str(section.get("section_axis", "section"))
+    coordinate_label = str(section.get("coordinate_label", "section distance (km)"))
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: signed horizontal speed sign(u_perp)|u_h|\n{axis_name}", fontsize=9)
+    ax.set_xlabel(coordinate_label)
+    ax.set_ylabel("depth (m)")
+    ax.grid(alpha=0.2)
+    return mesh
+
+
 def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str) -> np.ndarray:
     if section is None or value_key not in section:
         return np.array([], dtype="f8")
@@ -1156,6 +1296,8 @@ def _plot_9panel(
     ax7 = fig.add_subplot(gs[4, :])
 
     normal_sections = []
+    horizontal_speed_sections = []
+    signed_horizontal_speed_sections = []
     dwdz_sections = []
     w_sections = []
     for part, available in [(first_fields, has_first), (second_fields, has_second)]:
@@ -1165,13 +1307,33 @@ def _plot_9panel(
             for key in ("upper_velocity_section", "lower_velocity_section"):
                 if key in part:
                     normal_sections.append(_section_local_values(part[key], "normal_horizontal_velocity_section"))
+        elif right_panel_mode == "horizontal_speed":
+            for key in ("upper_velocity_section", "lower_velocity_section"):
+                if key in part:
+                    horizontal_speed_sections.append(_section_local_values(part[key], "horizontal_speed_section"))
+        elif right_panel_mode == "signed_horizontal_speed":
+            for key in ("upper_velocity_section", "lower_velocity_section"):
+                if key in part:
+                    signed_horizontal_speed_sections.append(_section_local_values(part[key], "signed_horizontal_speed_section"))
         elif "w_section" in part:
             dwdz_sections.append(_section_local_values(part["w_section"], "dwdz_section"))
             w_sections.append(_section_local_values(part["w_section"], "w_section"))
-    normal_limits = _shared_finite_limits(normal_sections) if normal_sections else None
+    normal_limits = _shared_finite_limits(normal_sections, quantile=SECTION_DISPLAY_QUANTILE) if normal_sections else None
+    horizontal_speed_limits = (
+        _shared_nonnegative_limits(horizontal_speed_sections, quantile=SECTION_DISPLAY_QUANTILE)
+        if horizontal_speed_sections
+        else None
+    )
+    signed_horizontal_speed_limits = (
+        _shared_finite_limits(signed_horizontal_speed_sections, quantile=SECTION_DISPLAY_QUANTILE)
+        if signed_horizontal_speed_sections
+        else None
+    )
     dwdz_limits = _shared_finite_limits(dwdz_sections) if dwdz_sections else None
     w_limits = _shared_finite_limits(w_sections) if w_sections else None
     normal_meshes, normal_axes = [], []
+    horizontal_speed_meshes, horizontal_speed_axes = [], []
+    signed_horizontal_speed_meshes, signed_horizontal_speed_axes = [], []
     dwdz_meshes, dwdz_axes = [], []
     w_meshes, w_axes = [], []
 
@@ -1287,6 +1449,16 @@ def _plot_9panel(
             m10 = _plot_normal_horizontal_velocity_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=normal_limits)
             normal_meshes.extend([m8, m10])
             normal_axes.extend([ax8, ax10])
+        elif right_panel_mode == "horizontal_speed" and "upper_velocity_section" in first_fields:
+            m8 = _plot_horizontal_speed_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False, value_limits=horizontal_speed_limits)
+            m10 = _plot_horizontal_speed_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=horizontal_speed_limits)
+            horizontal_speed_meshes.extend([m8, m10])
+            horizontal_speed_axes.extend([ax8, ax10])
+        elif right_panel_mode == "signed_horizontal_speed" and "upper_velocity_section" in first_fields:
+            m8 = _plot_signed_horizontal_speed_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False, value_limits=signed_horizontal_speed_limits)
+            m10 = _plot_signed_horizontal_speed_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=signed_horizontal_speed_limits)
+            signed_horizontal_speed_meshes.extend([m8, m10])
+            signed_horizontal_speed_axes.extend([ax8, ax10])
         elif "w_section" in first_fields:
             m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False, value_limits=dwdz_limits)
             m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False, value_limits=w_limits)
@@ -1323,6 +1495,16 @@ def _plot_9panel(
             m11 = _plot_normal_horizontal_velocity_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=normal_limits)
             normal_meshes.extend([m9, m11])
             normal_axes.extend([ax9, ax11])
+        elif right_panel_mode == "horizontal_speed" and "upper_velocity_section" in second_fields:
+            m9 = _plot_horizontal_speed_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True, value_limits=horizontal_speed_limits)
+            m11 = _plot_horizontal_speed_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=horizontal_speed_limits)
+            horizontal_speed_meshes.extend([m9, m11])
+            horizontal_speed_axes.extend([ax9, ax11])
+        elif right_panel_mode == "signed_horizontal_speed" and "upper_velocity_section" in second_fields:
+            m9 = _plot_signed_horizontal_speed_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True, value_limits=signed_horizontal_speed_limits)
+            m11 = _plot_signed_horizontal_speed_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=signed_horizontal_speed_limits)
+            signed_horizontal_speed_meshes.extend([m9, m11])
+            signed_horizontal_speed_axes.extend([ax9, ax11])
         elif "w_section" in second_fields:
             m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True, value_limits=dwdz_limits)
             m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True, value_limits=w_limits)
@@ -1339,6 +1521,10 @@ def _plot_9panel(
 
     if normal_meshes:
         fig.colorbar(normal_meshes[0], ax=normal_axes, shrink=0.82, label="m/s")
+    if horizontal_speed_meshes:
+        fig.colorbar(horizontal_speed_meshes[0], ax=horizontal_speed_axes, shrink=0.82, label="m/s")
+    if signed_horizontal_speed_meshes:
+        fig.colorbar(signed_horizontal_speed_meshes[0], ax=signed_horizontal_speed_axes, shrink=0.82, label="m/s")
     if dwdz_meshes:
         fig.colorbar(dwdz_meshes[0], ax=dwdz_axes, shrink=0.82, label="s^-1 diagnostic")
     if w_meshes:
@@ -1462,7 +1648,7 @@ def _make_jump_cross_section_fields(
         "upper_horizontal": upper_horizontal,
         "lower_horizontal": lower_horizontal,
     }
-    if right_panel_mode == "normal_horizontal_velocity":
+    if right_panel_mode in {"normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"}:
         out["upper_velocity_section"] = _make_normal_horizontal_velocity_section(
             object_layers=offsets,
             column=filter_column,
@@ -1550,6 +1736,38 @@ def _make_vertical_w_section(
     center_y = centers["delta_y_km"].to_numpy(dtype="f8")
     center_z = centers["depth_m"].to_numpy(dtype="f8")
 
+    def axis_curved_centerline() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        if len(centers) >= 2:
+            center_x_full = np.interp(depth, center_z, center_x)
+            center_y_full = np.interp(depth, center_z, center_y)
+        else:
+            cx = float(center_x[0]) if len(center_x) else 0.0
+            cy = float(center_y[0]) if len(center_y) else 0.0
+            center_x_full = np.full_like(depth, cx, dtype="f8")
+            center_y_full = np.full_like(depth, cy, dtype="f8")
+        dx_dz = np.gradient(center_x_full, depth, edge_order=1)
+        dy_dz = np.gradient(center_y_full, depth, edge_order=1)
+        mag = np.hypot(dx_dz, dy_dz)
+        nx = np.full_like(depth, np.nan, dtype="f8")
+        ny = np.full_like(depth, np.nan, dtype="f8")
+        valid = np.isfinite(mag) & (mag > 1.0e-8)
+        nx[valid] = -dy_dz[valid] / mag[valid]
+        ny[valid] = dx_dz[valid] / mag[valid]
+        fallback_count = int((~valid).sum())
+        last = (1.0, 0.0)
+        for i in range(len(depth)):
+            if np.isfinite(nx[i]) and np.isfinite(ny[i]):
+                last = (float(nx[i]), float(ny[i]))
+            else:
+                nx[i], ny[i] = last
+        last = (1.0, 0.0)
+        for i in range(len(depth) - 1, -1, -1):
+            if np.isfinite(nx[i]) and np.isfinite(ny[i]):
+                last = (float(nx[i]), float(ny[i]))
+            else:
+                nx[i], ny[i] = last
+        return center_x_full, center_y_full, nx, ny, fallback_count
+
     def layer_xy(depth_index: int | None) -> tuple[float, float] | None:
         if depth_index is None:
             return None
@@ -1574,7 +1792,28 @@ def _make_vertical_w_section(
         target_x = float(np.nanmedian(center_x)) if center_x.size else 0.0
         target_y = float(np.nanmedian(center_y)) if center_y.size else 0.0
 
-    if section_mode == "normal":
+    axis_fallback_count = 0
+    if section_mode == "axis_curved":
+        center_x_full, center_y_full, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        center_s_full = center_x_full * nx_axis + center_y_full * ny_axis
+        center_nx = np.interp(center_z, depth, nx_axis)
+        center_ny = np.interp(center_z, depth, ny_axis)
+        center_coord = center_x * center_nx + center_y * center_ny
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0)
+        if np.isfinite(center_coord).any():
+            max_half = max(max_half, float(np.nanmax(np.abs(center_coord))) + float(min_half_width_km))
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
+        dwdz_section = np.full_like(section, np.nan)
+        for iz in range(len(depth)):
+            offset = section_coord - center_s_full[iz]
+            x_line = center_x_full[iz] + offset * nx_axis[iz]
+            y_line = center_y_full[iz] + offset * ny_axis[iz]
+            section[iz] = _interp_section(w[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+            dwdz_section[iz] = _interp_section(dwdz[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+        center_target = 0.0
+        axis = "axis-following curved section, local-normal projection"
+    elif section_mode == "normal":
         norm = float(np.hypot(dx, dy))
         if not np.isfinite(norm) or norm <= 1e-9:
             ex, ey = 1.0, 0.0
@@ -1618,7 +1857,16 @@ def _make_vertical_w_section(
         k_min = 0
         k_max = min(len(depth) - 1, max(1, 2 * max(0, depth_padding_layers)))
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
-    xlim = np.array([center_target - x_half, center_target + x_half], dtype="f8")
+    if section_mode == "axis_curved" and np.isfinite(center_coord).any():
+        in_depth = (center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))
+        visible_centers = center_coord[in_depth]
+        if not np.isfinite(visible_centers).any():
+            visible_centers = center_coord[np.isfinite(center_coord)]
+        low = min(0.0, float(np.nanmin(visible_centers))) - x_half
+        high = max(0.0, float(np.nanmax(visible_centers))) + x_half
+        xlim = np.array([low, high], dtype="f8")
+    else:
+        xlim = np.array([center_target - x_half, center_target + x_half], dtype="f8")
     coord_min = float(np.nanmin(section_coord))
     coord_max = float(np.nanmax(section_coord))
     xlim[0] = max(xlim[0], coord_min)
@@ -1636,6 +1884,16 @@ def _make_vertical_w_section(
         "xlim_km": xlim,
         "zlim_m": zlim,
         "diagnostics": diagnostics,
+        "axis_curved_direction_fallback_count": int(axis_fallback_count),
+        "axis_curved_centerline_forced_to_zero": False,
+        "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+        "axis_curved_preserves_tilt_projection": False,
+        "axis_curved_preserves_total_tilt": False,
+        "axis_curved_interpretation": (
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
+            if section_mode == "axis_curved"
+            else ""
+        ),
     }
 
 
@@ -1666,6 +1924,40 @@ def _make_normal_horizontal_velocity_section(
     center_y = centers["delta_y_km"].to_numpy(dtype="f8")
     center_z = centers["depth_m"].to_numpy(dtype="f8")
 
+    def axis_curved_centerline() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+        if len(centers) >= 2:
+            center_x_full = np.interp(depth, center_z, center_x)
+            center_y_full = np.interp(depth, center_z, center_y)
+        else:
+            cx = float(center_x[0]) if len(center_x) else 0.0
+            cy = float(center_y[0]) if len(center_y) else 0.0
+            center_x_full = np.full_like(depth, cx, dtype="f8")
+            center_y_full = np.full_like(depth, cy, dtype="f8")
+        dx_dz = np.gradient(center_x_full, depth, edge_order=1)
+        dy_dz = np.gradient(center_y_full, depth, edge_order=1)
+        mag = np.hypot(dx_dz, dy_dz)
+        tx = np.full_like(depth, np.nan, dtype="f8")
+        ty = np.full_like(depth, np.nan, dtype="f8")
+        valid = np.isfinite(mag) & (mag > 1.0e-8)
+        tx[valid] = dx_dz[valid] / mag[valid]
+        ty[valid] = dy_dz[valid] / mag[valid]
+        fallback_count = int((~valid).sum())
+        last = (1.0, 0.0)
+        for i in range(len(depth)):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        last = (1.0, 0.0)
+        for i in range(len(depth) - 1, -1, -1):
+            if np.isfinite(tx[i]) and np.isfinite(ty[i]):
+                last = (float(tx[i]), float(ty[i]))
+            else:
+                tx[i], ty[i] = last
+        nx_axis = -ty
+        ny_axis = tx
+        return center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, fallback_count
+
     def layer_xy(depth_index: int | None) -> tuple[float, float] | None:
         if depth_index is None:
             return None
@@ -1690,7 +1982,33 @@ def _make_normal_horizontal_velocity_section(
         jump_ex, jump_ey = dx / norm, dy / norm
     jump_nx, jump_ny = -jump_ey, jump_ex
 
-    if section_mode == "normal":
+    axis_fallback_count = 0
+    if section_mode == "axis_curved":
+        center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        center_s_full = center_x_full * nx_axis + center_y_full * ny_axis
+        center_nx = np.interp(center_z, depth, nx_axis)
+        center_ny = np.interp(center_z, depth, ny_axis)
+        center_coord = center_x * center_nx + center_y * center_ny
+        x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+        if np.isfinite(center_coord).any():
+            max_half = max(max_half, float(np.nanmax(np.abs(center_coord))) + x_half)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        normal_velocity_section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
+        horizontal_speed_section = np.full_like(normal_velocity_section, np.nan)
+        speed = np.hypot(u, v)
+        for iz in range(len(depth)):
+            offset = section_coord - center_s_full[iz]
+            x_line = center_x_full[iz] + offset * nx_axis[iz]
+            y_line = center_y_full[iz] + offset * ny_axis[iz]
+            normal_velocity_layer = u[iz] * tx[iz] + v[iz] * ty[iz]
+            normal_velocity_section[iz] = _interp_section(normal_velocity_layer[None, :, :], x_m, y_m, x_line, y_line)[0]
+            horizontal_speed_section[iz] = _interp_section(speed[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
+        signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
+        section_axis = "axis-following curved section, local-normal projection"
+        velocity_label = "horizontal velocity normal to curved section, u_axis"
+        coordinate_label = "distance along local axis-normal section from surface center projection (km)"
+    elif section_mode == "normal":
         ex, ey = jump_nx, jump_ny
         nx, ny = jump_ex, jump_ey
         if p0 is not None and p1 is not None:
@@ -1708,14 +2026,17 @@ def _make_normal_horizontal_velocity_section(
         velocity_label = "horizontal velocity normal to section, u_perp"
         coordinate_label = "distance along jump direction from layer center (km)"
 
-    x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
-    max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
-    section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
-    x_line = anchor[0] + section_coord * ex
-    y_line = anchor[1] + section_coord * ey
-    normal_velocity = u * nx + v * ny
-    normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
-    center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
+    if section_mode != "axis_curved":
+        x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
+        max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+        section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
+        x_line = anchor[0] + section_coord * ex
+        y_line = anchor[1] + section_coord * ey
+        normal_velocity = u * nx + v * ny
+        normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
+        horizontal_speed_section = _interp_section(np.hypot(u, v), x_m, y_m, x_line, y_line)
+        signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
+        center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
 
     if anchor_depth_index is not None:
         k_min = max(0, int(anchor_depth_index) - max(0, depth_padding_layers))
@@ -1731,13 +2052,38 @@ def _make_normal_horizontal_velocity_section(
         "section_coord_km": np.asarray(section_coord, dtype="f8"),
         "depth": np.asarray(depth, dtype="f8"),
         "normal_horizontal_velocity_section": np.asarray(normal_velocity_section, dtype="f8"),
+        "horizontal_speed_section": np.asarray(horizontal_speed_section, dtype="f8"),
+        "signed_horizontal_speed_section": np.asarray(signed_horizontal_speed_section, dtype="f8"),
         "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
         "center_depth_m": np.asarray(center_z, dtype="f8"),
         "section_axis": section_axis,
         "velocity_label": velocity_label,
         "coordinate_label": coordinate_label,
-        "xlim_km": np.array([-x_half, x_half], dtype="f8"),
+        "xlim_km": (
+            np.array(
+                [
+                    min(0.0, float(np.nanmin(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))])))
+                    - x_half,
+                    max(0.0, float(np.nanmax(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))])))
+                    + x_half,
+                ],
+                dtype="f8",
+            )
+            if section_mode == "axis_curved"
+            and np.isfinite(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))]).any()
+            else np.array([-x_half, x_half], dtype="f8")
+        ),
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
+        "axis_curved_direction_fallback_count": int(axis_fallback_count),
+        "axis_curved_centerline_forced_to_zero": False,
+        "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+        "axis_curved_preserves_tilt_projection": False,
+        "axis_curved_preserves_total_tilt": False,
+        "axis_curved_interpretation": (
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
+            if section_mode == "axis_curved"
+            else ""
+        ),
     }
 
 
@@ -1785,7 +2131,14 @@ def _make_cross_section_fields(
     }
 
 
-def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smooth_sigma_cells: float | None = None) -> None:
+def _write_metadata(
+    selected: SelectedObject,
+    output_dir: Path,
+    horizontal_smooth_sigma_cells: float | None = None,
+    *,
+    section_mode: str | None = None,
+    right_panel_mode: str | None = None,
+) -> None:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
         "track3d_id": selected.track3d_id,
@@ -1809,6 +2162,19 @@ def _write_metadata(selected: SelectedObject, output_dir: Path, horizontal_smoot
         "second_jump_to_depth_m": selected.second_jump_to_depth_m,
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
     }
+    if section_mode is not None:
+        payload["section_mode"] = section_mode
+        payload["axis_curved_centerline_forced_to_zero"] = False
+        payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
+        payload["axis_curved_preserves_tilt_projection"] = False
+        payload["axis_curved_preserves_total_tilt"] = False
+        payload["axis_curved_interpretation"] = (
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
+            if section_mode == "axis_curved"
+            else ""
+        )
+    if right_panel_mode is not None:
+        payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
         payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1820,6 +2186,9 @@ def _metadata_payload(
     selected: SelectedObject,
     output_dir: Path,
     horizontal_smooth_sigma_cells: float | None = None,
+    *,
+    section_mode: str | None = None,
+    right_panel_mode: str | None = None,
 ) -> dict[str, object]:
     payload = {
         "eddy3d_object_id": selected.eddy3d_object_id,
@@ -1845,6 +2214,19 @@ def _metadata_payload(
         "has_second_abrupt_jump": selected.has_second_abrupt_jump,
         "output_dir": str(output_dir),
     }
+    if section_mode is not None:
+        payload["section_mode"] = section_mode
+        payload["axis_curved_centerline_forced_to_zero"] = False
+        payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
+        payload["axis_curved_preserves_tilt_projection"] = False
+        payload["axis_curved_preserves_total_tilt"] = False
+        payload["axis_curved_interpretation"] = (
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
+            if section_mode == "axis_curved"
+            else ""
+        )
+    if right_panel_mode is not None:
+        payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
         payload["horizontal_display_smooth_sigma_cells"] = float(horizontal_smooth_sigma_cells)
     return payload
@@ -1920,8 +2302,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
     parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
-    parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
-    parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
+    parser.add_argument("--w-section-mode", choices=["parallel", "normal", "axis_curved"], default="parallel")
+    parser.add_argument(
+        "--right-panel-mode",
+        choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="omega_w",
+    )
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--no-horizontal-smoothing", action="store_true")
     parser.add_argument("--show-grid-centers", action="store_true", help="Overlay original 1/4 degree grid-cell centers when audit columns exist.")
@@ -1955,7 +2341,13 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, args.output_dir, horizontal_smooth_sigma_cells)
+        _write_metadata(
+            selected,
+            args.output_dir,
+            horizontal_smooth_sigma_cells,
+            section_mode=args.w_section_mode,
+            right_panel_mode=args.right_panel_mode,
+        )
         _plot_9panel(
             selected,
             object_layers,
@@ -2002,7 +2394,13 @@ def main() -> None:
             args.w_section_mode,
             args.right_panel_mode,
         )
-        _write_metadata(selected, child, horizontal_smooth_sigma_cells)
+        _write_metadata(
+            selected,
+            child,
+            horizontal_smooth_sigma_cells,
+            section_mode=args.w_section_mode,
+            right_panel_mode=args.right_panel_mode,
+        )
         _plot_9panel(
             selected,
             object_layers,
@@ -2014,7 +2412,15 @@ def main() -> None:
             horizontal_smooth_sigma_cells,
             args.show_grid_centers,
         )
-        rows.append(_metadata_payload(selected, child, horizontal_smooth_sigma_cells))
+        rows.append(
+            _metadata_payload(
+                selected,
+                child,
+                horizontal_smooth_sigma_cells,
+                section_mode=args.w_section_mode,
+                right_panel_mode=args.right_panel_mode,
+            )
+        )
         print(json.dumps({"example": idx, "selected_object": selected.__dict__, "output_dir": str(child)}, ensure_ascii=False))
 
     summary = pd.DataFrame(rows)

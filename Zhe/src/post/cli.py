@@ -112,6 +112,58 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
     )
 
 
+def analyze_jump_roundness_relation(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] science: {PRODUCTION_POST_SCOPE}")
+        print(f"[post] results root: {args.results_root}")
+        print(f"[post] filter root: {args.filter_root}")
+        print(
+            "[dry-run] analyze jump-roundness relation for "
+            f"shapes={args.shapes}, output={args.output_dir}"
+        )
+        return
+    from .jump_roundness_relation import analyze_jump_roundness_relation as run
+
+    run(
+        results_root=Path(args.results_root),
+        shape_dir_name=args.shape_dir_name,
+        filter_root=Path(args.filter_root),
+        output_dir=Path(args.output_dir),
+        shapes=args.shapes,
+        jump_ranks=args.jump_ranks,
+        half_width_deg=args.half_width_deg,
+        year_limit=args.year_limit,
+        selected_metadata=Path(args.selected_metadata) if args.selected_metadata else None,
+        max_objectdays=args.max_objectdays,
+        resume=args.resume,
+    )
+
+
+def analyze_jump_projection_geometry(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] science: {PRODUCTION_POST_SCOPE}")
+        print(f"[post] results root: {args.results_root}")
+        print(
+            "[dry-run] analyze jump projection geometry for "
+            f"shapes={args.shapes}, output={args.output_dir}"
+        )
+        return
+    from .jump_roundness_relation import analyze_jump_projection_geometry as run
+
+    run(
+        results_root=Path(args.results_root),
+        shape_dir_name=args.shape_dir_name,
+        output_dir=Path(args.output_dir),
+        shapes=args.shapes,
+        jump_ranks=args.jump_ranks,
+        depth_padding_layers=args.depth_padding_layers,
+        year_limit=args.year_limit,
+        selected_metadata=Path(args.selected_metadata) if args.selected_metadata else None,
+        max_objectdays=args.max_objectdays,
+        roundness_metrics=Path(args.roundness_metrics) if args.roundness_metrics else None,
+    )
+
+
 def plot_original_eddy_panels(args: argparse.Namespace) -> None:
     cmd = [
         sys.executable,
@@ -179,6 +231,53 @@ def plot_jump_section_geometry(args: argparse.Namespace) -> None:
     run(Path(args.output))
 
 
+def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] radial seed: {args.radial_seed_root}")
+        print(f"[post] output: {args.output_dir}")
+        print(f"[post] orientation: {args.orientation}")
+        print(
+            "[post] latest panel family: "
+            f"axis_source={args.axis_source} + axis top-2 steps + upper/lower fields + {args.section_mode} sections"
+        )
+        print(
+            "[post] composite Hua refinement: "
+            f"enabled={args.composite_hua_refine_subgrid}, factor={args.composite_hua_refine_factor}, "
+            f"window_km={args.composite_hua_refine_window_km}"
+        )
+        print(f"[post] right panel mode: {args.right_panel_mode}")
+        return
+    from .representative_eddy_panels import plot_representative_eddy_panels as run
+
+    roots = []
+    if args.orientation in ("turned", "both"):
+        roots.append(("turned", Path(args.me_liutex_root)))
+    if args.orientation in ("unturned", "both"):
+        roots.append(("unturned", Path(args.me_liutex_unturned_root)))
+    for orientation, root in roots:
+        run(
+            me_liutex_root=root,
+            radial_seed_root=Path(args.radial_seed_root),
+            output_dir=Path(args.output_dir) / orientation,
+            orientation=orientation,
+            tau=args.tau,
+            axis_bandwidth=args.axis_bandwidth,
+            grid_size=args.grid_size,
+            reference_lat=args.reference_lat,
+            section_mode=args.section_mode,
+            horizontal_smooth_sigma_cells=args.horizontal_smooth_sigma_cells,
+            section_depth_padding_layers=args.section_depth_padding_layers,
+            section_half_width_r=args.section_half_width_r,
+            section_min_half_width_km=args.section_min_half_width_km,
+            right_panel_mode=args.right_panel_mode,
+            axis_source=args.axis_source,
+            composite_hua_search_rmax=args.composite_hua_search_rmax,
+            composite_hua_refine_subgrid=args.composite_hua_refine_subgrid,
+            composite_hua_refine_factor=args.composite_hua_refine_factor,
+            composite_hua_refine_window_km=args.composite_hua_refine_window_km,
+        )
+
+
 def run_default(args: argparse.Namespace) -> None:
     _print_scope(args)
     plot_structure(args)
@@ -231,6 +330,33 @@ def build_parser() -> argparse.ArgumentParser:
     relation.add_argument("--resume", action="store_true")
     relation.add_argument("--dry-run", action="store_true")
     relation.set_defaults(func=analyze_jump_wshear_relation)
+    roundness = subparsers.add_parser("analyze-jump-roundness-relation")
+    roundness.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
+    roundness.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
+    roundness.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
+    roundness.add_argument("--output-dir", type=Path, required=True)
+    roundness.add_argument("--shapes", default="coherent,mixed")
+    roundness.add_argument("--jump-ranks", type=int, default=2)
+    roundness.add_argument("--half-width-deg", type=float, default=2.0)
+    roundness.add_argument("--year-limit", type=int, default=None)
+    roundness.add_argument("--selected-metadata", type=Path, default=None)
+    roundness.add_argument("--max-objectdays", type=int, default=None)
+    roundness.add_argument("--resume", action="store_true")
+    roundness.add_argument("--dry-run", action="store_true")
+    roundness.set_defaults(func=analyze_jump_roundness_relation)
+    projection = subparsers.add_parser("analyze-jump-projection-geometry")
+    projection.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
+    projection.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
+    projection.add_argument("--output-dir", type=Path, required=True)
+    projection.add_argument("--shapes", default="coherent,mixed")
+    projection.add_argument("--jump-ranks", type=int, default=2)
+    projection.add_argument("--depth-padding-layers", type=int, default=6)
+    projection.add_argument("--year-limit", type=int, default=None)
+    projection.add_argument("--selected-metadata", type=Path, default=None)
+    projection.add_argument("--max-objectdays", type=int, default=None)
+    projection.add_argument("--roundness-metrics", type=Path, default=None)
+    projection.add_argument("--dry-run", action="store_true")
+    projection.set_defaults(func=analyze_jump_projection_geometry)
     panels = subparsers.add_parser("plot-original-eddy-panels")
     panels.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
     panels.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
@@ -246,8 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
     panels.add_argument("--w-shear-depth-padding-layers", type=int, default=6)
     panels.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     panels.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
-    panels.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
-    panels.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
+    panels.add_argument("--w-section-mode", choices=["parallel", "normal", "axis_curved"], default="parallel")
+    panels.add_argument(
+        "--right-panel-mode",
+        choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="omega_w",
+    )
     panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     panels.add_argument("--no-horizontal-smoothing", action="store_true")
     panels.add_argument("--show-grid-centers", action="store_true")
@@ -259,6 +389,33 @@ def build_parser() -> argparse.ArgumentParser:
     geometry.add_argument("--output", type=Path, required=True)
     geometry.add_argument("--dry-run", action="store_true")
     geometry.set_defaults(func=plot_jump_section_geometry)
+    rep_panels = subparsers.add_parser("plot-representative-eddy-panels")
+    rep_panels.add_argument("--me-liutex-root", type=Path, required=True)
+    rep_panels.add_argument("--me-liutex-unturned-root", type=Path, required=True)
+    rep_panels.add_argument("--radial-seed-root", type=Path, required=True)
+    rep_panels.add_argument("--output-dir", type=Path, required=True)
+    rep_panels.add_argument("--orientation", choices=["turned", "unturned", "both"], default="both")
+    rep_panels.add_argument("--tau", type=float, default=0.5)
+    rep_panels.add_argument("--axis-bandwidth", type=float, default=0.075)
+    rep_panels.add_argument("--grid-size", type=int, default=121)
+    rep_panels.add_argument("--reference-lat", type=float, default=28.0)
+    rep_panels.add_argument("--section-mode", choices=["parallel", "normal", "axis_curved"], default="normal")
+    rep_panels.add_argument(
+        "--right-panel-mode",
+        choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="normal_horizontal_velocity",
+    )
+    rep_panels.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
+    rep_panels.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
+    rep_panels.add_argument("--composite-hua-refine-subgrid", action="store_true")
+    rep_panels.add_argument("--composite-hua-refine-factor", type=int, default=4)
+    rep_panels.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
+    rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
+    rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
+    rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)
+    rep_panels.add_argument("--section-min-half-width-km", type=float, default=75.0)
+    rep_panels.add_argument("--dry-run", action="store_true")
+    rep_panels.set_defaults(func=plot_representative_eddy_panels)
     return parser
 
 
