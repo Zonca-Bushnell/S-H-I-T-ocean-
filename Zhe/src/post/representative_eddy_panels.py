@@ -309,8 +309,12 @@ def _normal_velocity_section(
     axis_fallback_count = 0
     if section_mode == "axis_curved":
         center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
-        axis_label = "axis-following curved section"
-        coord_label = "distance along local axis-normal section from layer center (km)"
+        center_s_full = center_x_full * nx_axis + center_y_full * ny_axis
+        axis_nx = np.interp(axis["depth_m"].to_numpy(dtype="f8"), depth, nx_axis)
+        axis_ny = np.interp(axis["depth_m"].to_numpy(dtype="f8"), depth, ny_axis)
+        center_coord = axis["x_km"].to_numpy(dtype="f8") * axis_nx + axis["y_km"].to_numpy(dtype="f8") * axis_ny
+        axis_label = "axis-following curved section, tilt-preserving coordinate"
+        coord_label = "distance along local axis-normal section from surface center projection (km)"
         velocity_label = "horizontal velocity normal to curved section, u_axis"
     elif section_mode == "normal":
         section_ex, section_ey = jump_nx, jump_ny
@@ -332,18 +336,20 @@ def _normal_velocity_section(
 
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
     max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+    if section_mode == "axis_curved" and np.isfinite(center_coord).any():
+        max_half = max(max_half, float(np.nanmax(np.abs(center_coord))) + x_half)
     coord = np.linspace(-max_half, max_half, 181, dtype="f8")
     speed_stack = np.hypot(u_stack, v_stack)
     if section_mode == "axis_curved":
         section = np.full((len(depth), len(coord)), np.nan, dtype="f8")
         speed_section = np.full_like(section, np.nan)
         for iz in range(len(depth)):
-            x_line = center_x_full[iz] + coord * nx_axis[iz]
-            y_line = center_y_full[iz] + coord * ny_axis[iz]
+            offset = coord - center_s_full[iz]
+            x_line = center_x_full[iz] + offset * nx_axis[iz]
+            y_line = center_y_full[iz] + offset * ny_axis[iz]
             normal_velocity_layer = u_stack[iz] * tx[iz] + v_stack[iz] * ty[iz]
             section[iz] = _section_from_grid(normal_velocity_layer, x_grid, y_grid, x_line, y_line)
             speed_section[iz] = _section_from_grid(speed_stack[iz], x_grid, y_grid, x_line, y_line)
-        center_coord = np.zeros(len(axis), dtype="f8")
     else:
         x_line = anchor_x + coord * section_ex
         y_line = anchor_y + coord * section_ey
@@ -358,6 +364,21 @@ def _normal_velocity_section(
 
     k_min = max(0, min(step.from_depth_index, step.to_depth_index) - max(0, depth_padding_layers))
     k_max = min(len(depth) - 1, max(step.from_depth_index, step.to_depth_index) + max(0, depth_padding_layers))
+    if section_mode == "axis_curved" and np.isfinite(center_coord).any():
+        center_z = axis["depth_m"].to_numpy(dtype="f8")
+        in_depth = (center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))
+        visible_centers = center_coord[in_depth]
+        if not np.isfinite(visible_centers).any():
+            visible_centers = center_coord[np.isfinite(center_coord)]
+        xlim = np.array(
+            [
+                min(0.0, float(np.nanmin(visible_centers))) - x_half,
+                max(0.0, float(np.nanmax(visible_centers))) + x_half,
+            ],
+            dtype="f8",
+        )
+    else:
+        xlim = np.array([-x_half, x_half], dtype="f8")
     return {
         "section_coord_km": coord,
         "depth": depth,
@@ -366,14 +387,20 @@ def _normal_velocity_section(
         "signed_horizontal_speed_section": signed_speed_section,
         "center_section_coord_km": center_coord,
         "center_depth_m": axis["depth_m"].to_numpy(dtype="f8"),
-        "xlim_km": np.array([-x_half, x_half], dtype="f8"),
+        "xlim_km": xlim,
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
         "section_axis": axis_label,
         "coordinate_label": coord_label,
         "velocity_label": velocity_label,
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
-        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
-        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
+        "axis_curved_centerline_forced_to_zero": False,
+        "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": (
+            "axis-following curved section with tilt-preserving surface-center reference"
+            if section_mode == "axis_curved"
+            else ""
+        ),
     }
 
 
@@ -890,8 +917,14 @@ def plot_representative_eddy_panels(
                         for part in pair
                     )
                 ),
-                "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
-                "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
+                "axis_curved_centerline_forced_to_zero": False,
+                "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+                "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+                "axis_curved_interpretation": (
+                    "axis-following curved section with tilt-preserving surface-center reference"
+                    if section_mode == "axis_curved"
+                    else ""
+                ),
             }
         )
 

@@ -1754,18 +1754,24 @@ def _make_vertical_w_section(
     axis_fallback_count = 0
     if section_mode == "axis_curved":
         center_x_full, center_y_full, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        center_s_full = center_x_full * nx_axis + center_y_full * ny_axis
+        center_nx = np.interp(center_z, depth, nx_axis)
+        center_ny = np.interp(center_z, depth, ny_axis)
+        center_coord = center_x * center_nx + center_y * center_ny
         max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0)
+        if np.isfinite(center_coord).any():
+            max_half = max(max_half, float(np.nanmax(np.abs(center_coord))) + float(min_half_width_km))
         section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
         section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
         dwdz_section = np.full_like(section, np.nan)
         for iz in range(len(depth)):
-            x_line = center_x_full[iz] + section_coord * nx_axis[iz]
-            y_line = center_y_full[iz] + section_coord * ny_axis[iz]
+            offset = section_coord - center_s_full[iz]
+            x_line = center_x_full[iz] + offset * nx_axis[iz]
+            y_line = center_y_full[iz] + offset * ny_axis[iz]
             section[iz] = _interp_section(w[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
             dwdz_section[iz] = _interp_section(dwdz[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
-        center_coord = np.zeros(len(center_z), dtype="f8")
         center_target = 0.0
-        axis = "axis-following curved section"
+        axis = "axis-following curved section, tilt-preserving coordinate"
     elif section_mode == "normal":
         norm = float(np.hypot(dx, dy))
         if not np.isfinite(norm) or norm <= 1e-9:
@@ -1810,7 +1816,16 @@ def _make_vertical_w_section(
         k_min = 0
         k_max = min(len(depth) - 1, max(1, 2 * max(0, depth_padding_layers)))
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
-    xlim = np.array([center_target - x_half, center_target + x_half], dtype="f8")
+    if section_mode == "axis_curved" and np.isfinite(center_coord).any():
+        in_depth = (center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))
+        visible_centers = center_coord[in_depth]
+        if not np.isfinite(visible_centers).any():
+            visible_centers = center_coord[np.isfinite(center_coord)]
+        low = min(0.0, float(np.nanmin(visible_centers))) - x_half
+        high = max(0.0, float(np.nanmax(visible_centers))) + x_half
+        xlim = np.array([low, high], dtype="f8")
+    else:
+        xlim = np.array([center_target - x_half, center_target + x_half], dtype="f8")
     coord_min = float(np.nanmin(section_coord))
     coord_max = float(np.nanmax(section_coord))
     xlim[0] = max(xlim[0], coord_min)
@@ -1829,8 +1844,14 @@ def _make_vertical_w_section(
         "zlim_m": zlim,
         "diagnostics": diagnostics,
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
-        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
-        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
+        "axis_curved_centerline_forced_to_zero": False,
+        "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": (
+            "axis-following curved section with tilt-preserving surface-center reference"
+            if section_mode == "axis_curved"
+            else ""
+        ),
     }
 
 
@@ -1922,23 +1943,29 @@ def _make_normal_horizontal_velocity_section(
     axis_fallback_count = 0
     if section_mode == "axis_curved":
         center_x_full, center_y_full, tx, ty, nx_axis, ny_axis, axis_fallback_count = axis_curved_centerline()
+        center_s_full = center_x_full * nx_axis + center_y_full * ny_axis
+        center_nx = np.interp(center_z, depth, nx_axis)
+        center_ny = np.interp(center_z, depth, ny_axis)
+        center_coord = center_x * center_nx + center_y * center_ny
         x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
         max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
+        if np.isfinite(center_coord).any():
+            max_half = max(max_half, float(np.nanmax(np.abs(center_coord))) + x_half)
         section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
         normal_velocity_section = np.full((len(depth), len(section_coord)), np.nan, dtype="f8")
         horizontal_speed_section = np.full_like(normal_velocity_section, np.nan)
         speed = np.hypot(u, v)
         for iz in range(len(depth)):
-            x_line = center_x_full[iz] + section_coord * nx_axis[iz]
-            y_line = center_y_full[iz] + section_coord * ny_axis[iz]
+            offset = section_coord - center_s_full[iz]
+            x_line = center_x_full[iz] + offset * nx_axis[iz]
+            y_line = center_y_full[iz] + offset * ny_axis[iz]
             normal_velocity_layer = u[iz] * tx[iz] + v[iz] * ty[iz]
             normal_velocity_section[iz] = _interp_section(normal_velocity_layer[None, :, :], x_m, y_m, x_line, y_line)[0]
             horizontal_speed_section[iz] = _interp_section(speed[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
         signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
-        center_coord = np.zeros(len(center_z), dtype="f8")
-        section_axis = "axis-following curved section"
+        section_axis = "axis-following curved section, tilt-preserving coordinate"
         velocity_label = "horizontal velocity normal to curved section, u_axis"
-        coordinate_label = "distance along local axis-normal section from layer center (km)"
+        coordinate_label = "distance along local axis-normal section from surface center projection (km)"
     elif section_mode == "normal":
         ex, ey = jump_nx, jump_ny
         nx, ny = jump_ex, jump_ey
@@ -1990,11 +2017,30 @@ def _make_normal_horizontal_velocity_section(
         "section_axis": section_axis,
         "velocity_label": velocity_label,
         "coordinate_label": coordinate_label,
-        "xlim_km": np.array([-x_half, x_half], dtype="f8"),
+        "xlim_km": (
+            np.array(
+                [
+                    min(0.0, float(np.nanmin(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))])))
+                    - x_half,
+                    max(0.0, float(np.nanmax(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))])))
+                    + x_half,
+                ],
+                dtype="f8",
+            )
+            if section_mode == "axis_curved"
+            and np.isfinite(center_coord[(center_z >= float(depth[k_min])) & (center_z <= float(depth[k_max]))]).any()
+            else np.array([-x_half, x_half], dtype="f8")
+        ),
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
-        "axis_curved_centerline_forced_to_zero": bool(section_mode == "axis_curved"),
-        "axis_curved_interpretation": "axis-following curved section" if section_mode == "axis_curved" else "",
+        "axis_curved_centerline_forced_to_zero": False,
+        "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
+        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_interpretation": (
+            "axis-following curved section with tilt-preserving surface-center reference"
+            if section_mode == "axis_curved"
+            else ""
+        ),
     }
 
 
@@ -2075,8 +2121,14 @@ def _write_metadata(
     }
     if section_mode is not None:
         payload["section_mode"] = section_mode
-        payload["axis_curved_centerline_forced_to_zero"] = bool(section_mode == "axis_curved")
-        payload["axis_curved_interpretation"] = "axis-following curved section" if section_mode == "axis_curved" else ""
+        payload["axis_curved_centerline_forced_to_zero"] = False
+        payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
+        payload["axis_curved_preserves_tilt_projection"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_interpretation"] = (
+            "axis-following curved section with tilt-preserving surface-center reference"
+            if section_mode == "axis_curved"
+            else ""
+        )
     if right_panel_mode is not None:
         payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
@@ -2120,8 +2172,14 @@ def _metadata_payload(
     }
     if section_mode is not None:
         payload["section_mode"] = section_mode
-        payload["axis_curved_centerline_forced_to_zero"] = bool(section_mode == "axis_curved")
-        payload["axis_curved_interpretation"] = "axis-following curved section" if section_mode == "axis_curved" else ""
+        payload["axis_curved_centerline_forced_to_zero"] = False
+        payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
+        payload["axis_curved_preserves_tilt_projection"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_interpretation"] = (
+            "axis-following curved section with tilt-preserving surface-center reference"
+            if section_mode == "axis_curved"
+            else ""
+        )
     if right_panel_mode is not None:
         payload["right_panel_mode"] = right_panel_mode
     if horizontal_smooth_sigma_cells is not None:
