@@ -112,6 +112,33 @@ def analyze_jump_wshear_relation(args: argparse.Namespace) -> None:
     )
 
 
+def analyze_jump_roundness_relation(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] science: {PRODUCTION_POST_SCOPE}")
+        print(f"[post] results root: {args.results_root}")
+        print(f"[post] filter root: {args.filter_root}")
+        print(
+            "[dry-run] analyze jump-roundness relation for "
+            f"shapes={args.shapes}, output={args.output_dir}"
+        )
+        return
+    from .jump_roundness_relation import analyze_jump_roundness_relation as run
+
+    run(
+        results_root=Path(args.results_root),
+        shape_dir_name=args.shape_dir_name,
+        filter_root=Path(args.filter_root),
+        output_dir=Path(args.output_dir),
+        shapes=args.shapes,
+        jump_ranks=args.jump_ranks,
+        half_width_deg=args.half_width_deg,
+        year_limit=args.year_limit,
+        selected_metadata=Path(args.selected_metadata) if args.selected_metadata else None,
+        max_objectdays=args.max_objectdays,
+        resume=args.resume,
+    )
+
+
 def plot_original_eddy_panels(args: argparse.Namespace) -> None:
     cmd = [
         sys.executable,
@@ -265,6 +292,20 @@ def build_parser() -> argparse.ArgumentParser:
     relation.add_argument("--resume", action="store_true")
     relation.add_argument("--dry-run", action="store_true")
     relation.set_defaults(func=analyze_jump_wshear_relation)
+    roundness = subparsers.add_parser("analyze-jump-roundness-relation")
+    roundness.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
+    roundness.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
+    roundness.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
+    roundness.add_argument("--output-dir", type=Path, required=True)
+    roundness.add_argument("--shapes", default="coherent,mixed")
+    roundness.add_argument("--jump-ranks", type=int, default=2)
+    roundness.add_argument("--half-width-deg", type=float, default=2.0)
+    roundness.add_argument("--year-limit", type=int, default=None)
+    roundness.add_argument("--selected-metadata", type=Path, default=None)
+    roundness.add_argument("--max-objectdays", type=int, default=None)
+    roundness.add_argument("--resume", action="store_true")
+    roundness.add_argument("--dry-run", action="store_true")
+    roundness.set_defaults(func=analyze_jump_roundness_relation)
     panels = subparsers.add_parser("plot-original-eddy-panels")
     panels.add_argument("--results-root", type=Path, default=DEFAULT_RESULT_ROOT)
     panels.add_argument("--shape-dir-name", default="shape_classification_1993_2022_hua_b3_start2_life30")
