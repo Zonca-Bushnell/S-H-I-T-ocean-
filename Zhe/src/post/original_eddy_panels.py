@@ -926,10 +926,12 @@ def _plot_normal_horizontal_velocity_section(
         ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
         ax.legend(loc="best", fontsize=7)
     axis_name = str(section.get("section_axis", "section"))
+    velocity_label = str(section.get("velocity_label", "cross-section horizontal velocity"))
+    coordinate_label = str(section.get("coordinate_label", "section distance (km)"))
     ax.set_xlim(float(xlim[0]), float(xlim[1]))
     ax.set_ylim(float(zlim[1]), float(zlim[0]))
-    ax.set_title(f"{title}: normal horizontal velocity u_perp\n{axis_name}", fontsize=9)
-    ax.set_xlabel("distance along jump direction from layer center (km)")
+    ax.set_title(f"{title}: {velocity_label}\n{axis_name}", fontsize=9)
+    ax.set_xlabel(coordinate_label)
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
     return mesh
@@ -1473,6 +1475,7 @@ def _make_jump_cross_section_fields(
             depth_padding_layers=w_shear_depth_padding_layers,
             half_width_r=w_shear_half_width_r,
             min_half_width_km=w_shear_min_half_width_km,
+            section_mode=w_section_mode,
         )
         out["lower_velocity_section"] = _make_normal_horizontal_velocity_section(
             object_layers=offsets,
@@ -1486,6 +1489,7 @@ def _make_jump_cross_section_fields(
             depth_padding_layers=w_shear_depth_padding_layers,
             half_width_r=w_shear_half_width_r,
             min_half_width_km=w_shear_min_half_width_km,
+            section_mode=w_section_mode,
         )
         return out
 
@@ -1648,6 +1652,7 @@ def _make_normal_horizontal_velocity_section(
     depth_padding_layers: int,
     half_width_r: float,
     min_half_width_km: float,
+    section_mode: str,
 ) -> dict[str, np.ndarray]:
     lon = column["longitude"]
     lat = column["latitude"]
@@ -1680,12 +1685,29 @@ def _make_normal_horizontal_velocity_section(
         dx, dy = 1.0, 0.0
     norm = float(np.hypot(dx, dy))
     if not np.isfinite(norm) or norm <= 1e-9:
-        ex, ey = 1.0, 0.0
+        jump_ex, jump_ey = 1.0, 0.0
     else:
-        ex, ey = dx / norm, dy / norm
-    nx, ny = -ey, ex
+        jump_ex, jump_ey = dx / norm, dy / norm
+    jump_nx, jump_ny = -jump_ey, jump_ex
 
-    anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+    if section_mode == "normal":
+        ex, ey = jump_nx, jump_ny
+        nx, ny = jump_ex, jump_ey
+        if p0 is not None and p1 is not None:
+            anchor = (0.5 * (p0[0] + p1[0]), 0.5 * (p0[1] + p1[1]))
+        else:
+            anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+        section_axis = "jump-normal section through center-pair midpoint"
+        velocity_label = "horizontal velocity normal to section, u_parallel"
+        coordinate_label = "distance along jump-normal section from midpoint (km)"
+    else:
+        ex, ey = jump_ex, jump_ey
+        nx, ny = jump_nx, jump_ny
+        anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+        section_axis = "jump-parallel section"
+        velocity_label = "horizontal velocity normal to section, u_perp"
+        coordinate_label = "distance along jump direction from layer center (km)"
+
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
     max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
     section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
@@ -1711,7 +1733,9 @@ def _make_normal_horizontal_velocity_section(
         "normal_horizontal_velocity_section": np.asarray(normal_velocity_section, dtype="f8"),
         "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
         "center_depth_m": np.asarray(center_z, dtype="f8"),
-        "section_axis": "jump-parallel section; color is cross-section horizontal u_perp",
+        "section_axis": section_axis,
+        "velocity_label": velocity_label,
+        "coordinate_label": coordinate_label,
         "xlim_km": np.array([-x_half, x_half], dtype="f8"),
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
     }

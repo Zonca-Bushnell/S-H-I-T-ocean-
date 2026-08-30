@@ -169,6 +169,16 @@ def plot_original_eddy_panels(args: argparse.Namespace) -> None:
     subprocess.run(cmd, check=True)
 
 
+def plot_jump_section_geometry(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] output: {args.output}")
+        print("[dry-run] python -m src.post.jump_section_geometry --output " + str(args.output))
+        return
+    from .jump_section_geometry import plot_jump_section_geometry as run
+
+    run(Path(args.output))
+
+
 def run_default(args: argparse.Namespace) -> None:
     _print_scope(args)
     plot_structure(args)
@@ -245,6 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
     panels.add_argument("--output-name-stem", default="original_eddy_discontinuity_9panel")
     panels.add_argument("--dry-run", action="store_true")
     panels.set_defaults(func=plot_original_eddy_panels)
+    geometry = subparsers.add_parser("plot-jump-section-geometry")
+    geometry.add_argument("--output", type=Path, required=True)
+    geometry.add_argument("--dry-run", action="store_true")
+    geometry.set_defaults(func=plot_jump_section_geometry)
     return parser
 
 
