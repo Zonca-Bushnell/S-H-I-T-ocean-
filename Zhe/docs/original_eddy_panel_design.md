@@ -38,4 +38,4 @@
 
 `src.post.representative_eddy_panels` 使用已经合成好的 ME_LIUTEX 代表涡速度场生成对应的 latest panel family。它不读取单个 object-day，也不绘制生命周期轨迹；底部 7 号面板改为 `tau-depth` 合成支持度。代表涡没有原始对象的离散间断点，因此 3/4/5/6 与 8/9/10/11 默认使用选定 tau 下代表轴线相邻深度位移最大的 J1/J2 两段：分别展示 upper/from 与 lower/to 的速度场、地转压强代理场，以及 `jump-parallel` 或 `jump-normal` 剖面的法向水平速度。
 
-右侧剖面变量分开选择：`normal_horizontal_velocity` 显示剖面法向水平速度投影，用于看符号反转和零线；`horizontal_speed` 显示水平速度模 `|u_h|`，用于看速度弱核、低速槽和月牙状强速带是否解释中心跳变。
+右侧剖面变量分开选择：`normal_horizontal_velocity` 显示剖面法向水平速度投影，用于看符号反转和零线；`horizontal_speed` 显示水平速度模 `|u_h|`，用于看速度弱核、低速槽和月牙状强速带是否解释中心跳变；`signed_horizontal_speed` 显示 `sign(u_perp)|u_h|`，用 `u_perp` 判定正负、用总水平流速模长判定强弱，并保留粗 `u_perp=0` 线。

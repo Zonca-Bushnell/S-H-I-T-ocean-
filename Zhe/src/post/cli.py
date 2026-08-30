@@ -281,7 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
     panels.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     panels.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     panels.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
-    panels.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed"], default="omega_w")
+    panels.add_argument(
+        "--right-panel-mode",
+        choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="omega_w",
+    )
     panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     panels.add_argument("--no-horizontal-smoothing", action="store_true")
     panels.add_argument("--show-grid-centers", action="store_true")
@@ -304,7 +308,11 @@ def build_parser() -> argparse.ArgumentParser:
     rep_panels.add_argument("--grid-size", type=int, default=121)
     rep_panels.add_argument("--reference-lat", type=float, default=28.0)
     rep_panels.add_argument("--section-mode", choices=["parallel", "normal"], default="normal")
-    rep_panels.add_argument("--right-panel-mode", choices=["normal_horizontal_velocity", "horizontal_speed"], default="normal_horizontal_velocity")
+    rep_panels.add_argument(
+        "--right-panel-mode",
+        choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="normal_horizontal_velocity",
+    )
     rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
     rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)

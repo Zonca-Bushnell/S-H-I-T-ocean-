@@ -296,6 +296,7 @@ def _normal_velocity_section(
     section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in normal_velocity])
     speed_stack = np.hypot(u_stack, v_stack)
     speed_section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in speed_stack])
+    signed_speed_section = np.sign(section) * speed_section
     center_coord = (
         (axis["x_km"].to_numpy(dtype="f8") - anchor_x) * section_ex
         + (axis["y_km"].to_numpy(dtype="f8") - anchor_y) * section_ey
@@ -308,6 +309,7 @@ def _normal_velocity_section(
         "depth": depth,
         "normal_horizontal_velocity_section": section,
         "horizontal_speed_section": speed_section,
+        "signed_horizontal_speed_section": signed_speed_section,
         "center_section_coord_km": center_coord,
         "center_depth_m": axis["depth_m"].to_numpy(dtype="f8"),
         "xlim_km": np.array([-x_half, x_half], dtype="f8"),
@@ -405,6 +407,7 @@ def _plot_section(
     label: str,
     cmap: str,
     draw_zero: bool,
+    zero_field_key: str | None = None,
 ) -> plt.cm.ScalarMappable:
     coord = section["section_coord_km"]
     depth = section["depth"]
@@ -419,8 +422,11 @@ def _plot_section(
             levels = levels[np.abs(levels) > span * 0.08]
         if levels.size:
             ax.contour(coord, depth, field, levels=levels, colors="0.35", linewidths=0.5, alpha=0.55)
-        if draw_zero and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
-            ax.contour(coord, depth, field, levels=[0.0], colors="black", linewidths=1.8)
+        if draw_zero:
+            zero_field = section[zero_field_key] if zero_field_key is not None else field
+            zero_finite = zero_field[np.isfinite(zero_field)]
+            if zero_finite.size and float(np.nanmin(zero_finite)) < 0.0 < float(np.nanmax(zero_finite)):
+                ax.contour(coord, depth, zero_field, levels=[0.0], colors="black", linewidths=2.2)
     ax.plot(section["center_section_coord_km"], section["center_depth_m"], "-o", color="0.12", lw=1.3, ms=2.6, label="axis centers")
     ax.set_xlim(float(section["xlim_km"][0]), float(section["xlim_km"][1]))
     ax.set_ylim(float(section["zlim_m"][1]), float(section["zlim_m"][0]))
@@ -582,11 +588,19 @@ def _plot_step_group(
         title_suffix = "horizontal speed |u_h|"
         cmap = "coolwarm"
         draw_zero = False
+        zero_field_key = None
+    elif right_panel_mode == "signed_horizontal_speed":
+        field_key = "signed_horizontal_speed_section"
+        title_suffix = "signed horizontal speed sign(u_perp)|u_h|"
+        cmap = "RdBu_r"
+        draw_zero = True
+        zero_field_key = "normal_horizontal_velocity_section"
     else:
         field_key = "normal_horizontal_velocity_section"
         title_suffix = "normal horizontal velocity"
         cmap = "RdBu_r"
         draw_zero = True
+        zero_field_key = None
     mesh_u = _plot_section(
         section_u_ax,
         section_upper,
@@ -596,6 +610,7 @@ def _plot_step_group(
         label="m/s",
         cmap=cmap,
         draw_zero=draw_zero,
+        zero_field_key=zero_field_key,
     )
     _plot_section(
         section_l_ax,
@@ -606,6 +621,7 @@ def _plot_step_group(
         label="m/s",
         cmap=cmap,
         draw_zero=draw_zero,
+        zero_field_key=zero_field_key,
     )
     return mesh_u
 
@@ -707,6 +723,9 @@ def plot_representative_eddy_panels(
         if right_panel_mode == "horizontal_speed":
             section_field_key = "horizontal_speed_section"
             section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=False)
+        elif right_panel_mode == "signed_horizontal_speed":
+            section_field_key = "signed_horizontal_speed_section"
+            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=True)
         else:
             section_field_key = "normal_horizontal_velocity_section"
             section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=True)
@@ -841,7 +860,11 @@ def main() -> None:
     parser.add_argument("--grid-size", type=int, default=121)
     parser.add_argument("--reference-lat", type=float, default=28.0)
     parser.add_argument("--section-mode", choices=["parallel", "normal"], default="normal")
-    parser.add_argument("--right-panel-mode", choices=["normal_horizontal_velocity", "horizontal_speed"], default="normal_horizontal_velocity")
+    parser.add_argument(
+        "--right-panel-mode",
+        choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
+        default="normal_horizontal_velocity",
+    )
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--section-depth-padding-layers", type=int, default=6)
     parser.add_argument("--section-half-width-r", type=float, default=1.2)
