@@ -68,3 +68,12 @@ post 不重新判断涡旋中心，只消费 catalog 中的生产中心：
 
 因此，shape、representative、transport、double-core 和原始涡旋 panel 图在读取新 catalog 时会自动使用 refined 中心，不需要在 post 阶段再次插值。
 
+## Jump Section Geometry
+
+`plot-original-eddy-panels` 的 `--w-section-mode` 明确只控制右侧剖面几何：
+
+- `parallel`：沿中心跳变方向取剖面，诊断横切该剖面的水平速度 \(u_\perp\)。
+- `normal`：沿跳变法向、穿过上下中心中点取剖面，诊断横切该剖面的水平速度 \(u_\parallel\)。
+
+详细定义见 `docs/original_eddy_panel_design.md`。3D 几何示意由 `python -m src.post.cli plot-jump-section-geometry --output <png>` 生成。
+
