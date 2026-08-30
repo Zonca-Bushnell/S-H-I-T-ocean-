@@ -179,6 +179,38 @@ def plot_jump_section_geometry(args: argparse.Namespace) -> None:
     run(Path(args.output))
 
 
+def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        print(f"[post] radial seed: {args.radial_seed_root}")
+        print(f"[post] output: {args.output_dir}")
+        print(f"[post] orientation: {args.orientation}")
+        print(f"[post] latest panel family: axis top-2 steps + upper/lower fields + {args.section_mode} sections")
+        return
+    from .representative_eddy_panels import plot_representative_eddy_panels as run
+
+    roots = []
+    if args.orientation in ("turned", "both"):
+        roots.append(("turned", Path(args.me_liutex_root)))
+    if args.orientation in ("unturned", "both"):
+        roots.append(("unturned", Path(args.me_liutex_unturned_root)))
+    for orientation, root in roots:
+        run(
+            me_liutex_root=root,
+            radial_seed_root=Path(args.radial_seed_root),
+            output_dir=Path(args.output_dir) / orientation,
+            orientation=orientation,
+            tau=args.tau,
+            axis_bandwidth=args.axis_bandwidth,
+            grid_size=args.grid_size,
+            reference_lat=args.reference_lat,
+            section_mode=args.section_mode,
+            horizontal_smooth_sigma_cells=args.horizontal_smooth_sigma_cells,
+            section_depth_padding_layers=args.section_depth_padding_layers,
+            section_half_width_r=args.section_half_width_r,
+            section_min_half_width_km=args.section_min_half_width_km,
+        )
+
+
 def run_default(args: argparse.Namespace) -> None:
     _print_scope(args)
     plot_structure(args)
@@ -259,6 +291,23 @@ def build_parser() -> argparse.ArgumentParser:
     geometry.add_argument("--output", type=Path, required=True)
     geometry.add_argument("--dry-run", action="store_true")
     geometry.set_defaults(func=plot_jump_section_geometry)
+    rep_panels = subparsers.add_parser("plot-representative-eddy-panels")
+    rep_panels.add_argument("--me-liutex-root", type=Path, required=True)
+    rep_panels.add_argument("--me-liutex-unturned-root", type=Path, required=True)
+    rep_panels.add_argument("--radial-seed-root", type=Path, required=True)
+    rep_panels.add_argument("--output-dir", type=Path, required=True)
+    rep_panels.add_argument("--orientation", choices=["turned", "unturned", "both"], default="both")
+    rep_panels.add_argument("--tau", type=float, default=0.5)
+    rep_panels.add_argument("--axis-bandwidth", type=float, default=0.075)
+    rep_panels.add_argument("--grid-size", type=int, default=121)
+    rep_panels.add_argument("--reference-lat", type=float, default=28.0)
+    rep_panels.add_argument("--section-mode", choices=["parallel", "normal"], default="normal")
+    rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
+    rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
+    rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)
+    rep_panels.add_argument("--section-min-half-width-km", type=float, default=75.0)
+    rep_panels.add_argument("--dry-run", action="store_true")
+    rep_panels.set_defaults(func=plot_representative_eddy_panels)
     return parser
 
 

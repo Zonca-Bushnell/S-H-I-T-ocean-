@@ -33,3 +33,7 @@
 - 3D 几何示意：`python -m src.post.cli plot-jump-section-geometry`
 
 旧的 `Legacy` 脚本只可作为兼容 wrapper，不再作为真实实现位置。
+
+## Representative Eddy Variant
+
+`src.post.representative_eddy_panels` 使用已经合成好的 ME_LIUTEX 代表涡速度场生成对应的 latest panel family。它不读取单个 object-day，也不绘制生命周期轨迹；底部 7 号面板改为 `tau-depth` 合成支持度。代表涡没有原始对象的离散间断点，因此 3/4/5/6 与 8/9/10/11 默认使用选定 tau 下代表轴线相邻深度位移最大的 J1/J2 两段：分别展示 upper/from 与 lower/to 的速度场、地转压强代理场，以及 `jump-parallel` 或 `jump-normal` 剖面的法向水平速度。
