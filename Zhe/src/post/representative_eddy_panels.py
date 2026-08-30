@@ -259,6 +259,7 @@ def _normal_velocity_section(
     depth_padding_layers: int,
     half_width_r: float,
     min_half_width_km: float,
+    anchor_depth_index: int | None = None,
 ) -> dict[str, np.ndarray]:
     norm = float(np.hypot(step.dx_km, step.dy_km))
     if not np.isfinite(norm) or norm <= 1e-9:
@@ -277,7 +278,8 @@ def _normal_velocity_section(
     else:
         section_ex, section_ey = jump_ex, jump_ey
         velocity_nx, velocity_ny = jump_nx, jump_ny
-        row = axis[axis["depth_index"].astype(int).eq(step.from_depth_index)]
+        anchor_index = step.from_depth_index if anchor_depth_index is None else int(anchor_depth_index)
+        row = axis[axis["depth_index"].astype(int).eq(anchor_index)]
         anchor_x = float(row.iloc[0]["x_km"]) if not row.empty else step.mid_x_km
         anchor_y = float(row.iloc[0]["y_km"]) if not row.empty else step.mid_y_km
         axis_label = "jump-parallel section"
@@ -292,6 +294,8 @@ def _normal_velocity_section(
 
     normal_velocity = u_stack * velocity_nx + v_stack * velocity_ny
     section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in normal_velocity])
+    speed_stack = np.hypot(u_stack, v_stack)
+    speed_section = np.vstack([_section_from_grid(layer, x_grid, y_grid, x_line, y_line) for layer in speed_stack])
     center_coord = (
         (axis["x_km"].to_numpy(dtype="f8") - anchor_x) * section_ex
         + (axis["y_km"].to_numpy(dtype="f8") - anchor_y) * section_ey
@@ -303,6 +307,7 @@ def _normal_velocity_section(
         "section_coord_km": coord,
         "depth": depth,
         "normal_horizontal_velocity_section": section,
+        "horizontal_speed_section": speed_section,
         "center_section_coord_km": center_coord,
         "center_depth_m": axis["depth_m"].to_numpy(dtype="f8"),
         "xlim_km": np.array([-x_half, x_half], dtype="f8"),
@@ -395,19 +400,27 @@ def _plot_section(
     section: dict[str, np.ndarray],
     title: str,
     value_limits: tuple[float, float],
+    *,
+    field_key: str,
+    label: str,
+    cmap: str,
+    draw_zero: bool,
 ) -> plt.cm.ScalarMappable:
     coord = section["section_coord_km"]
     depth = section["depth"]
-    field = section["normal_horizontal_velocity_section"]
-    mesh = ax.pcolormesh(coord, depth, field, shading="auto", cmap="RdBu_r", vmin=value_limits[0], vmax=value_limits[1])
+    field = section[field_key]
+    mesh = ax.pcolormesh(coord, depth, field, shading="auto", cmap=cmap, vmin=value_limits[0], vmax=value_limits[1])
     finite = field[np.isfinite(field)]
     if finite.size > 10:
-        vmax = max(abs(value_limits[0]), abs(value_limits[1]))
-        levels = np.linspace(-vmax, vmax, 9)
-        levels = levels[np.abs(levels) > vmax * 0.08]
+        levels = np.linspace(float(value_limits[0]), float(value_limits[1]), 9)
+        levels = levels[np.isfinite(levels)]
+        if draw_zero:
+            span = max(abs(float(value_limits[0])), abs(float(value_limits[1])))
+            levels = levels[np.abs(levels) > span * 0.08]
         if levels.size:
             ax.contour(coord, depth, field, levels=levels, colors="0.35", linewidths=0.5, alpha=0.55)
-        ax.contour(coord, depth, field, levels=[0.0], colors="black", linewidths=1.8)
+        if draw_zero and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
+            ax.contour(coord, depth, field, levels=[0.0], colors="black", linewidths=1.8)
     ax.plot(section["center_section_coord_km"], section["center_depth_m"], "-o", color="0.12", lw=1.3, ms=2.6, label="axis centers")
     ax.set_xlim(float(section["xlim_km"][0]), float(section["xlim_km"][1]))
     ax.set_ylim(float(section["zlim_m"][1]), float(section["zlim_m"][0]))
@@ -416,6 +429,7 @@ def _plot_section(
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.16)
     ax.legend(loc="upper right", fontsize=6.6)
+    mesh.set_label(label)
     return mesh
 
 
@@ -504,8 +518,10 @@ def _plot_step_group(
     pressure_l_ax,
     section_u_ax,
     section_l_ax,
-    section: dict[str, np.ndarray],
+    section_upper: dict[str, np.ndarray],
+    section_lower: dict[str, np.ndarray],
     section_limits: tuple[float, float],
+    right_panel_mode: str,
     label: str,
     speed_no: str,
     pressure_no: str,
@@ -561,17 +577,35 @@ def _plot_step_group(
         symmetric=True,
         center_xy=center_xy(step.to_depth_index),
     )
+    if right_panel_mode == "horizontal_speed":
+        field_key = "horizontal_speed_section"
+        title_suffix = "horizontal speed |u_h|"
+        cmap = "coolwarm"
+        draw_zero = False
+    else:
+        field_key = "normal_horizontal_velocity_section"
+        title_suffix = "normal horizontal velocity"
+        cmap = "RdBu_r"
+        draw_zero = True
     mesh_u = _plot_section(
         section_u_ax,
-        section,
-        f"{section_upper_no}  J{step.rank} {step.from_depth_index}->{step.to_depth_index} upper/from: normal horizontal velocity",
+        section_upper,
+        f"{section_upper_no}  J{step.rank} {step.from_depth_index}->{step.to_depth_index} upper/from: {title_suffix}",
         section_limits,
+        field_key=field_key,
+        label="m/s",
+        cmap=cmap,
+        draw_zero=draw_zero,
     )
     _plot_section(
         section_l_ax,
-        section,
-        f"{section_lower_no}  J{step.rank} {step.from_depth_index}->{step.to_depth_index} lower/to: normal horizontal velocity",
+        section_lower,
+        f"{section_lower_no}  J{step.rank} {step.from_depth_index}->{step.to_depth_index} lower/to: {title_suffix}",
         section_limits,
+        field_key=field_key,
+        label="m/s",
+        cmap=cmap,
+        draw_zero=draw_zero,
     )
     return mesh_u
 
@@ -591,6 +625,7 @@ def plot_representative_eddy_panels(
     section_depth_padding_layers: int = 6,
     section_half_width_r: float = 1.2,
     section_min_half_width_km: float = 75.0,
+    right_panel_mode: str = "normal_horizontal_velocity",
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _load_npz(me_liutex_root)
@@ -634,24 +669,47 @@ def plot_representative_eddy_panels(
         x_grid, y_grid, u_stack, v_stack = _build_uv_stacks(
             radial, theta, depth, u_mean[ip, tau_i], v_mean[ip, tau_i], radius_m, grid_size
         )
-        sections = [
-            _normal_velocity_section(
-                step=step,
-                axis=axis,
-                depth=depth,
-                x_grid=x_grid,
-                y_grid=y_grid,
-                u_stack=u_stack,
-                v_stack=v_stack,
-                radius_m=radius_m,
-                section_mode=section_mode,
-                depth_padding_layers=section_depth_padding_layers,
-                half_width_r=section_half_width_r,
-                min_half_width_km=section_min_half_width_km,
+        section_pairs = [
+            (
+                _normal_velocity_section(
+                    step=step,
+                    axis=axis,
+                    depth=depth,
+                    x_grid=x_grid,
+                    y_grid=y_grid,
+                    u_stack=u_stack,
+                    v_stack=v_stack,
+                    radius_m=radius_m,
+                    section_mode=section_mode,
+                    depth_padding_layers=section_depth_padding_layers,
+                    half_width_r=section_half_width_r,
+                    min_half_width_km=section_min_half_width_km,
+                    anchor_depth_index=step.from_depth_index,
+                ),
+                _normal_velocity_section(
+                    step=step,
+                    axis=axis,
+                    depth=depth,
+                    x_grid=x_grid,
+                    y_grid=y_grid,
+                    u_stack=u_stack,
+                    v_stack=v_stack,
+                    radius_m=radius_m,
+                    section_mode=section_mode,
+                    depth_padding_layers=section_depth_padding_layers,
+                    half_width_r=section_half_width_r,
+                    min_half_width_km=section_min_half_width_km,
+                    anchor_depth_index=step.to_depth_index,
+                ),
             )
             for step in steps
         ]
-        section_limits = _field_limits([s["normal_horizontal_velocity_section"] for s in sections], symmetric=True)
+        if right_panel_mode == "horizontal_speed":
+            section_field_key = "horizontal_speed_section"
+            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=False)
+        else:
+            section_field_key = "normal_horizontal_velocity_section"
+            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=True)
 
         fig = plt.figure(figsize=(32, 18), constrained_layout=True)
         gs = fig.add_gridspec(
@@ -692,8 +750,10 @@ def plot_representative_eddy_panels(
             pressure_l_ax=axes["4l"],
             section_u_ax=axes["8"],
             section_l_ax=axes["10"],
-            section=sections[0],
+            section_upper=section_pairs[0][0],
+            section_lower=section_pairs[0][1],
             section_limits=section_limits,
+            right_panel_mode=right_panel_mode,
             label="first",
             speed_no="3",
             pressure_no="4",
@@ -711,8 +771,10 @@ def plot_representative_eddy_panels(
                 pressure_l_ax=axes["6l"],
                 section_u_ax=axes["9"],
                 section_l_ax=axes["11"],
-                section=sections[1],
+                section_upper=section_pairs[1][0],
+                section_lower=section_pairs[1][1],
                 section_limits=section_limits,
+                right_panel_mode=right_panel_mode,
                 label="second",
                 speed_no="5",
                 pressure_no="6",
@@ -727,12 +789,12 @@ def plot_representative_eddy_panels(
         _plot_support(axes["7"], count[ip], tau_grid, depth, "7  composite support, no trajectory")
         fig.suptitle(
             f"Representative eddy latest panel family: {polarity}, tau={float(tau_grid[tau_i]):.2f}, "
-            f"{orientation_label}, {section_mode} section; n_objects={int(n_objects[ip, tau_i])}, "
+            f"{orientation_label}, {section_mode} section, {right_panel_mode}; n_objects={int(n_objects[ip, tau_i])}, "
             f"n_tracks={int(n_tracks[ip, tau_i])}; J1={steps[0].distance_km:.1f} km"
             + (f", J2={steps[1].distance_km:.1f} km" if len(steps) > 1 else ""),
             fontsize=15,
         )
-        stem = f"representative_latest_panel_{section_mode}_{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
+        stem = f"representative_latest_panel_{right_panel_mode}_{section_mode}_{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
         png = output_dir / f"{stem}.png"
         pdf = output_dir / f"{stem}.pdf"
         fig.savefig(png, dpi=220)
@@ -753,6 +815,7 @@ def plot_representative_eddy_panels(
         "radial_seed_root": str(radial_seed_root),
         "orientation": orientation,
         "section_mode": section_mode,
+        "right_panel_mode": right_panel_mode,
         "tau": float(tau_grid[tau_i]),
         "axis_step_definition": "top two adjacent-depth representative axis displacements at selected tau",
         "horizontal_smooth_sigma_cells": horizontal_smooth_sigma_cells,
@@ -760,7 +823,7 @@ def plot_representative_eddy_panels(
         "polarity_summaries": manifests,
         "figures": [str(path) for path in written],
     }
-    (output_dir / f"representative_latest_panel_{section_mode}_{orientation}_manifest.json").write_text(
+    (output_dir / f"representative_latest_panel_{right_panel_mode}_{section_mode}_{orientation}_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -778,6 +841,7 @@ def main() -> None:
     parser.add_argument("--grid-size", type=int, default=121)
     parser.add_argument("--reference-lat", type=float, default=28.0)
     parser.add_argument("--section-mode", choices=["parallel", "normal"], default="normal")
+    parser.add_argument("--right-panel-mode", choices=["normal_horizontal_velocity", "horizontal_speed"], default="normal_horizontal_velocity")
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--section-depth-padding-layers", type=int, default=6)
     parser.add_argument("--section-half-width-r", type=float, default=1.2)
@@ -797,6 +861,7 @@ def main() -> None:
         section_depth_padding_layers=args.section_depth_padding_layers,
         section_half_width_r=args.section_half_width_r,
         section_min_half_width_km=args.section_min_half_width_km,
+        right_panel_mode=args.right_panel_mode,
     )
     print(json.dumps({"figures": [str(path) for path in written]}, ensure_ascii=False))
 

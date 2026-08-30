@@ -617,6 +617,20 @@ def _shared_finite_limits(values: list[np.ndarray], quantile: float = 0.98) -> t
     return _finite_limits(np.concatenate(finite_parts), quantile=quantile)
 
 
+def _shared_nonnegative_limits(values: list[np.ndarray], quantile: float = 0.98) -> tuple[float, float]:
+    finite_parts = [np.asarray(part[np.isfinite(part)], dtype="f8") for part in values if part is not None]
+    finite_parts = [part for part in finite_parts if part.size]
+    if not finite_parts:
+        return 0.0, 1.0
+    finite = np.concatenate(finite_parts)
+    vmax = float(np.nanquantile(finite, quantile))
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = float(np.nanmax(finite)) if finite.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = 1.0
+    return 0.0, vmax
+
+
 def _nan_gaussian_smooth(field: np.ndarray, sigma_cells: float) -> np.ndarray:
     if sigma_cells <= 0:
         return np.asarray(field, dtype="f8")
@@ -937,6 +951,49 @@ def _plot_normal_horizontal_velocity_section(
     return mesh
 
 
+def _plot_horizontal_speed_section(
+    ax,
+    section: dict[str, np.ndarray],
+    title: str,
+    selected: SelectedObject,
+    *,
+    second: bool = False,
+    value_limits: tuple[float, float] | None = None,
+):
+    s = section["section_coord_km"]
+    depth = section["depth"]
+    speed = section["horizontal_speed_section"]
+    xlim = section["xlim_km"]
+    zlim = section["zlim_m"]
+    xmask = (s >= xlim[0]) & (s <= xlim[1])
+    zmask = (depth >= zlim[0]) & (depth <= zlim[1])
+    local = speed[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else speed
+    vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
+    mesh = ax.pcolormesh(s, depth, speed, shading="auto", cmap="coolwarm", vmin=vmin, vmax=vmax)
+    finite = local[np.isfinite(local)]
+    if finite.size:
+        levels = np.linspace(float(vmin), float(vmax), 9)
+        levels = levels[np.isfinite(levels)]
+        if np.unique(levels).size >= 3:
+            ax.contour(s, depth, speed, levels=levels, colors="0.25", linewidths=0.55, alpha=0.65)
+    ax.invert_yaxis()
+    ax.axvline(0, color="0.75", lw=0.8)
+    center_s = section.get("center_section_coord_km")
+    center_z = section.get("center_depth_m")
+    if center_s is not None and center_z is not None:
+        ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
+        ax.legend(loc="best", fontsize=7)
+    axis_name = str(section.get("section_axis", "section"))
+    coordinate_label = str(section.get("coordinate_label", "section distance (km)"))
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_ylim(float(zlim[1]), float(zlim[0]))
+    ax.set_title(f"{title}: horizontal speed |u_h|\n{axis_name}", fontsize=9)
+    ax.set_xlabel(coordinate_label)
+    ax.set_ylabel("depth (m)")
+    ax.grid(alpha=0.2)
+    return mesh
+
+
 def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str) -> np.ndarray:
     if section is None or value_key not in section:
         return np.array([], dtype="f8")
@@ -1156,6 +1213,7 @@ def _plot_9panel(
     ax7 = fig.add_subplot(gs[4, :])
 
     normal_sections = []
+    horizontal_speed_sections = []
     dwdz_sections = []
     w_sections = []
     for part, available in [(first_fields, has_first), (second_fields, has_second)]:
@@ -1165,13 +1223,19 @@ def _plot_9panel(
             for key in ("upper_velocity_section", "lower_velocity_section"):
                 if key in part:
                     normal_sections.append(_section_local_values(part[key], "normal_horizontal_velocity_section"))
+        elif right_panel_mode == "horizontal_speed":
+            for key in ("upper_velocity_section", "lower_velocity_section"):
+                if key in part:
+                    horizontal_speed_sections.append(_section_local_values(part[key], "horizontal_speed_section"))
         elif "w_section" in part:
             dwdz_sections.append(_section_local_values(part["w_section"], "dwdz_section"))
             w_sections.append(_section_local_values(part["w_section"], "w_section"))
     normal_limits = _shared_finite_limits(normal_sections) if normal_sections else None
+    horizontal_speed_limits = _shared_nonnegative_limits(horizontal_speed_sections) if horizontal_speed_sections else None
     dwdz_limits = _shared_finite_limits(dwdz_sections) if dwdz_sections else None
     w_limits = _shared_finite_limits(w_sections) if w_sections else None
     normal_meshes, normal_axes = [], []
+    horizontal_speed_meshes, horizontal_speed_axes = [], []
     dwdz_meshes, dwdz_axes = [], []
     w_meshes, w_axes = [], []
 
@@ -1287,6 +1351,11 @@ def _plot_9panel(
             m10 = _plot_normal_horizontal_velocity_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=normal_limits)
             normal_meshes.extend([m8, m10])
             normal_axes.extend([ax8, ax10])
+        elif right_panel_mode == "horizontal_speed" and "upper_velocity_section" in first_fields:
+            m8 = _plot_horizontal_speed_section(ax8, first_fields["upper_velocity_section"], f"8  {first_section_title} upper/from", selected, second=False, value_limits=horizontal_speed_limits)
+            m10 = _plot_horizontal_speed_section(ax10, first_fields["lower_velocity_section"], f"10  {first_section_title} lower/to", selected, second=False, value_limits=horizontal_speed_limits)
+            horizontal_speed_meshes.extend([m8, m10])
+            horizontal_speed_axes.extend([ax8, ax10])
         elif "w_section" in first_fields:
             m8 = _plot_vertical_w_section(ax8, first_fields["w_section"], f"8  {first_section_title}", selected, second=False, value_limits=dwdz_limits)
             m10 = _plot_vertical_w_value_section(ax10, first_fields["w_section"], f"10  {first_section_title}", selected, second=False, value_limits=w_limits)
@@ -1323,6 +1392,11 @@ def _plot_9panel(
             m11 = _plot_normal_horizontal_velocity_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=normal_limits)
             normal_meshes.extend([m9, m11])
             normal_axes.extend([ax9, ax11])
+        elif right_panel_mode == "horizontal_speed" and "upper_velocity_section" in second_fields:
+            m9 = _plot_horizontal_speed_section(ax9, second_fields["upper_velocity_section"], f"9  {second_section_title} upper/from", selected, second=True, value_limits=horizontal_speed_limits)
+            m11 = _plot_horizontal_speed_section(ax11, second_fields["lower_velocity_section"], f"11  {second_section_title} lower/to", selected, second=True, value_limits=horizontal_speed_limits)
+            horizontal_speed_meshes.extend([m9, m11])
+            horizontal_speed_axes.extend([ax9, ax11])
         elif "w_section" in second_fields:
             m9 = _plot_vertical_w_section(ax9, second_fields["w_section"], f"9  {second_section_title}", selected, second=True, value_limits=dwdz_limits)
             m11 = _plot_vertical_w_value_section(ax11, second_fields["w_section"], f"11  {second_section_title}", selected, second=True, value_limits=w_limits)
@@ -1339,6 +1413,8 @@ def _plot_9panel(
 
     if normal_meshes:
         fig.colorbar(normal_meshes[0], ax=normal_axes, shrink=0.82, label="m/s")
+    if horizontal_speed_meshes:
+        fig.colorbar(horizontal_speed_meshes[0], ax=horizontal_speed_axes, shrink=0.82, label="m/s")
     if dwdz_meshes:
         fig.colorbar(dwdz_meshes[0], ax=dwdz_axes, shrink=0.82, label="s^-1 diagnostic")
     if w_meshes:
@@ -1462,7 +1538,7 @@ def _make_jump_cross_section_fields(
         "upper_horizontal": upper_horizontal,
         "lower_horizontal": lower_horizontal,
     }
-    if right_panel_mode == "normal_horizontal_velocity":
+    if right_panel_mode in {"normal_horizontal_velocity", "horizontal_speed"}:
         out["upper_velocity_section"] = _make_normal_horizontal_velocity_section(
             object_layers=offsets,
             column=filter_column,
@@ -1715,6 +1791,7 @@ def _make_normal_horizontal_velocity_section(
     y_line = anchor[1] + section_coord * ey
     normal_velocity = u * nx + v * ny
     normal_velocity_section = _interp_section(normal_velocity, x_m, y_m, x_line, y_line)
+    horizontal_speed_section = _interp_section(np.hypot(u, v), x_m, y_m, x_line, y_line)
     center_coord = (center_x - anchor[0]) * ex + (center_y - anchor[1]) * ey
 
     if anchor_depth_index is not None:
@@ -1731,6 +1808,7 @@ def _make_normal_horizontal_velocity_section(
         "section_coord_km": np.asarray(section_coord, dtype="f8"),
         "depth": np.asarray(depth, dtype="f8"),
         "normal_horizontal_velocity_section": np.asarray(normal_velocity_section, dtype="f8"),
+        "horizontal_speed_section": np.asarray(horizontal_speed_section, dtype="f8"),
         "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
         "center_depth_m": np.asarray(center_z, dtype="f8"),
         "section_axis": section_axis,
@@ -1921,7 +1999,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-shear-half-width-r", type=float, default=1.2)
     parser.add_argument("--w-shear-min-half-width-km", type=float, default=75.0)
     parser.add_argument("--w-section-mode", choices=["parallel", "normal"], default="parallel")
-    parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity"], default="omega_w")
+    parser.add_argument("--right-panel-mode", choices=["omega_w", "normal_horizontal_velocity", "horizontal_speed"], default="omega_w")
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--no-horizontal-smoothing", action="store_true")
     parser.add_argument("--show-grid-centers", action="store_true", help="Overlay original 1/4 degree grid-cell centers when audit columns exist.")
