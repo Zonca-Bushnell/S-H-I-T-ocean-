@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -20,6 +21,16 @@ RHO0 = 1025.0
 G = 9.81
 OMEGA = 7.2921159e-5
 EARTH_RADIUS_M = 6_371_000.0
+SECTION_DISPLAY_QUANTILE = 0.75
+
+
+def _emphasize_contours(contours) -> None:
+    for collection in contours.collections:
+        linewidth = np.asarray(collection.get_linewidth(), dtype="f8")
+        base_width = float(linewidth.flat[0]) if linewidth.size else 0.65
+        collection.set_path_effects(
+            [path_effects.withStroke(linewidth=base_width + 1.2, foreground="white", alpha=0.75)]
+        )
 
 
 @dataclass(frozen=True)
@@ -975,7 +986,18 @@ def _plot_horizontal_speed_section(
         levels = np.linspace(float(vmin), float(vmax), 9)
         levels = levels[np.isfinite(levels)]
         if np.unique(levels).size >= 3:
-            ax.contour(s, depth, speed, levels=levels, colors="0.25", linewidths=0.55, alpha=0.65)
+            contours = ax.contour(
+                s,
+                depth,
+                speed,
+                levels=levels,
+                cmap="coolwarm",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.65,
+                alpha=0.82,
+            )
+            _emphasize_contours(contours)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     center_s = section.get("center_section_coord_km")
@@ -1019,13 +1041,24 @@ def _plot_signed_horizontal_speed_section(
         levels = np.linspace(float(vmin), float(vmax), 11)
         levels = levels[np.isfinite(levels)]
         span = max(abs(float(vmin)), abs(float(vmax)))
-        levels = levels[np.abs(levels) > max(span * 0.08, 1e-12)]
+        levels = levels[np.abs(levels) > max(span * 0.10, 1e-12)]
         if levels.size >= 2:
-            ax.contour(s, depth, signed_speed, levels=levels, colors="0.35", linewidths=0.5, alpha=0.58)
+            contours = ax.contour(
+                s,
+                depth,
+                signed_speed,
+                levels=levels,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.65,
+                alpha=0.82,
+            )
+            _emphasize_contours(contours)
     u_perp_local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
     u_perp_finite = u_perp_local[np.isfinite(u_perp_local)]
     if u_perp_finite.size and float(np.nanmin(u_perp_finite)) < 0.0 < float(np.nanmax(u_perp_finite)):
-        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.02", linewidths=2.2, alpha=0.98)
+        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.02", linewidths=2.8, alpha=0.98)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     center_s = section.get("center_section_coord_km")
@@ -1285,9 +1318,17 @@ def _plot_9panel(
         elif "w_section" in part:
             dwdz_sections.append(_section_local_values(part["w_section"], "dwdz_section"))
             w_sections.append(_section_local_values(part["w_section"], "w_section"))
-    normal_limits = _shared_finite_limits(normal_sections) if normal_sections else None
-    horizontal_speed_limits = _shared_nonnegative_limits(horizontal_speed_sections) if horizontal_speed_sections else None
-    signed_horizontal_speed_limits = _shared_finite_limits(signed_horizontal_speed_sections) if signed_horizontal_speed_sections else None
+    normal_limits = _shared_finite_limits(normal_sections, quantile=SECTION_DISPLAY_QUANTILE) if normal_sections else None
+    horizontal_speed_limits = (
+        _shared_nonnegative_limits(horizontal_speed_sections, quantile=SECTION_DISPLAY_QUANTILE)
+        if horizontal_speed_sections
+        else None
+    )
+    signed_horizontal_speed_limits = (
+        _shared_finite_limits(signed_horizontal_speed_sections, quantile=SECTION_DISPLAY_QUANTILE)
+        if signed_horizontal_speed_sections
+        else None
+    )
     dwdz_limits = _shared_finite_limits(dwdz_sections) if dwdz_sections else None
     w_limits = _shared_finite_limits(w_sections) if w_sections else None
     normal_meshes, normal_axes = [], []

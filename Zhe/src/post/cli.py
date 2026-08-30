@@ -240,6 +240,11 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
             "[post] latest panel family: "
             f"axis_source={args.axis_source} + axis top-2 steps + upper/lower fields + {args.section_mode} sections"
         )
+        print(
+            "[post] composite Hua refinement: "
+            f"enabled={args.composite_hua_refine_subgrid}, factor={args.composite_hua_refine_factor}, "
+            f"window_km={args.composite_hua_refine_window_km}"
+        )
         print(f"[post] right panel mode: {args.right_panel_mode}")
         return
     from .representative_eddy_panels import plot_representative_eddy_panels as run
@@ -267,6 +272,9 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
             right_panel_mode=args.right_panel_mode,
             axis_source=args.axis_source,
             composite_hua_search_rmax=args.composite_hua_search_rmax,
+            composite_hua_refine_subgrid=args.composite_hua_refine_subgrid,
+            composite_hua_refine_factor=args.composite_hua_refine_factor,
+            composite_hua_refine_window_km=args.composite_hua_refine_window_km,
         )
 
 
@@ -399,6 +407,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rep_panels.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
     rep_panels.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
+    rep_panels.add_argument("--composite-hua-refine-subgrid", action="store_true")
+    rep_panels.add_argument("--composite-hua-refine-factor", type=int, default=4)
+    rep_panels.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
     rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
     rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)

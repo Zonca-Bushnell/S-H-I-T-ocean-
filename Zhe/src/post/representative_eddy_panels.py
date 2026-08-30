@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -18,6 +19,16 @@ from scipy.ndimage import gaussian_filter, minimum_filter
 
 RHO0 = 1025.0
 OMEGA = 7.2921159e-5
+SECTION_DISPLAY_PERCENTILE = 75.0
+
+
+def _emphasize_contours(contours) -> None:
+    for collection in contours.collections:
+        linewidth = np.asarray(collection.get_linewidth(), dtype="f8")
+        base_width = float(linewidth.flat[0]) if linewidth.size else 0.65
+        collection.set_path_effects(
+            [path_effects.withStroke(linewidth=base_width + 1.2, foreground="white", alpha=0.75)]
+        )
 
 
 @dataclass(frozen=True)
@@ -179,6 +190,85 @@ def _composite_hua_ring_check(
     }
 
 
+def _pressure_extreme(
+    pressure_grid: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    radius_km: float,
+    search_rmax: float,
+) -> dict[str, float]:
+    search = np.isfinite(pressure_grid) & (np.hypot(x_grid, y_grid) <= radius_km * float(search_rmax))
+    if not search.any():
+        return {
+            "pressure_extreme_x_km": np.nan,
+            "pressure_extreme_y_km": np.nan,
+            "pressure_extreme_value": np.nan,
+        }
+    masked = np.where(search, np.abs(pressure_grid), np.nan)
+    j, i = np.unravel_index(int(np.nanargmax(masked)), masked.shape)
+    return {
+        "pressure_extreme_x_km": float(x_grid[j, i]),
+        "pressure_extreme_y_km": float(y_grid[j, i]),
+        "pressure_extreme_value": float(pressure_grid[j, i]),
+    }
+
+
+def _refine_speed_minimum(
+    speed_grid: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    center_x_km: float,
+    center_y_km: float,
+    window_km: float,
+    refine_factor: int,
+) -> dict[str, float | bool | str]:
+    if refine_factor <= 1 or window_km <= 0.0:
+        return {
+            "refined_ok": False,
+            "x_km_refined": center_x_km,
+            "y_km_refined": center_y_km,
+            "refined_center_speed_ms": np.nan,
+            "refined_offset_km": 0.0,
+            "refined_failure": "disabled",
+        }
+    x_axis = x_grid[0, :]
+    y_axis = y_grid[:, 0]
+    dx = float(np.nanmedian(np.diff(x_axis)))
+    dy = float(np.nanmedian(np.diff(y_axis)))
+    step = max(min(abs(dx), abs(dy)) / float(refine_factor), 1.0e-3)
+    half = float(window_km)
+    x_fine = np.arange(center_x_km - half, center_x_km + half + 0.5 * step, step)
+    y_fine = np.arange(center_y_km - half, center_y_km + half + 0.5 * step, step)
+    xx, yy = np.meshgrid(x_fine, y_fine)
+    interp = RegularGridInterpolator((y_axis, x_axis), speed_grid, bounds_error=False, fill_value=np.nan)
+    fine = interp(np.column_stack([yy.ravel(), xx.ravel()])).reshape(xx.shape)
+    finite = np.isfinite(fine)
+    if finite.sum() < 4:
+        return {
+            "refined_ok": False,
+            "x_km_refined": center_x_km,
+            "y_km_refined": center_y_km,
+            "refined_center_speed_ms": np.nan,
+            "refined_offset_km": 0.0,
+            "refined_failure": "insufficient_window_data",
+        }
+    edge = np.zeros(fine.shape, dtype=bool)
+    edge[[0, -1], :] = True
+    edge[:, [0, -1]] = True
+    j, i = np.unravel_index(int(np.nanargmin(np.where(finite, fine, np.inf))), fine.shape)
+    on_edge = bool(edge[j, i])
+    refined_x = float(xx[j, i])
+    refined_y = float(yy[j, i])
+    return {
+        "refined_ok": not on_edge,
+        "x_km_refined": refined_x,
+        "y_km_refined": refined_y,
+        "refined_center_speed_ms": float(fine[j, i]),
+        "refined_offset_km": float(np.hypot(refined_x - center_x_km, refined_y - center_y_km)),
+        "refined_failure": "minimum_on_refined_boundary" if on_edge else "none",
+    }
+
+
 def _speed_min_candidates(
     speed_grid: np.ndarray,
     x_grid: np.ndarray,
@@ -214,6 +304,10 @@ def _composite_hua_axis(
     radius_m: float,
     grid_size: int,
     search_rmax: float,
+    f0: float,
+    refine_subgrid: bool,
+    refine_factor: int,
+    refine_window_km: float,
 ) -> pd.DataFrame:
     radius_km = float(radius_m) / 1000.0
     rows = []
@@ -222,6 +316,8 @@ def _composite_hua_axis(
         x_grid, y_grid, speed_grid = _regular_grid_from_polar(radial, theta, speed[depth_index], radius_m, grid_size)
         _, _, u_grid = _regular_grid_from_polar(radial, theta, u[depth_index], radius_m, grid_size)
         _, _, v_grid = _regular_grid_from_polar(radial, theta, v[depth_index], radius_m, grid_size)
+        pressure_grid = RHO0 * f0 * _streamfunction_proxy(u_grid, v_grid, x_grid, y_grid)
+        pressure_info = _pressure_extreme(pressure_grid, x_grid, y_grid, radius_km, search_rmax)
         candidates = _speed_min_candidates(speed_grid, x_grid, y_grid, radius_km, search_rmax)
         if not candidates:
             rows.append(
@@ -235,6 +331,7 @@ def _composite_hua_axis(
                     "axis_source": "composite_hua",
                     "composite_hua_pass": False,
                     "composite_hua_failure": "no_search_data",
+                    **pressure_info,
                 }
             )
             continue
@@ -269,21 +366,58 @@ def _composite_hua_axis(
         scored.sort(key=lambda item: item[0])
         pass_scored = [item for item in scored if item[1]]
         _, _, j, i, check = (pass_scored[0] if pass_scored else scored[0])
-        center_x = float(x_grid[j, i])
-        center_y = float(y_grid[j, i])
+        center_x_grid = float(x_grid[j, i])
+        center_y_grid = float(y_grid[j, i])
+        refine = _refine_speed_minimum(
+            speed_grid,
+            x_grid,
+            y_grid,
+            center_x_grid,
+            center_y_grid,
+            refine_window_km if refine_subgrid else 0.0,
+            refine_factor if refine_subgrid else 1,
+        )
+        center_x = float(refine["x_km_refined"])
+        center_y = float(refine["y_km_refined"])
+        refined_check = _composite_hua_ring_check(
+            u_grid=u_grid,
+            v_grid=v_grid,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            center_x_km=center_x,
+            center_y_km=center_y,
+            radius_km=max(radius_km * 0.55, 20.0),
+        )
+        if refine_subgrid and not bool(refine["refined_ok"]):
+            center_x = center_x_grid
+            center_y = center_y_grid
         previous_xy = (center_x, center_y)
+        distance_to_pressure = float(
+            np.hypot(center_x - pressure_info["pressure_extreme_x_km"], center_y - pressure_info["pressure_extreme_y_km"])
+        )
         rows.append(
             {
                 "depth_index": int(depth_index),
                 "depth_m": float(depth[depth_index]),
                 "x_km": center_x,
                 "y_km": center_y,
+                "x_km_grid": center_x_grid,
+                "y_km_grid": center_y_grid,
+                "x_km_refined": float(refine["x_km_refined"]),
+                "y_km_refined": float(refine["y_km_refined"]),
                 "effective_weight": float(np.isfinite(speed_grid).sum()),
-                "center_speed_ms": float(speed_grid[j, i]),
+                "center_speed_ms": float(refine["refined_center_speed_ms"])
+                if refine_subgrid and bool(refine["refined_ok"]) and np.isfinite(float(refine["refined_center_speed_ms"]))
+                else float(speed_grid[j, i]),
                 "axis_source": "composite_hua",
-                "composite_hua_fallback": not bool(check["composite_hua_pass"]),
+                "composite_hua_fallback": not bool(refined_check["composite_hua_pass"]),
                 "candidate_count": int(len(candidates)),
-                **check,
+                "grid_composite_hua_pass": bool(check["composite_hua_pass"]),
+                "grid_composite_hua_failure": check["composite_hua_failure"],
+                **refine,
+                **pressure_info,
+                "distance_to_pressure_extreme_km": distance_to_pressure,
+                **refined_check,
             }
         )
     axis = pd.DataFrame(rows)
@@ -294,8 +428,26 @@ def _composite_hua_axis(
 
 
 def _axis_source_comparison(radial_axis: pd.DataFrame, composite_axis: pd.DataFrame) -> pd.DataFrame:
+    composite_cols = [
+        "depth_index",
+        "x_km",
+        "y_km",
+        "composite_hua_pass",
+        "composite_hua_failure",
+    ]
+    for col in (
+        "x_km_grid",
+        "y_km_grid",
+        "refined_offset_km",
+        "refined_ok",
+        "pressure_extreme_x_km",
+        "pressure_extreme_y_km",
+        "distance_to_pressure_extreme_km",
+    ):
+        if col in composite_axis.columns:
+            composite_cols.append(col)
     merged = radial_axis[["depth_index", "depth_m", "x_km", "y_km"]].merge(
-        composite_axis[["depth_index", "x_km", "y_km", "composite_hua_pass", "composite_hua_failure"]],
+        composite_axis[composite_cols],
         on="depth_index",
         how="inner",
         suffixes=("_radial_seed", "_composite_hua"),
@@ -618,7 +770,7 @@ def _normal_velocity_section(
     }
 
 
-def _field_limits(fields: list[np.ndarray], symmetric: bool = False) -> tuple[float, float]:
+def _field_limits(fields: list[np.ndarray], symmetric: bool = False, quantile: float = 98.0) -> tuple[float, float]:
     chunks = [np.asarray(field, dtype="f8")[np.isfinite(field)] for field in fields if np.isfinite(field).any()]
     if not chunks:
         return (-1.0, 1.0) if symmetric else (0.0, 1.0)
@@ -626,11 +778,11 @@ def _field_limits(fields: list[np.ndarray], symmetric: bool = False) -> tuple[fl
     if values.size == 0:
         return (-1.0, 1.0) if symmetric else (0.0, 1.0)
     if symmetric or (np.nanmin(values) < 0 < np.nanmax(values)):
-        vmax = float(np.nanpercentile(np.abs(values), 98.0))
+        vmax = float(np.nanpercentile(np.abs(values), quantile))
         vmax = max(vmax, 1e-12)
         return -vmax, vmax
     vmin = float(np.nanpercentile(values, 2.0))
-    vmax = float(np.nanpercentile(values, 98.0))
+    vmax = float(np.nanpercentile(values, quantile))
     if not vmax > vmin:
         vmax = vmin + 1.0
     return vmin, vmax
@@ -661,6 +813,8 @@ def _plot_horizontal(
     cmap: str,
     symmetric: bool,
     center_xy: tuple[float, float],
+    grid_center_xy: tuple[float, float] | None = None,
+    pressure_center_xy: tuple[float, float] | None = None,
 ) -> plt.cm.ScalarMappable:
     field = grid[field_name]
     vmin, vmax = _field_limits([field], symmetric=symmetric)
@@ -683,7 +837,29 @@ def _plot_horizontal(
         if np.unique(levels).size > 2:
             ax.contour(grid["x"], grid["y"], field, levels=levels, colors="0.28", linewidths=0.45, alpha=0.45)
     ax.scatter([0.0], [0.0], marker="+", c="red", s=70, lw=1.6, label="surface")
-    ax.scatter([center_xy[0]], [center_xy[1]], marker="x", c="cyan", s=65, lw=1.8, label="layer axis")
+    ax.scatter([center_xy[0]], [center_xy[1]], marker="x", c="cyan", s=65, lw=1.8, label="refined axis")
+    if grid_center_xy is not None and np.isfinite(grid_center_xy).all():
+        ax.scatter(
+            [grid_center_xy[0]],
+            [grid_center_xy[1]],
+            marker="s",
+            facecolors="white",
+            edgecolors="black",
+            s=38,
+            lw=0.8,
+            label="grid speed min",
+        )
+    if pressure_center_xy is not None and np.isfinite(pressure_center_xy).all():
+        ax.scatter(
+            [pressure_center_xy[0]],
+            [pressure_center_xy[1]],
+            marker="o",
+            facecolors="none",
+            edgecolors="magenta",
+            s=58,
+            lw=1.2,
+            label="pressure extreme",
+        )
     ax.axhline(0, color="0.75", lw=0.8)
     ax.axvline(0, color="0.75", lw=0.8)
     ax.set_aspect("equal")
@@ -713,18 +889,29 @@ def _plot_section(
     mesh = ax.pcolormesh(coord, depth, field, shading="auto", cmap=cmap, vmin=value_limits[0], vmax=value_limits[1])
     finite = field[np.isfinite(field)]
     if finite.size > 10:
-        levels = np.linspace(float(value_limits[0]), float(value_limits[1]), 9)
+        levels = np.linspace(float(value_limits[0]), float(value_limits[1]), 11)
         levels = levels[np.isfinite(levels)]
         if draw_zero:
             span = max(abs(float(value_limits[0])), abs(float(value_limits[1])))
-            levels = levels[np.abs(levels) > span * 0.08]
-        if levels.size:
-            ax.contour(coord, depth, field, levels=levels, colors="0.35", linewidths=0.5, alpha=0.55)
+            levels = levels[np.abs(levels) > span * 0.10]
+        if np.unique(levels).size >= 3:
+            contours = ax.contour(
+                coord,
+                depth,
+                field,
+                levels=levels,
+                cmap=cmap,
+                vmin=value_limits[0],
+                vmax=value_limits[1],
+                linewidths=0.65,
+                alpha=0.82,
+            )
+            _emphasize_contours(contours)
         if draw_zero:
             zero_field = section[zero_field_key] if zero_field_key is not None else field
             zero_finite = zero_field[np.isfinite(zero_field)]
             if zero_finite.size and float(np.nanmin(zero_finite)) < 0.0 < float(np.nanmax(zero_finite)):
-                ax.contour(coord, depth, zero_field, levels=[0.0], colors="black", linewidths=2.2)
+                ax.contour(coord, depth, zero_field, levels=[0.0], colors="black", linewidths=2.8)
     ax.plot(section["center_section_coord_km"], section["center_depth_m"], "-o", color="0.12", lw=1.3, ms=2.6, label="axis centers")
     ax.set_xlim(float(section["xlim_km"][0]), float(section["xlim_km"][1]))
     ax.set_ylim(float(section["zlim_m"][1]), float(section["zlim_m"][0]))
@@ -838,6 +1025,12 @@ def _plot_step_group(
             return 0.0, 0.0
         return float(row.iloc[0]["x_km"]), float(row.iloc[0]["y_km"])
 
+    def optional_xy(depth_index: int, x_col: str, y_col: str) -> tuple[float, float] | None:
+        row = axis[axis["depth_index"].astype(int).eq(int(depth_index))]
+        if row.empty or x_col not in row.columns or y_col not in row.columns:
+            return None
+        return float(row.iloc[0][x_col]), float(row.iloc[0][y_col])
+
     upper_grid = layer_cache[step.from_depth_index]
     lower_grid = layer_cache[step.to_depth_index]
     step_text = f"{label} representative step {step.from_depth_index}->{step.to_depth_index}"
@@ -850,6 +1043,8 @@ def _plot_step_group(
         cmap="coolwarm",
         symmetric=False,
         center_xy=center_xy(step.from_depth_index),
+        grid_center_xy=optional_xy(step.from_depth_index, "x_km_grid", "y_km_grid"),
+        pressure_center_xy=optional_xy(step.from_depth_index, "pressure_extreme_x_km", "pressure_extreme_y_km"),
     )
     _plot_horizontal(
         pressure_u_ax,
@@ -860,6 +1055,8 @@ def _plot_step_group(
         cmap="RdBu_r",
         symmetric=True,
         center_xy=center_xy(step.from_depth_index),
+        grid_center_xy=optional_xy(step.from_depth_index, "x_km_grid", "y_km_grid"),
+        pressure_center_xy=optional_xy(step.from_depth_index, "pressure_extreme_x_km", "pressure_extreme_y_km"),
     )
     _plot_horizontal(
         speed_l_ax,
@@ -870,6 +1067,8 @@ def _plot_step_group(
         cmap="coolwarm",
         symmetric=False,
         center_xy=center_xy(step.to_depth_index),
+        grid_center_xy=optional_xy(step.to_depth_index, "x_km_grid", "y_km_grid"),
+        pressure_center_xy=optional_xy(step.to_depth_index, "pressure_extreme_x_km", "pressure_extreme_y_km"),
     )
     _plot_horizontal(
         pressure_l_ax,
@@ -880,6 +1079,8 @@ def _plot_step_group(
         cmap="RdBu_r",
         symmetric=True,
         center_xy=center_xy(step.to_depth_index),
+        grid_center_xy=optional_xy(step.to_depth_index, "x_km_grid", "y_km_grid"),
+        pressure_center_xy=optional_xy(step.to_depth_index, "pressure_extreme_x_km", "pressure_extreme_y_km"),
     )
     if right_panel_mode == "horizontal_speed":
         field_key = "horizontal_speed_section"
@@ -942,6 +1143,9 @@ def plot_representative_eddy_panels(
     right_panel_mode: str = "normal_horizontal_velocity",
     axis_source: str = "radial_seed",
     composite_hua_search_rmax: float = 1.5,
+    composite_hua_refine_subgrid: bool = False,
+    composite_hua_refine_factor: int = 4,
+    composite_hua_refine_window_km: float = 20.0,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _load_npz(me_liutex_root)
@@ -978,9 +1182,13 @@ def plot_representative_eddy_panels(
                 radius_m=radius_m,
                 grid_size=grid_size,
                 search_rmax=composite_hua_search_rmax,
+                f0=f0,
+                refine_subgrid=composite_hua_refine_subgrid,
+                refine_factor=composite_hua_refine_factor,
+                refine_window_km=composite_hua_refine_window_km,
             )
             axis_path = output_dir / (
-                f"representative_composite_hua_axis_{orientation}_{polarity}_"
+                f"representative_composite_hua{'_refined' if composite_hua_refine_subgrid else ''}_axis_{orientation}_{polarity}_"
                 f"tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv"
             )
             axis.to_csv(axis_path, index=False)
@@ -1047,13 +1255,25 @@ def plot_representative_eddy_panels(
         ]
         if right_panel_mode == "horizontal_speed":
             section_field_key = "horizontal_speed_section"
-            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=False)
+            section_limits = _field_limits(
+                [part[section_field_key] for pair in section_pairs for part in pair],
+                symmetric=False,
+                quantile=SECTION_DISPLAY_PERCENTILE,
+            )
         elif right_panel_mode == "signed_horizontal_speed":
             section_field_key = "signed_horizontal_speed_section"
-            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=True)
+            section_limits = _field_limits(
+                [part[section_field_key] for pair in section_pairs for part in pair],
+                symmetric=True,
+                quantile=SECTION_DISPLAY_PERCENTILE,
+            )
         else:
             section_field_key = "normal_horizontal_velocity_section"
-            section_limits = _field_limits([part[section_field_key] for pair in section_pairs for part in pair], symmetric=True)
+            section_limits = _field_limits(
+                [part[section_field_key] for pair in section_pairs for part in pair],
+                symmetric=True,
+                quantile=SECTION_DISPLAY_PERCENTILE,
+            )
 
         fig = plt.figure(figsize=(32, 18), constrained_layout=True)
         gs = fig.add_gridspec(
@@ -1129,7 +1349,7 @@ def plot_representative_eddy_panels(
             for key in ("5u", "6u", "5l", "6l", "9", "11"):
                 _plot_unavailable(axes[key], "no second representative axis step")
 
-        fig.colorbar(section_mesh, ax=[axes["8"], axes["10"], axes["9"], axes["11"]], shrink=0.82, label="m/s")
+        fig.colorbar(section_mesh, ax=[axes["8"], axes["10"], axes["9"], axes["11"]], shrink=0.82, label="m/s", extend="both")
         _plot_support(axes["7"], count[ip], tau_grid, depth, "7  composite support, no trajectory")
         fig.suptitle(
             f"Representative eddy latest panel family: {polarity}, tau={float(tau_grid[tau_i]):.2f}, "
@@ -1139,7 +1359,9 @@ def plot_representative_eddy_panels(
             + (f", J2={steps[1].distance_km:.1f} km" if len(steps) > 1 else ""),
             fontsize=15,
         )
-        axis_tag = "" if axis_source == "radial_seed" else f"_{axis_source}_axis"
+        axis_tag = ""
+        if axis_source != "radial_seed":
+            axis_tag = f"_{axis_source}{'_refined' if composite_hua_refine_subgrid else ''}_axis"
         stem = (
             f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_"
             f"{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
@@ -1187,6 +1409,9 @@ def plot_representative_eddy_panels(
         "right_panel_mode": right_panel_mode,
         "axis_source": axis_source,
         "composite_hua_search_rmax": composite_hua_search_rmax,
+        "composite_hua_refine_subgrid": composite_hua_refine_subgrid,
+        "composite_hua_refine_factor": composite_hua_refine_factor,
+        "composite_hua_refine_window_km": composite_hua_refine_window_km,
         "tau": float(tau_grid[tau_i]),
         "axis_step_definition": "top two adjacent-depth representative axis displacements at selected tau",
         "horizontal_smooth_sigma_cells": horizontal_smooth_sigma_cells,
@@ -1194,7 +1419,9 @@ def plot_representative_eddy_panels(
         "polarity_summaries": manifests,
         "figures": [str(path) for path in written],
     }
-    axis_tag = "" if axis_source == "radial_seed" else f"_{axis_source}_axis"
+    axis_tag = ""
+    if axis_source != "radial_seed":
+        axis_tag = f"_{axis_source}{'_refined' if composite_hua_refine_subgrid else ''}_axis"
     (output_dir / f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_{orientation}_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1202,7 +1429,7 @@ def plot_representative_eddy_panels(
     if axis_comparisons:
         pd.concat(axis_comparisons, ignore_index=True).to_csv(
             output_dir
-            / f"representative_axis_source_comparison_{right_panel_mode}_{section_mode}_{orientation}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv",
+            / f"representative_axis_source_comparison_{right_panel_mode}_{section_mode}{axis_tag}_{orientation}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv",
             index=False,
         )
     return written
@@ -1226,6 +1453,9 @@ def main() -> None:
     )
     parser.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
     parser.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
+    parser.add_argument("--composite-hua-refine-subgrid", action="store_true")
+    parser.add_argument("--composite-hua-refine-factor", type=int, default=4)
+    parser.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     parser.add_argument("--section-depth-padding-layers", type=int, default=6)
     parser.add_argument("--section-half-width-r", type=float, default=1.2)
@@ -1248,6 +1478,9 @@ def main() -> None:
         right_panel_mode=args.right_panel_mode,
         axis_source=args.axis_source,
         composite_hua_search_rmax=args.composite_hua_search_rmax,
+        composite_hua_refine_subgrid=args.composite_hua_refine_subgrid,
+        composite_hua_refine_factor=args.composite_hua_refine_factor,
+        composite_hua_refine_window_km=args.composite_hua_refine_window_km,
     )
     print(json.dumps({"figures": [str(path) for path in written]}, ensure_ascii=False))
 
