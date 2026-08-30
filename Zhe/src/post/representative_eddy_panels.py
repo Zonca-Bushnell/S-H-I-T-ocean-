@@ -679,7 +679,7 @@ def _normal_velocity_section(
         axis_nx = np.interp(axis["depth_m"].to_numpy(dtype="f8"), depth, nx_axis)
         axis_ny = np.interp(axis["depth_m"].to_numpy(dtype="f8"), depth, ny_axis)
         center_coord = axis["x_km"].to_numpy(dtype="f8") * axis_nx + axis["y_km"].to_numpy(dtype="f8") * axis_ny
-        axis_label = "axis-following curved section, tilt-preserving coordinate"
+        axis_label = "axis-following curved section, local-normal projection"
         coord_label = "distance along local axis-normal section from surface center projection (km)"
         velocity_label = "horizontal velocity normal to curved section, u_axis"
     elif section_mode == "normal":
@@ -761,9 +761,10 @@ def _normal_velocity_section(
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
         "axis_curved_centerline_forced_to_zero": False,
         "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
-        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_preserves_tilt_projection": False,
+        "axis_curved_preserves_total_tilt": False,
         "axis_curved_interpretation": (
-            "axis-following curved section with tilt-preserving surface-center reference"
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
             if section_mode == "axis_curved"
             else ""
         ),
@@ -1392,9 +1393,10 @@ def plot_representative_eddy_panels(
                 ),
                 "axis_curved_centerline_forced_to_zero": False,
                 "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
-                "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+                "axis_curved_preserves_tilt_projection": False,
+                "axis_curved_preserves_total_tilt": False,
                 "axis_curved_interpretation": (
-                    "axis-following curved section with tilt-preserving surface-center reference"
+                    "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
                     if section_mode == "axis_curved"
                     else ""
                 ),

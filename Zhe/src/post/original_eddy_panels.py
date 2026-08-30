@@ -1812,7 +1812,7 @@ def _make_vertical_w_section(
             section[iz] = _interp_section(w[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
             dwdz_section[iz] = _interp_section(dwdz[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
         center_target = 0.0
-        axis = "axis-following curved section, tilt-preserving coordinate"
+        axis = "axis-following curved section, local-normal projection"
     elif section_mode == "normal":
         norm = float(np.hypot(dx, dy))
         if not np.isfinite(norm) or norm <= 1e-9:
@@ -1887,9 +1887,10 @@ def _make_vertical_w_section(
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
         "axis_curved_centerline_forced_to_zero": False,
         "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
-        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_preserves_tilt_projection": False,
+        "axis_curved_preserves_total_tilt": False,
         "axis_curved_interpretation": (
-            "axis-following curved section with tilt-preserving surface-center reference"
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
             if section_mode == "axis_curved"
             else ""
         ),
@@ -2004,7 +2005,7 @@ def _make_normal_horizontal_velocity_section(
             normal_velocity_section[iz] = _interp_section(normal_velocity_layer[None, :, :], x_m, y_m, x_line, y_line)[0]
             horizontal_speed_section[iz] = _interp_section(speed[iz][None, :, :], x_m, y_m, x_line, y_line)[0]
         signed_horizontal_speed_section = np.sign(normal_velocity_section) * horizontal_speed_section
-        section_axis = "axis-following curved section, tilt-preserving coordinate"
+        section_axis = "axis-following curved section, local-normal projection"
         velocity_label = "horizontal velocity normal to curved section, u_axis"
         coordinate_label = "distance along local axis-normal section from surface center projection (km)"
     elif section_mode == "normal":
@@ -2076,9 +2077,10 @@ def _make_normal_horizontal_velocity_section(
         "axis_curved_direction_fallback_count": int(axis_fallback_count),
         "axis_curved_centerline_forced_to_zero": False,
         "axis_curved_reference": "surface_center" if section_mode == "axis_curved" else "",
-        "axis_curved_preserves_tilt_projection": bool(section_mode == "axis_curved"),
+        "axis_curved_preserves_tilt_projection": False,
+        "axis_curved_preserves_total_tilt": False,
         "axis_curved_interpretation": (
-            "axis-following curved section with tilt-preserving surface-center reference"
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
             if section_mode == "axis_curved"
             else ""
         ),
@@ -2164,9 +2166,10 @@ def _write_metadata(
         payload["section_mode"] = section_mode
         payload["axis_curved_centerline_forced_to_zero"] = False
         payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
-        payload["axis_curved_preserves_tilt_projection"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_preserves_tilt_projection"] = False
+        payload["axis_curved_preserves_total_tilt"] = False
         payload["axis_curved_interpretation"] = (
-            "axis-following curved section with tilt-preserving surface-center reference"
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
             if section_mode == "axis_curved"
             else ""
         )
@@ -2215,9 +2218,10 @@ def _metadata_payload(
         payload["section_mode"] = section_mode
         payload["axis_curved_centerline_forced_to_zero"] = False
         payload["axis_curved_reference"] = "surface_center" if section_mode == "axis_curved" else ""
-        payload["axis_curved_preserves_tilt_projection"] = bool(section_mode == "axis_curved")
+        payload["axis_curved_preserves_tilt_projection"] = False
+        payload["axis_curved_preserves_total_tilt"] = False
         payload["axis_curved_interpretation"] = (
-            "axis-following curved section with tilt-preserving surface-center reference"
+            "axis-following curved section; black line is the local-normal projection, while full tilt remains in panels 1/2"
             if section_mode == "axis_curved"
             else ""
         )
