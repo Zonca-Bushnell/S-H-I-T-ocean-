@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import ConnectionPatch, Rectangle
 from netCDF4 import Dataset, num2date
 from scipy.ndimage import gaussian_filter
 
@@ -899,6 +900,22 @@ def _plot_normal_horizontal_velocity_section(
     vmin, vmax = value_limits if value_limits is not None else _finite_limits(local)
     mesh = ax.pcolormesh(s, depth, u_perp, shading="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
     finite = local[np.isfinite(local)]
+    if finite.size:
+        contour_levels = np.linspace(float(vmin), float(vmax), 11)
+        contour_levels = contour_levels[np.isfinite(contour_levels)]
+        contour_levels = contour_levels[np.abs(contour_levels) > max(abs(float(vmax) - float(vmin)) * 0.01, 1e-12)]
+        if contour_levels.size >= 2:
+            ax.contour(
+                s,
+                depth,
+                u_perp,
+                levels=contour_levels,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.55,
+                alpha=0.72,
+            )
     if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
         ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
@@ -909,10 +926,12 @@ def _plot_normal_horizontal_velocity_section(
         ax.plot(center_s, center_z, "k.-", ms=4, lw=1.0, alpha=0.75, label="layer centers")
         ax.legend(loc="best", fontsize=7)
     axis_name = str(section.get("section_axis", "section"))
+    velocity_label = str(section.get("velocity_label", "cross-section horizontal velocity"))
+    coordinate_label = str(section.get("coordinate_label", "section distance (km)"))
     ax.set_xlim(float(xlim[0]), float(xlim[1]))
     ax.set_ylim(float(zlim[1]), float(zlim[0]))
-    ax.set_title(f"{title}: normal horizontal velocity u_perp\n{axis_name}", fontsize=9)
-    ax.set_xlabel("distance along jump direction from layer center (km)")
+    ax.set_title(f"{title}: {velocity_label}\n{axis_name}", fontsize=9)
+    ax.set_xlabel(coordinate_label)
     ax.set_ylabel("depth (m)")
     ax.grid(alpha=0.2)
     return mesh
@@ -930,6 +949,169 @@ def _section_local_values(section: dict[str, np.ndarray] | None, value_key: str)
     zmask = (depth >= zlim[0]) & (depth <= zlim[1])
     local = values[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else values
     return np.asarray(local, dtype="f8")
+
+
+def _add_jump_source_markers(
+    fig: plt.Figure,
+    ax_dx: plt.Axes,
+    ax_dy: plt.Axes,
+    *,
+    selected: SelectedObject,
+    offsets: pd.DataFrame,
+    offset_xlim: float,
+    first_upper_ax: plt.Axes,
+    first_lower_ax: plt.Axes,
+    second_upper_ax: plt.Axes,
+    second_lower_ax: plt.Axes,
+) -> None:
+    """Mark which depth segments in panels 1/2 are expanded in panels 3-6."""
+
+    depth_values = [
+        value
+        for value in (
+            selected.jump_from_depth_m,
+            selected.jump_to_depth_m,
+            selected.second_jump_from_depth_m,
+            selected.second_jump_to_depth_m,
+        )
+        if value is not None and np.isfinite(float(value))
+    ]
+    if not depth_values:
+        return
+    depth_pad = max(4.0, 0.006 * max(depth_values))
+
+    def marker_box(col: str, z_from: float, z_to: float) -> tuple[float, float, float, float]:
+        depths = offsets["depth_m"].to_numpy(dtype="f8")
+        values = offsets[col].to_numpy(dtype="f8")
+        wanted = np.array([z_from, z_to], dtype="f8")
+        picked: list[float] = []
+        for depth_value in wanted:
+            valid = np.isfinite(depths) & np.isfinite(values)
+            if not np.any(valid):
+                continue
+            idx = int(np.nanargmin(np.abs(depths[valid] - depth_value)))
+            picked.append(float(values[valid][idx]))
+        if not picked:
+            picked = [0.0]
+        x_pad = max(3.0, 0.055 * offset_xlim, 0.18 * (max(picked) - min(picked) if len(picked) > 1 else 0.0))
+        x_min = max(-0.98 * offset_xlim, min(picked) - x_pad)
+        x_max = min(0.98 * offset_xlim, max(picked) + x_pad)
+        if x_max <= x_min:
+            x_max = min(0.98 * offset_xlim, x_min + 2.0 * x_pad)
+        z_min = min(z_from, z_to) - depth_pad
+        z_max = max(z_from, z_to) + depth_pad
+        return x_min, z_min, x_max - x_min, z_max - z_min
+
+    specs = [
+        (
+            selected.has_abrupt_jump,
+            selected.jump_from_depth_m,
+            selected.jump_to_depth_m,
+            "J1: 3/4",
+            "#d62728",
+            first_upper_ax,
+            first_lower_ax,
+        ),
+        (
+            selected.has_second_abrupt_jump,
+            selected.second_jump_from_depth_m,
+            selected.second_jump_to_depth_m,
+            "J2: 5/6",
+            "#2ca02c",
+            second_upper_ax,
+            second_lower_ax,
+        ),
+    ]
+
+    for available, z_from, z_to, label, color, upper_ax, lower_ax in specs:
+        if not available or z_from is None or z_to is None:
+            continue
+        z_mid = 0.5 * (float(z_from) + float(z_to))
+        box_dx = marker_box("delta_x_km", float(z_from), float(z_to))
+        box_dy = marker_box("delta_y_km", float(z_from), float(z_to))
+        for ax, box in ((ax_dx, box_dx), (ax_dy, box_dy)):
+            ax.add_patch(
+                Rectangle(
+                    (box[0], box[1]),
+                    box[2],
+                    box[3],
+                    fill=True,
+                    facecolor=color,
+                    edgecolor=color,
+                    linewidth=1.35,
+                    linestyle="-",
+                    alpha=0.18,
+                    zorder=8,
+                )
+            )
+            ax.add_patch(
+                Rectangle(
+                    (box[0], box[1]),
+                    box[2],
+                    box[3],
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1.15,
+                    linestyle="-",
+                    alpha=0.95,
+                    zorder=9,
+                )
+            )
+        label_x = min(0.92 * offset_xlim, box_dy[0] + box_dy[2] + 0.035 * offset_xlim)
+        ax_dy.annotate(
+            label,
+            xy=(box_dy[0] + box_dy[2], z_mid),
+            xytext=(label_x, z_mid),
+            arrowprops={"arrowstyle": "-|>", "lw": 0.95, "color": color, "shrinkA": 1, "shrinkB": 2},
+            color=color,
+            fontsize=7.5,
+            va="center",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=10,
+        )
+        upper_ax.text(
+            0.025,
+            0.965,
+            label,
+            transform=upper_ax.transAxes,
+            color=color,
+            fontsize=7.5,
+            va="top",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=20,
+        )
+        lower_ax.text(
+            0.025,
+            0.965,
+            label,
+            transform=lower_ax.transAxes,
+            color=color,
+            fontsize=7.5,
+            va="top",
+            ha="left",
+            bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": color, "lw": 0.75, "alpha": 0.88},
+            zorder=20,
+        )
+        x_right = box_dy[0] + box_dy[2]
+        z_top = box_dy[1]
+        z_bottom = box_dy[1] + box_dy[3]
+        for z_anchor, target_ax, target_y in ((z_top, upper_ax, 0.74), (z_bottom, lower_ax, 0.26)):
+            connector = ConnectionPatch(
+                xyA=(x_right, z_anchor),
+                coordsA=ax_dy.transData,
+                xyB=(0.0, target_y),
+                coordsB=target_ax.transAxes,
+                arrowstyle="-|>",
+                lw=0.75,
+                color=color,
+                alpha=0.58,
+                mutation_scale=8,
+                connectionstyle="arc3,rad=-0.06",
+                zorder=6,
+            )
+            fig.add_artist(connector)
 
 
 def _plot_9panel(
@@ -1023,6 +1205,19 @@ def _plot_9panel(
         ax.set_xlim(-offset_xlim, offset_xlim)
         ax.set_title(title)
         ax.grid(alpha=0.25)
+
+    _add_jump_source_markers(
+        fig,
+        ax1,
+        ax2,
+        selected=selected,
+        offsets=offsets,
+        offset_xlim=offset_xlim,
+        first_upper_ax=ax3u,
+        first_lower_ax=ax3l,
+        second_upper_ax=ax5u,
+        second_lower_ax=ax5l,
+    )
 
     def _plot_horizontal_diagnostics(
         speed_ax,
@@ -1280,6 +1475,7 @@ def _make_jump_cross_section_fields(
             depth_padding_layers=w_shear_depth_padding_layers,
             half_width_r=w_shear_half_width_r,
             min_half_width_km=w_shear_min_half_width_km,
+            section_mode=w_section_mode,
         )
         out["lower_velocity_section"] = _make_normal_horizontal_velocity_section(
             object_layers=offsets,
@@ -1293,6 +1489,7 @@ def _make_jump_cross_section_fields(
             depth_padding_layers=w_shear_depth_padding_layers,
             half_width_r=w_shear_half_width_r,
             min_half_width_km=w_shear_min_half_width_km,
+            section_mode=w_section_mode,
         )
         return out
 
@@ -1455,6 +1652,7 @@ def _make_normal_horizontal_velocity_section(
     depth_padding_layers: int,
     half_width_r: float,
     min_half_width_km: float,
+    section_mode: str,
 ) -> dict[str, np.ndarray]:
     lon = column["longitude"]
     lat = column["latitude"]
@@ -1487,12 +1685,29 @@ def _make_normal_horizontal_velocity_section(
         dx, dy = 1.0, 0.0
     norm = float(np.hypot(dx, dy))
     if not np.isfinite(norm) or norm <= 1e-9:
-        ex, ey = 1.0, 0.0
+        jump_ex, jump_ey = 1.0, 0.0
     else:
-        ex, ey = dx / norm, dy / norm
-    nx, ny = -ey, ex
+        jump_ex, jump_ey = dx / norm, dy / norm
+    jump_nx, jump_ny = -jump_ey, jump_ex
 
-    anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+    if section_mode == "normal":
+        ex, ey = jump_nx, jump_ny
+        nx, ny = jump_ex, jump_ey
+        if p0 is not None and p1 is not None:
+            anchor = (0.5 * (p0[0] + p1[0]), 0.5 * (p0[1] + p1[1]))
+        else:
+            anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+        section_axis = "jump-normal section through center-pair midpoint"
+        velocity_label = "horizontal velocity normal to section, u_parallel"
+        coordinate_label = "distance along jump-normal section from midpoint (km)"
+    else:
+        ex, ey = jump_ex, jump_ey
+        nx, ny = jump_nx, jump_ny
+        anchor = layer_xy(anchor_depth_index) or p1 or p0 or (0.0, 0.0)
+        section_axis = "jump-parallel section"
+        velocity_label = "horizontal velocity normal to section, u_perp"
+        coordinate_label = "distance along jump direction from layer center (km)"
+
     x_half = max(float(radius_m) / 1000.0 * float(half_width_r), float(min_half_width_km))
     max_half = max(float(radius_m) / 1000.0 * 2.5, 150.0, x_half)
     section_coord = np.linspace(-max_half, max_half, 161, dtype="f8")
@@ -1518,7 +1733,9 @@ def _make_normal_horizontal_velocity_section(
         "normal_horizontal_velocity_section": np.asarray(normal_velocity_section, dtype="f8"),
         "center_section_coord_km": np.asarray(center_coord, dtype="f8"),
         "center_depth_m": np.asarray(center_z, dtype="f8"),
-        "section_axis": "jump-parallel section; color is cross-section horizontal u_perp",
+        "section_axis": section_axis,
+        "velocity_label": velocity_label,
+        "coordinate_label": coordinate_label,
         "xlim_km": np.array([-x_half, x_half], dtype="f8"),
         "zlim_m": np.array([float(depth[k_min]), float(depth[k_max])], dtype="f8"),
     }
