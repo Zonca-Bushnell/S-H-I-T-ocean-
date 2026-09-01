@@ -69,6 +69,8 @@ class RepresentativeVortexDataset:
     v_mean: np.ndarray
     speed_mean: np.ndarray
     count: np.ndarray | None
+    n_objects: np.ndarray | None
+    n_tracks: np.ndarray | None
     radius_by_polarity_m: dict[str, float]
 
     @classmethod
@@ -80,6 +82,8 @@ class RepresentativeVortexDataset:
         v = _array_by_key(data, ("v_mean", "v", "v_composite"))
         speed = data["speed_mean"] if "speed_mean" in data else np.hypot(u, v)
         count = data["count"] if "count" in data else None
+        n_objects = data["n_objects"] if "n_objects" in data else None
+        n_tracks = data["n_tracks"] if "n_tracks" in data else None
         tau_grid = _array_by_key(data, ("tau_grid", "tau"))
         depth = _array_by_key(data, ("depth", "depth_m", "z_m")).astype(float)
         radial = _array_by_key(data, ("radial", "radius", "r")).astype(float)
@@ -104,6 +108,8 @@ class RepresentativeVortexDataset:
             v_mean=v,
             speed_mean=speed,
             count=count,
+            n_objects=n_objects,
+            n_tracks=n_tracks,
             radius_by_polarity_m=radius_by_polarity,
         )
 

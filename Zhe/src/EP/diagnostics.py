@@ -69,7 +69,11 @@ def load_n2_profile(path: Path | None, depth_m: np.ndarray, constant_n2: float) 
     return np.interp(depth_m, src_depth, n2)
 
 
-def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dict[str, Path]:
+def compute_ep_profiles(
+    config: EPFluxConfig,
+    *,
+    n2_profile: str | None = "auto",
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     config.validate_contract()
     dataset = RepresentativeVortexDataset.load(config.vortex_npz, config.radial_seed_root)
     axis_path = config.axis_source_path
@@ -79,8 +83,6 @@ def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dic
             "Run src.post.cli build-representative-axis-sources first."
         )
 
-    output_dir = config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     all_profiles: list[pd.DataFrame] = []
     metric_rows: list[dict[str, object]] = []
     n2_profile_path = resolve_n2_profile_path(config, n2_profile)
@@ -95,12 +97,34 @@ def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dic
             f0=config.f0,
             n2=n2,
             buoyancy_source=config.buoyancy_source,
+            curved_tube_mode=config.curved_tube_mode,
+            large_curvature_threshold=config.large_curvature_threshold,
         ).compute()
+        p_idx = dataset.polarity_index(polarity)
+        t_idx = dataset.nearest_tau_index(config.tau)
+        if dataset.n_objects is not None:
+            result.profiles["n_objects"] = int(dataset.n_objects[p_idx, t_idx])
+        if dataset.n_tracks is not None:
+            result.profiles["n_tracks"] = int(dataset.n_tracks[p_idx, t_idx])
         all_profiles.append(result.profiles)
         metric_rows.append({"polarity": polarity, **result.metrics})
 
     profiles = pd.concat(all_profiles, ignore_index=True)
     metrics = pd.DataFrame(metric_rows)
+    manifest = {
+        **config.manifest(),
+        "n2_profile_path": str(n2_profile_path) if n2_profile_path else None,
+        "n2_source": "profile_npz" if n2_profile_path else "constant_smoke_N2",
+        "polarity_count": len(dataset.polarities),
+        "profile_rows": int(len(profiles)),
+    }
+    return profiles, metrics, manifest
+
+
+def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dict[str, Path]:
+    output_dir = config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    profiles, metrics, manifest = compute_ep_profiles(config, n2_profile=n2_profile)
     profiles_path = output_dir / "ep_flux_smoke_profiles.csv"
     metrics_path = output_dir / "ep_flux_smoke_metrics.csv"
     geometry_metrics_path = output_dir / "ep_flux_geometry_scale_metrics.csv"
@@ -115,13 +139,6 @@ def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dic
     curved_terms = _curved_terms_profiles(profiles)
     geometry_metrics.to_csv(geometry_metrics_path, index=False)
     curved_terms.to_csv(curved_terms_path, index=False)
-    manifest = {
-        **config.manifest(),
-        "n2_profile_path": str(n2_profile_path) if n2_profile_path else None,
-        "n2_source": "profile_npz" if n2_profile_path else "constant_smoke_N2",
-        "polarity_count": len(dataset.polarities),
-        "profile_rows": int(len(profiles)),
-    }
     manifest_path.write_text(json.dumps(_json_ready(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
     summary_path.write_text(_summary_markdown(config, metrics), encoding="utf-8")
     curved_summary_path.write_text(

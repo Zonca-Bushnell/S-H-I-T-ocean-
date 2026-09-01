@@ -7,6 +7,7 @@ from .contracts import (
     AXIS_SOURCES,
     BUOYANCY_SOURCES,
     CURVED_TUBE_MODES,
+    DEFAULT_FULL_OUTPUT_ROOT,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_RESULT_ROOT,
     DEFAULT_SHAPE_OUTPUT_NAME,
@@ -110,6 +111,19 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_lifecycle_validation(args: argparse.Namespace) -> int:
+    from .lifecycle import request_from_args, run_lifecycle_validation
+
+    request = request_from_args(args)
+    outputs = run_lifecycle_validation(request)
+    if args.dry_run:
+        return 0
+    print("EP lifecycle validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Object-oriented EP flux diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -146,6 +160,34 @@ def build_parser() -> argparse.ArgumentParser:
     compare = sub.add_parser("compare-classic-and-curved", help="Compare classic, tilted, and curved smoke outputs")
     compare.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_ROOT))
     compare.set_defaults(func=cmd_compare)
+
+    lifecycle = sub.add_parser("run-lifecycle-validation", help="Run full lifecycle EP diagnostics across tau and comparison dimensions")
+    lifecycle.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    lifecycle.add_argument("--output-root", default=str(DEFAULT_FULL_OUTPUT_ROOT))
+    lifecycle.add_argument("--shapes", default="coherent")
+    lifecycle.add_argument("--axis-sources", default="radial_seed")
+    lifecycle.add_argument("--orientations", default="turned")
+    lifecycle.add_argument("--buoyancy-sources", default="thermal_wind")
+    lifecycle.add_argument(
+        "--tau-values",
+        default="",
+        help="Comma-separated tau values. Empty means all tau nodes from the representative npz.",
+    )
+    lifecycle.add_argument("--reference-lat", type=float, default=30.0)
+    lifecycle.add_argument("--constant-n2", type=float, default=2.0e-5)
+    lifecycle.add_argument("--n2-profile", default="auto")
+    lifecycle.add_argument("--curved-tube-mode", choices=CURVED_TUBE_MODES, default="scale_audit")
+    lifecycle.add_argument("--large-curvature-threshold", type=float, default=1.0)
+    lifecycle.add_argument("--bootstrap-samples", type=int, default=0)
+    lifecycle.add_argument("--bootstrap-unit", choices=["track"], default="track")
+    lifecycle.add_argument(
+        "--ensure-axis-sources",
+        action="store_true",
+        help="Create missing persisted representative axis-source files before computing EP diagnostics.",
+    )
+    lifecycle.add_argument("--skip-missing", action="store_true")
+    lifecycle.add_argument("--dry-run", action="store_true")
+    lifecycle.set_defaults(func=cmd_run_lifecycle_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)

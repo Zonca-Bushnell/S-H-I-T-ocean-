@@ -14,11 +14,16 @@ DEFAULT_RESULT_ROOT = Path(
 )
 DEFAULT_SHAPE_OUTPUT_NAME = "result_coherent_only"
 DEFAULT_OUTPUT_ROOT = Path("G:/EDDY_detection/S-H-I-T-ocean-/EP-FLUX/smoke_outputs")
+DEFAULT_FULL_OUTPUT_ROOT = Path("G:/EDDY_detection/S-H-I-T-ocean-/EP-FLUX/full_lifecycle_validation")
 
 AXIS_SOURCES = ("radial_seed", "composite_hua_refined")
 ORIENTATIONS = ("turned", "unturned")
 BUOYANCY_SOURCES = ("thermal_wind", "streamfunction_dz")
 CURVED_TUBE_MODES = ("scale_audit", "jacobian_only", "jacobian_christoffel")
+SHAPE_OUTPUT_NAMES = {
+    "coherent": "result_coherent_only",
+    "upright_like": "result_upright_like",
+}
 
 
 def tau_tag(tau: float) -> str:
@@ -46,6 +51,10 @@ def default_radial_seed_root(
     shape_output_name: str = DEFAULT_SHAPE_OUTPUT_NAME,
 ) -> Path:
     return result_root / shape_output_name / "representative_vortex_radial_seed"
+
+
+def shape_output_name(shape: str) -> str:
+    return SHAPE_OUTPUT_NAMES.get(shape, f"result_{shape}")
 
 
 def axis_source_filename(axis_source: str, tau: float) -> str:
