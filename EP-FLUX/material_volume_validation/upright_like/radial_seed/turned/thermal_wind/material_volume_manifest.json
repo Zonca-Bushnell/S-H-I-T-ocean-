@@ -1,0 +1,41 @@
+{
+  "combo": {
+    "shape": "upright_like",
+    "axis_source": "radial_seed",
+    "orientation": "turned",
+    "buoyancy_source": "thermal_wind"
+  },
+  "result_root": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg",
+  "me_liutex_root": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_upright_like/representative_vortex_me_liutex",
+  "radial_seed_root": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_upright_like/representative_vortex_radial_seed",
+  "tau_values": [
+    0.0,
+    0.05,
+    0.1,
+    0.15000000000000002,
+    0.2,
+    0.25,
+    0.30000000000000004,
+    0.35000000000000003,
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6000000000000001,
+    0.65,
+    0.7000000000000001,
+    0.75,
+    0.8,
+    0.8500000000000001,
+    0.9,
+    0.9500000000000001,
+    1.0
+  ],
+  "core_radius_over_R": 1.5,
+  "speed_core_quantile": 0.45,
+  "pv_core_quantile": 0.7,
+  "min_mask_fraction": 0.01,
+  "n2_profile": "auto",
+  "diagnostic_status": "representative-volume validation; not object-level material-boundary closure",
+  "G_proxy_definition": "horizontal divergence of momentum stress only; buoyancy mapping T_ij[B_j] not closed in v1"
+}
