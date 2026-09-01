@@ -17,6 +17,7 @@ DEFAULT_OUTPUT_ROOT = Path("G:/EDDY_detection/S-H-I-T-ocean-/EP-FLUX/smoke_outpu
 
 AXIS_SOURCES = ("radial_seed", "composite_hua_refined")
 ORIENTATIONS = ("turned", "unturned")
+BUOYANCY_SOURCES = ("thermal_wind", "streamfunction_dz")
 
 
 def tau_tag(tau: float) -> str:
@@ -62,6 +63,7 @@ class EPFluxConfig:
     tau: float = 0.5
     reference_lat: float = DEFAULT_REFERENCE_LAT
     constant_n2: float = DEFAULT_CONSTANT_N2
+    buoyancy_source: str = "thermal_wind"
     shape_label: str = "coherent-only"
     run_label: str = "subgrid_1_24deg"
 
@@ -72,6 +74,8 @@ class EPFluxConfig:
             raise ValueError(f"axis_source must be one of {AXIS_SOURCES}")
         if self.constant_n2 <= 0:
             raise ValueError("constant_n2 must be positive")
+        if self.buoyancy_source not in BUOYANCY_SOURCES:
+            raise ValueError(f"buoyancy_source must be one of {BUOYANCY_SOURCES}")
 
     @property
     def vortex_npz(self) -> Path:
@@ -103,6 +107,7 @@ class EPFluxConfig:
             "reference_lat": self.reference_lat,
             "f0": self.f0,
             "constant_n2": self.constant_n2,
+            "buoyancy_source": self.buoyancy_source,
             "shape_label": self.shape_label,
             "run_label": self.run_label,
         }

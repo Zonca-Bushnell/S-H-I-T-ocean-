@@ -57,11 +57,15 @@ class EPFluxCalculator:
         *,
         f0: float,
         n2: np.ndarray | float,
+        buoyancy_source: str = "thermal_wind",
     ) -> None:
         self.rep = representative
         self.axis = axis.interpolate_to(representative.depth_m)
         self.f0 = float(f0)
         self.n2 = self._coerce_n2(n2)
+        if buoyancy_source not in ("thermal_wind", "streamfunction_dz"):
+            raise ValueError("buoyancy_source must be thermal_wind or streamfunction_dz")
+        self.buoyancy_source = buoyancy_source
 
     def compute(self) -> EPFluxResult:
         rep = self.rep
@@ -70,7 +74,14 @@ class EPFluxCalculator:
         theta = rep.theta_rad
         ur, ut = rep.polar_velocity()
         psi = self._streamfunction_from_tangential(ut, radial)
-        b_tilted, b_ordinary, b_tilt_correction = self._buoyancy_parts(psi, radial, theta)
+        if self.buoyancy_source == "thermal_wind":
+            b_tilted, b_ordinary, b_tilt_correction = self._thermal_wind_buoyancy_parts(
+                rep.u, rep.v, radial, theta
+            )
+        else:
+            b_tilted, b_ordinary, b_tilt_correction = self._streamfunction_buoyancy_parts(
+                psi, radial, theta
+            )
 
         ur_p = _azimuthal_anomaly(ur)
         ut_p = _azimuthal_anomaly(ut)
@@ -121,7 +132,7 @@ class EPFluxCalculator:
             psi[:, idx, :] = psi[:, idx - 1, :] + 0.5 * (ut[:, idx, :] + ut[:, idx - 1, :]) * dr[idx - 1]
         return psi - np.nanmean(psi, axis=(1, 2), keepdims=True)
 
-    def _buoyancy_parts(
+    def _streamfunction_buoyancy_parts(
         self, psi: np.ndarray, radial: np.ndarray, theta: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         depth = self.rep.depth_m
@@ -140,6 +151,52 @@ class EPFluxCalculator:
             self.f0 * dpsi_dz_ordinary,
             self.f0 * tilt_projection,
         )
+
+    def _thermal_wind_buoyancy_parts(
+        self, u_g: np.ndarray, v_g: np.ndarray, radial: np.ndarray, theta: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        depth = self.rep.depth_m
+        du_dz_tilted = _safe_gradient(u_g, depth, axis=0)
+        dv_dz_tilted = _safe_gradient(v_g, depth, axis=0)
+
+        du_dx, du_dy = self._cartesian_gradient(u_g, radial, theta)
+        dv_dx, dv_dy = self._cartesian_gradient(v_g, radial, theta)
+        dx_dz, dy_dz = self.axis.slopes_m_per_m()
+        du_dz_correction = dx_dz[:, None, None] * du_dx + dy_dz[:, None, None] * du_dy
+        dv_dz_correction = dx_dz[:, None, None] * dv_dx + dy_dz[:, None, None] * dv_dy
+
+        b_tilted = self._buoyancy_from_thermal_wind_shear(du_dz_tilted, dv_dz_tilted, radial, theta)
+        b_correction = self._buoyancy_from_thermal_wind_shear(
+            du_dz_correction, dv_dz_correction, radial, theta
+        )
+        return b_tilted, b_tilted + b_correction, b_correction
+
+    def _cartesian_gradient(
+        self, values: np.ndarray, radial: np.ndarray, theta: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        radial_positive = _positive_radial_coord(radial)
+        d_dr = _safe_gradient(values, radial, axis=1)
+        d_dtheta = _periodic_gradient(values, theta)
+        rr = radial_positive[None, :, None]
+        cos_t = np.cos(theta)[None, None, :]
+        sin_t = np.sin(theta)[None, None, :]
+        grad_x = d_dr * cos_t - d_dtheta * sin_t / rr
+        grad_y = d_dr * sin_t + d_dtheta * cos_t / rr
+        return grad_x, grad_y
+
+    def _buoyancy_from_thermal_wind_shear(
+        self, du_dz: np.ndarray, dv_dz: np.ndarray, radial: np.ndarray, theta: np.ndarray
+    ) -> np.ndarray:
+        db_dx = self.f0 * dv_dz
+        db_dy = -self.f0 * du_dz
+        cos_t = np.cos(theta)[None, None, :]
+        sin_t = np.sin(theta)[None, None, :]
+        db_dr = db_dx * cos_t + db_dy * sin_t
+        b = np.zeros_like(db_dr, dtype=float)
+        dr = np.diff(radial)
+        for idx in range(1, radial.size):
+            b[:, idx, :] = b[:, idx - 1, :] + 0.5 * (db_dr[:, idx, :] + db_dr[:, idx - 1, :]) * dr[idx - 1]
+        return b - np.nanmean(b, axis=(1, 2), keepdims=True)
 
     def _divergence(self, fn: np.ndarray, fz: np.ndarray, radial: np.ndarray, depth: np.ndarray) -> np.ndarray:
         radial_positive = _positive_radial_coord(radial)
@@ -190,6 +247,7 @@ class EPFluxCalculator:
                     "axis_x_km": float(self.axis.x_km[iz]),
                     "axis_y_km": float(self.axis.y_km[iz]),
                     "axis_tilt_km": float(self.axis.tilt_km[iz]),
+                    "buoyancy_source": self.buoyancy_source,
                 }
                 for name, values in zip(names, arrays):
                     row[name] = float(values[iz, ir])

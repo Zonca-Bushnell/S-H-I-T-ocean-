@@ -1,0 +1,3 @@
+polarity,rows,core_rows,finite_divF_tilted_fraction,finite_pv_flux_fraction,median_axis_tilt_km,median_abs_tilt_correction_over_ordinary,divF_pv_flux_corr_core,median_abs_curved_minus_tilted_over_tilted,median_abs_curvature_sensitivity_upper_over_tilted,median_curvature_radius_product
+anticyclonic,2160.0,1296.0,1.0,1.0,15.014882552439296,0.589473314342265,0.9990082452137224,0.0,0.362219134005905,6.695059283478484
+cyclonic,2160.0,1296.0,1.0,1.0,10.583884806145939,0.4307132248695103,0.998154306771217,0.0,0.09287266089762698,6.125013504286459

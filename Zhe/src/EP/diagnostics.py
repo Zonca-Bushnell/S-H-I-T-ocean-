@@ -89,7 +89,13 @@ def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dic
         rep = dataset.slice(polarity, config.tau)
         axis = AxisLine.from_csv(axis_path, polarity=polarity)
         n2 = load_n2_profile(n2_profile_path, rep.depth_m, config.constant_n2)
-        result = EPFluxCalculator(rep, axis, f0=config.f0, n2=n2).compute()
+        result = EPFluxCalculator(
+            rep,
+            axis,
+            f0=config.f0,
+            n2=n2,
+            buoyancy_source=config.buoyancy_source,
+        ).compute()
         all_profiles.append(result.profiles)
         metric_rows.append({"polarity": polarity, **result.metrics})
 
@@ -224,6 +230,7 @@ def _summary_markdown(config: EPFluxConfig, metrics: pd.DataFrame) -> str:
         "## 口径",
         f"- 代表涡：`{config.shape_label}` / `{config.orientation}` / `tau={config.tau:.2f}`",
         f"- Axis source：`{config.axis_source}`",
+        f"- Buoyancy source：`{config.buoyancy_source}`",
         "- Classic EP、tilted EP 与 curved-tube EP-QG 近似同时输出。",
         "- 本报告是 smoke 验证，不是多年全量结论。",
         "",
@@ -234,6 +241,8 @@ def _summary_markdown(config: EPFluxConfig, metrics: pd.DataFrame) -> str:
         "",
         "## 解释",
         "- `F_z_tilt_correction` 衡量中心轴倾斜导致的垂向导数修正。",
+        "- `thermal_wind` 口径用合成地转速度垂向切变反推浮力异常梯度，再恢复截面内的 \\(b'\\)。",
+        "- `streamfunction_dz` 口径保留 \\(b'=f_0\\partial_z\\psi\\) 的 QG 对照。",
         "- `divF_curved_tube_qg_approx` 是一阶截面平均下的保守 curved-tube resolved 项；当前不把曲率上界项直接加进主散度。",
         "- `divF_curvature_sensitivity_upper` 是 \\(\\kappa F_n\\) 量级敏感性上界，用来提示曲率可能重要，但不能单独作为闭合结论。",
         "- `pv_flux_proxy` 来自代表流函数的 QG-like PV 代理，用于闭合关系的回归检查。",

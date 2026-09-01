@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .contracts import (
     AXIS_SOURCES,
+    BUOYANCY_SOURCES,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_RESULT_ROOT,
     DEFAULT_SHAPE_OUTPUT_NAME,
@@ -35,6 +36,7 @@ def _config_from_args(args: argparse.Namespace) -> EPFluxConfig:
         tau=args.tau,
         reference_lat=args.reference_lat,
         constant_n2=args.constant_n2,
+        buoyancy_source=args.buoyancy_source,
         shape_label=args.shape_label,
         run_label=args.run_label,
     )
@@ -48,6 +50,7 @@ def cmd_build_smoke(args: argparse.Namespace) -> int:
         for key, value in config.manifest().items():
             print(f"{key}: {value}")
         print("mode: classic EP + tilted EP + curved-tube EP QG approximation")
+        print(f"buoyancy_source: {config.buoyancy_source}")
         return 0
     from .diagnostics import build_smoke
 
@@ -84,6 +87,7 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
                 "Classic EP:",
                 "  F_n = -rho0 <u_s' u_n'>",
                 "  F_z = rho0 f0 <u_n' b'> / N2",
+                "  Default b' comes from thermal-wind inversion of geostrophic velocity shear.",
                 "",
                 "Tilted EP:",
                 "  uses ordinary vertical derivative plus an explicit axis-tilt correction term.",
@@ -116,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--tau", type=float, default=0.5)
     smoke.add_argument("--reference-lat", type=float, default=30.0)
     smoke.add_argument("--constant-n2", type=float, default=2.0e-5)
+    smoke.add_argument("--buoyancy-source", choices=BUOYANCY_SOURCES, default="thermal_wind")
     smoke.add_argument(
         "--n2-profile",
         default="auto",
