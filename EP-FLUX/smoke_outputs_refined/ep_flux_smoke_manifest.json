@@ -1,0 +1,18 @@
+{
+  "me_liutex_root": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_me_liutex",
+  "radial_seed_root": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_radial_seed",
+  "vortex_npz": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_me_liutex/azimuthal_representative_velocity.npz",
+  "axis_source": "radial_seed",
+  "axis_source_path": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_me_liutex/axis_sources/radial_seed_axis_tau050.csv",
+  "orientation": "turned",
+  "tau": 0.5,
+  "reference_lat": 30.0,
+  "f0": 7.292115899999999e-05,
+  "constant_n2": 2e-05,
+  "shape_label": "coherent-only",
+  "run_label": "subgrid_1_24deg",
+  "n2_profile_path": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_radial_seed/climatology/cmems_doy_climatology_1993_2022_31d_sigma0_dz_profile.npz",
+  "n2_source": "profile_npz",
+  "polarity_count": 2,
+  "profile_rows": 4320
+}

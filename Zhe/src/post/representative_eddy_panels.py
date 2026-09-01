@@ -459,6 +459,152 @@ def _axis_source_comparison(radial_axis: pd.DataFrame, composite_axis: pd.DataFr
     return merged
 
 
+def _tau_tag(tau: float) -> str:
+    return f"tau{int(round(float(tau) * 100)):03d}"
+
+
+def _axis_sources_dir(me_liutex_root: Path) -> Path:
+    return me_liutex_root / "axis_sources"
+
+
+def _axis_source_path(me_liutex_root: Path, axis_source: str, tau: float) -> Path:
+    return _axis_sources_dir(me_liutex_root) / f"{axis_source}_axis_{_tau_tag(tau)}.csv"
+
+
+def _load_persisted_axis_source(
+    me_liutex_root: Path,
+    axis_source: str,
+    polarity: str,
+    tau: float,
+) -> pd.DataFrame:
+    path = _axis_source_path(me_liutex_root, axis_source, tau)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing persisted representative axis source: {path}. "
+            "Run `python -m src.post.cli build-representative-axis-sources` first."
+        )
+    table = pd.read_csv(path)
+    table = table[table["polarity"].astype(str).eq(str(polarity))].copy()
+    if table.empty:
+        raise ValueError(f"No {axis_source} axis rows for polarity={polarity} in {path}")
+    return table.sort_values("depth_index").reset_index(drop=True)
+
+
+def build_representative_axis_sources_for_root(
+    *,
+    me_liutex_root: Path,
+    radial_seed_root: Path,
+    orientation: str,
+    tau: float,
+    axis_bandwidth: float = 0.075,
+    grid_size: int = 121,
+    reference_lat: float = 28.0,
+    composite_hua_search_rmax: float = 1.5,
+    composite_hua_refine_factor: int = 4,
+    composite_hua_refine_window_km: float = 20.0,
+) -> list[Path]:
+    data = _load_npz(me_liutex_root)
+    polarities = [str(x) for x in np.asarray(data["polarities"])]
+    tau_grid = np.asarray(data["tau_grid"], dtype="f8")
+    depth = np.asarray(data["depth"], dtype="f8")
+    radial = np.asarray(data["radial"], dtype="f8")
+    theta = np.asarray(data["theta"], dtype="f8")
+    u_mean = np.asarray(data["u_mean"], dtype="f8")
+    v_mean = np.asarray(data["v_mean"], dtype="f8")
+    speed_mean = np.asarray(data["speed_mean"], dtype="f8")
+    tau_i = int(np.nanargmin(np.abs(tau_grid - float(tau))))
+    tau_value = float(tau_grid[tau_i])
+    radius_by_polarity = _load_radius_by_polarity(radial_seed_root)
+    f0 = 2.0 * OMEGA * np.sin(np.deg2rad(float(reference_lat)))
+    out_dir = _axis_sources_dir(me_liutex_root)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    radial_rows: list[pd.DataFrame] = []
+    composite_rows: list[pd.DataFrame] = []
+    comparison_rows: list[pd.DataFrame] = []
+    polarity_summaries: list[dict] = []
+    for ip, polarity in enumerate(polarities):
+        radius_m = radius_by_polarity.get(polarity, 80000.0)
+        radial_axis = _axis_by_tau(radial_seed_root, polarity, tau_value, axis_bandwidth, orientation)
+        radial_axis = radial_axis.copy()
+        radial_axis.insert(0, "polarity", polarity)
+        radial_axis.insert(1, "orientation", orientation)
+        radial_axis.insert(2, "tau", tau_value)
+        radial_axis["axis_source"] = "radial_seed"
+        radial_rows.append(radial_axis)
+
+        composite_axis = _composite_hua_axis(
+            radial=radial,
+            theta=theta,
+            depth=depth,
+            u=u_mean[ip, tau_i],
+            v=v_mean[ip, tau_i],
+            speed=speed_mean[ip, tau_i],
+            radius_m=radius_m,
+            grid_size=grid_size,
+            search_rmax=composite_hua_search_rmax,
+            f0=f0,
+            refine_subgrid=True,
+            refine_factor=composite_hua_refine_factor,
+            refine_window_km=composite_hua_refine_window_km,
+        )
+        composite_axis = composite_axis.copy()
+        composite_axis.insert(0, "polarity", polarity)
+        composite_axis.insert(1, "orientation", orientation)
+        composite_axis.insert(2, "tau", tau_value)
+        composite_axis["axis_source"] = "composite_hua_refined"
+        composite_rows.append(composite_axis)
+
+        comparison = _axis_source_comparison(
+            radial_axis.drop(columns=["polarity", "orientation", "tau"], errors="ignore"),
+            composite_axis.drop(columns=["polarity", "orientation", "tau"], errors="ignore"),
+        )
+        comparison.insert(0, "polarity", polarity)
+        comparison.insert(1, "orientation", orientation)
+        comparison.insert(2, "tau", tau_value)
+        comparison_rows.append(comparison)
+        polarity_summaries.append(
+            {
+                "polarity": polarity,
+                "radial_seed_layers": int(len(radial_axis)),
+                "composite_hua_refined_layers": int(len(composite_axis)),
+                "composite_hua_pass_count": int(composite_axis["composite_hua_pass"].sum()),
+                "median_axis_source_offset_km": float(np.nanmedian(comparison["axis_source_offset_km"])),
+                "p90_axis_source_offset_km": float(np.nanpercentile(comparison["axis_source_offset_km"], 90)),
+            }
+        )
+
+    tag = _tau_tag(tau_value)
+    radial_path = out_dir / f"radial_seed_axis_{tag}.csv"
+    composite_path = out_dir / f"composite_hua_refined_axis_{tag}.csv"
+    comparison_path = out_dir / f"axis_source_comparison_{tag}.csv"
+    manifest_path = out_dir / f"axis_sources_manifest_{tag}.json"
+    pd.concat(radial_rows, ignore_index=True).to_csv(radial_path, index=False)
+    pd.concat(composite_rows, ignore_index=True).to_csv(composite_path, index=False)
+    pd.concat(comparison_rows, ignore_index=True).to_csv(comparison_path, index=False)
+    manifest = {
+        "me_liutex_root": str(me_liutex_root),
+        "radial_seed_root": str(radial_seed_root),
+        "orientation": orientation,
+        "tau": tau_value,
+        "axis_sources": ["radial_seed", "composite_hua_refined"],
+        "default_axis_source": "radial_seed",
+        "composite_hua_refined": {
+            "search_rmax": composite_hua_search_rmax,
+            "refine_factor": composite_hua_refine_factor,
+            "refine_window_km": composite_hua_refine_window_km,
+        },
+        "files": {
+            "radial_seed_axis": str(radial_path),
+            "composite_hua_refined_axis": str(composite_path),
+            "axis_source_comparison": str(comparison_path),
+        },
+        "polarity_summaries": polarity_summaries,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return [radial_path, composite_path, comparison_path, manifest_path]
+
+
 def _strongest_axis_steps(axis: pd.DataFrame, radius_m: float, max_steps: int = 2) -> list[AxisStep]:
     axis = axis.sort_values("depth_index").reset_index(drop=True)
     x = axis["x_km"].to_numpy(dtype="f8")
@@ -1172,32 +1318,14 @@ def plot_representative_eddy_panels(
     for ip, polarity in enumerate(polarities):
         radius_m = radius_by_polarity.get(polarity, 80000.0)
         radial_axis = _axis_by_tau(radial_seed_root, polarity, float(tau_grid[tau_i]), axis_bandwidth, orientation)
-        if axis_source == "composite_hua":
-            axis = _composite_hua_axis(
-                radial=radial,
-                theta=theta,
-                depth=depth,
-                u=u_mean[ip, tau_i],
-                v=v_mean[ip, tau_i],
-                speed=speed_mean[ip, tau_i],
-                radius_m=radius_m,
-                grid_size=grid_size,
-                search_rmax=composite_hua_search_rmax,
-                f0=f0,
-                refine_subgrid=composite_hua_refine_subgrid,
-                refine_factor=composite_hua_refine_factor,
-                refine_window_km=composite_hua_refine_window_km,
-            )
-            axis_path = output_dir / (
-                f"representative_composite_hua{'_refined' if composite_hua_refine_subgrid else ''}_axis_{orientation}_{polarity}_"
-                f"tau{int(round(float(tau_grid[tau_i]) * 100)):03d}.csv"
-            )
-            axis.to_csv(axis_path, index=False)
-            comparison = _axis_source_comparison(radial_axis, axis)
-            comparison.insert(0, "polarity", polarity)
-            comparison.insert(1, "orientation", orientation)
-            comparison.insert(2, "tau", float(tau_grid[tau_i]))
-            axis_comparisons.append(comparison)
+        if axis_source == "composite_hua_refined":
+            axis = _load_persisted_axis_source(me_liutex_root, axis_source, polarity, float(tau_grid[tau_i]))
+            comparison_path = _axis_sources_dir(me_liutex_root) / f"axis_source_comparison_{_tau_tag(float(tau_grid[tau_i]))}.csv"
+            if comparison_path.exists():
+                comparison = pd.read_csv(comparison_path)
+                comparison = comparison[comparison["polarity"].astype(str).eq(str(polarity))].copy()
+                if not comparison.empty:
+                    axis_comparisons.append(comparison)
         else:
             axis = radial_axis
         steps = _strongest_axis_steps(axis, radius_m, max_steps=2)
@@ -1362,7 +1490,7 @@ def plot_representative_eddy_panels(
         )
         axis_tag = ""
         if axis_source != "radial_seed":
-            axis_tag = f"_{axis_source}{'_refined' if composite_hua_refine_subgrid else ''}_axis"
+            axis_tag = f"_{axis_source}_axis"
         stem = (
             f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_"
             f"{orientation}_{polarity}_tau{int(round(float(tau_grid[tau_i]) * 100)):03d}"
@@ -1423,7 +1551,7 @@ def plot_representative_eddy_panels(
     }
     axis_tag = ""
     if axis_source != "radial_seed":
-        axis_tag = f"_{axis_source}{'_refined' if composite_hua_refine_subgrid else ''}_axis"
+        axis_tag = f"_{axis_source}_axis"
     (output_dir / f"representative_latest_panel_{right_panel_mode}_{section_mode}{axis_tag}_{orientation}_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1453,7 +1581,7 @@ def main() -> None:
         choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
         default="normal_horizontal_velocity",
     )
-    parser.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
+    parser.add_argument("--axis-source", choices=["radial_seed", "composite_hua_refined"], default="radial_seed")
     parser.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
     parser.add_argument("--composite-hua-refine-subgrid", action="store_true")
     parser.add_argument("--composite-hua-refine-factor", type=int, default=4)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -240,11 +241,10 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
             "[post] latest panel family: "
             f"axis_source={args.axis_source} + axis top-2 steps + upper/lower fields + {args.section_mode} sections"
         )
-        print(
-            "[post] composite Hua refinement: "
-            f"enabled={args.composite_hua_refine_subgrid}, factor={args.composite_hua_refine_factor}, "
-            f"window_km={args.composite_hua_refine_window_km}"
-        )
+        if args.axis_source == "composite_hua_refined":
+            print("[post] axis source: persisted composite_hua_refined; run build-representative-axis-sources first")
+        else:
+            print("[post] axis source: radial_seed")
         print(f"[post] right panel mode: {args.right_panel_mode}")
         return
     from .representative_eddy_panels import plot_representative_eddy_panels as run
@@ -276,6 +276,43 @@ def plot_representative_eddy_panels(args: argparse.Namespace) -> None:
             composite_hua_refine_factor=args.composite_hua_refine_factor,
             composite_hua_refine_window_km=args.composite_hua_refine_window_km,
         )
+
+
+def build_representative_axis_sources(args: argparse.Namespace) -> None:
+    roots = []
+    if args.orientation in ("turned", "both"):
+        roots.append(("turned", Path(args.me_liutex_root)))
+    if args.orientation in ("unturned", "both"):
+        roots.append(("unturned", Path(args.me_liutex_unturned_root)))
+    if args.dry_run:
+        print(f"[post] radial seed: {args.radial_seed_root}")
+        for orientation, root in roots:
+            print(f"[post] build axis sources: {orientation} -> {root / 'axis_sources'}")
+        print(
+            "[post] sources: radial_seed + persisted composite_hua_refined; "
+            f"tau={args.tau}, refine_factor={args.composite_hua_refine_factor}, "
+            f"window_km={args.composite_hua_refine_window_km}"
+        )
+        return
+    from .representative_eddy_panels import build_representative_axis_sources_for_root as run
+
+    written = []
+    for orientation, root in roots:
+        written.extend(
+            run(
+                me_liutex_root=root,
+                radial_seed_root=Path(args.radial_seed_root),
+                orientation=orientation,
+                tau=args.tau,
+                axis_bandwidth=args.axis_bandwidth,
+                grid_size=args.grid_size,
+                reference_lat=args.reference_lat,
+                composite_hua_search_rmax=args.composite_hua_search_rmax,
+                composite_hua_refine_factor=args.composite_hua_refine_factor,
+                composite_hua_refine_window_km=args.composite_hua_refine_window_km,
+            )
+        )
+    print(json.dumps({"axis_source_files": [str(path) for path in written]}, ensure_ascii=False, indent=2))
 
 
 def run_default(args: argparse.Namespace) -> None:
@@ -405,17 +442,31 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["normal_horizontal_velocity", "horizontal_speed", "signed_horizontal_speed"],
         default="normal_horizontal_velocity",
     )
-    rep_panels.add_argument("--axis-source", choices=["radial_seed", "composite_hua"], default="radial_seed")
-    rep_panels.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
-    rep_panels.add_argument("--composite-hua-refine-subgrid", action="store_true")
-    rep_panels.add_argument("--composite-hua-refine-factor", type=int, default=4)
-    rep_panels.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
+    rep_panels.add_argument("--axis-source", choices=["radial_seed", "composite_hua_refined"], default="radial_seed")
+    rep_panels.add_argument("--composite-hua-search-rmax", type=float, default=1.5, help=argparse.SUPPRESS)
+    rep_panels.add_argument("--composite-hua-refine-subgrid", action="store_true", help=argparse.SUPPRESS)
+    rep_panels.add_argument("--composite-hua-refine-factor", type=int, default=4, help=argparse.SUPPRESS)
+    rep_panels.add_argument("--composite-hua-refine-window-km", type=float, default=20.0, help=argparse.SUPPRESS)
     rep_panels.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
     rep_panels.add_argument("--section-depth-padding-layers", type=int, default=6)
     rep_panels.add_argument("--section-half-width-r", type=float, default=1.2)
     rep_panels.add_argument("--section-min-half-width-km", type=float, default=75.0)
     rep_panels.add_argument("--dry-run", action="store_true")
     rep_panels.set_defaults(func=plot_representative_eddy_panels)
+    axis_sources = subparsers.add_parser("build-representative-axis-sources")
+    axis_sources.add_argument("--me-liutex-root", type=Path, required=True)
+    axis_sources.add_argument("--me-liutex-unturned-root", type=Path, required=True)
+    axis_sources.add_argument("--radial-seed-root", type=Path, required=True)
+    axis_sources.add_argument("--orientation", choices=["turned", "unturned", "both"], default="both")
+    axis_sources.add_argument("--tau", type=float, default=0.5)
+    axis_sources.add_argument("--axis-bandwidth", type=float, default=0.075)
+    axis_sources.add_argument("--grid-size", type=int, default=121)
+    axis_sources.add_argument("--reference-lat", type=float, default=28.0)
+    axis_sources.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
+    axis_sources.add_argument("--composite-hua-refine-factor", type=int, default=4)
+    axis_sources.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
+    axis_sources.add_argument("--dry-run", action="store_true")
+    axis_sources.set_defaults(func=build_representative_axis_sources)
     return parser
 
 

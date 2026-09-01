@@ -1,0 +1,7 @@
+{
+  "track_cache_path": "/root/autodl-fs/kuroshiou/result_boundary_monotonic_subgrid_1_24deg/result_coherent_only/representative_vortex_me_liutex/ep_track_cache/track_velocity_accumulators.npz",
+  "exists": false,
+  "usable": false,
+  "reason": "missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone",
+  "strict_bootstrap_policy": "Bootstrap confidence intervals are only physically valid when they are computed by resampling track-level velocity accumulators and recomputing EP fields."
+}

@@ -1,0 +1,3 @@
+polarity,median_abs_classic,median_abs_tilted,median_abs_curved,median_abs_tilted_minus_classic,median_abs_curved_minus_tilted,median_abs_curvature_sensitivity_upper
+anticyclonic,0.00020275887427090002,8.570976651906432e-05,8.570976651906432e-05,0.00011695035615570001,0.0,3.1045717404383795e-05
+cyclonic,0.0002886752394664,0.00014972987008675,0.00014972987008675,0.0001823814030723,0.0,1.39058114508171e-05
