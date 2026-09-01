@@ -1,0 +1,2 @@
+status,bootstrap_unit,reason
+not_computed,track,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone

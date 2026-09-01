@@ -1,0 +1,9 @@
+field,bootstrap_samples_requested,bootstrap_unit,ci_low,ci_high,status,reason
+F_n_classic,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+F_z_ordinary,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+F_z_tilted,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+F_z_tilt_correction,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+divF_classic,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+divF_tilted,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+divF_curved_tube_qg_approx,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
+pv_flux_proxy,20,track,,,not_computed,missing track-level velocity accumulator; strict track bootstrap cannot be computed from the final representative mean field alone
