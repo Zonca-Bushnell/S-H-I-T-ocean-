@@ -78,10 +78,46 @@ class AxisLine:
 
     def curvature_proxy_per_m(self) -> np.ndarray:
         depth = np.asarray(self.depth_m, dtype=float)
-        dx_dz, dy_dz = self.slopes_m_per_m()
-        d2x = np.gradient(dx_dz, depth, edge_order=1)
-        d2y = np.gradient(dy_dz, depth, edge_order=1)
-        return np.hypot(d2x, d2y)
+        if depth.size < 3:
+            return np.zeros_like(depth)
+        x_m = _moving_average(self.x_km * 1000.0, window=5)
+        y_m = _moving_average(self.y_km * 1000.0, window=5)
+        z_m = -depth
+        curve = np.stack([x_m, y_m, z_m], axis=1)
+        first = np.stack(
+            [
+                np.gradient(curve[:, 0], depth, edge_order=1),
+                np.gradient(curve[:, 1], depth, edge_order=1),
+                np.gradient(curve[:, 2], depth, edge_order=1),
+            ],
+            axis=1,
+        )
+        second = np.stack(
+            [
+                np.gradient(first[:, 0], depth, edge_order=1),
+                np.gradient(first[:, 1], depth, edge_order=1),
+                np.gradient(first[:, 2], depth, edge_order=1),
+            ],
+            axis=1,
+        )
+        numerator = np.linalg.norm(np.cross(first, second), axis=1)
+        denominator = np.linalg.norm(first, axis=1) ** 3
+        with np.errstate(divide="ignore", invalid="ignore"):
+            curvature = numerator / denominator
+        return np.where(np.isfinite(curvature), curvature, 0.0)
+
+
+def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if window <= 1 or values.size < 3:
+        return values
+    actual = min(window, values.size if values.size % 2 == 1 else values.size - 1)
+    if actual < 3:
+        return values
+    pad = actual // 2
+    padded = np.pad(values, pad, mode="edge")
+    kernel = np.ones(actual, dtype=float) / actual
+    return np.convolve(padded, kernel, mode="valid")
 
 
 @dataclass(frozen=True)

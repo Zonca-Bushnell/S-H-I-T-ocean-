@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .contracts import EPFluxConfig
+from .contracts import EPFluxConfig, RHO0
 from .fields import RepresentativeVortexDataset
 from .flux import EPFluxCalculator
 from .geometry import AxisLine
@@ -24,6 +24,26 @@ def _json_ready(value: object) -> object:
     return value
 
 
+def resolve_n2_profile_path(config: EPFluxConfig, requested: str | None) -> Path | None:
+    if requested in (None, "", "none"):
+        return None
+    if requested != "auto":
+        return Path(requested)
+    candidates = [
+        config.radial_seed_root
+        / "climatology"
+        / "cmems_doy_climatology_1993_2022_31d_sigma0_dz_profile.npz",
+        config.radial_seed_root / "N2" / "sigma0_dz_profile.npz",
+        config.me_liutex_root.parent / "N2" / "sigma0_dz_profile.npz",
+        config.me_liutex_root.parent.parent / "N2" / "sigma0_dz_profile.npz",
+        Path("/root/autodl-fs/kuroshiou/N2/sigma0_dz_profile.npz"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def load_n2_profile(path: Path | None, depth_m: np.ndarray, constant_n2: float) -> np.ndarray:
     if path is None:
         return np.full_like(depth_m, constant_n2, dtype=float)
@@ -31,10 +51,13 @@ def load_n2_profile(path: Path | None, depth_m: np.ndarray, constant_n2: float) 
         raise FileNotFoundError(path)
     data = np.load(path, allow_pickle=True)
     n2 = None
+    src_depth = None
     for key in ("N2", "n2", "n2_profile", "N2_profile"):
         if key in data:
             n2 = np.asarray(data[key], dtype=float)
             break
+    if n2 is None and "dsigma0_dz" in data:
+        n2 = 9.81 * np.asarray(data["dsigma0_dz"], dtype=float) / RHO0
     if n2 is None:
         raise KeyError(f"No N2 array found in {path}")
     if "depth" in data:
@@ -46,7 +69,7 @@ def load_n2_profile(path: Path | None, depth_m: np.ndarray, constant_n2: float) 
     return np.interp(depth_m, src_depth, n2)
 
 
-def build_smoke(config: EPFluxConfig, *, n2_profile_path: Path | None = None) -> dict[str, Path]:
+def build_smoke(config: EPFluxConfig, *, n2_profile: str | None = "auto") -> dict[str, Path]:
     config.validate_contract()
     dataset = RepresentativeVortexDataset.load(config.vortex_npz, config.radial_seed_root)
     axis_path = config.axis_source_path
@@ -60,6 +83,7 @@ def build_smoke(config: EPFluxConfig, *, n2_profile_path: Path | None = None) ->
     output_dir.mkdir(parents=True, exist_ok=True)
     all_profiles: list[pd.DataFrame] = []
     metric_rows: list[dict[str, object]] = []
+    n2_profile_path = resolve_n2_profile_path(config, n2_profile)
 
     for polarity in dataset.polarities:
         rep = dataset.slice(polarity, config.tau)
@@ -116,6 +140,7 @@ def compare_classic_and_curved(output_dir: Path) -> dict[str, Path]:
         classic = core["divF_classic"].to_numpy(float)
         tilted = core["divF_tilted"].to_numpy(float)
         curved = core["divF_curved_tube_qg_approx"].to_numpy(float)
+        sensitivity = core["divF_curvature_sensitivity_upper"].to_numpy(float)
         rows.append(
             {
                 "polarity": polarity,
@@ -124,6 +149,7 @@ def compare_classic_and_curved(output_dir: Path) -> dict[str, Path]:
                 "median_abs_curved": float(np.nanmedian(np.abs(curved))),
                 "median_abs_tilted_minus_classic": float(np.nanmedian(np.abs(tilted - classic))),
                 "median_abs_curved_minus_tilted": float(np.nanmedian(np.abs(curved - tilted))),
+                "median_abs_curvature_sensitivity_upper": float(np.nanmedian(np.abs(sensitivity))),
             }
         )
     table = pd.DataFrame(rows)
@@ -208,10 +234,12 @@ def _summary_markdown(config: EPFluxConfig, metrics: pd.DataFrame) -> str:
         "",
         "## 解释",
         "- `F_z_tilt_correction` 衡量中心轴倾斜导致的垂向导数修正。",
-        "- `divF_curved_tube_qg_approx` 在 tilted EP 的基础上加入曲率一阶代理项。",
+        "- `divF_curved_tube_qg_approx` 是一阶截面平均下的保守 curved-tube resolved 项；当前不把曲率上界项直接加进主散度。",
+        "- `divF_curvature_sensitivity_upper` 是 \\(\\kappa F_n\\) 量级敏感性上界，用来提示曲率可能重要，但不能单独作为闭合结论。",
         "- `pv_flux_proxy` 来自代表流函数的 QG-like PV 代理，用于闭合关系的回归检查。",
         "",
         "## 注意",
         "- 第一版 curved-tube 中的张量几何和连接项仍是 QG 近似框架，完整 \\(T^{ia}\\) 需要后续理论实现。",
+        "- 若 sensitivity 远大于 resolved divergence，应解释为“曲率项需要完整二维截面张量闭合”，而不是直接判定 curved-tube forcing 极大。",
     ]
     return "\n".join(lines) + "\n"

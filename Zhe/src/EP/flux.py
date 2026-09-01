@@ -86,7 +86,10 @@ class EPFluxCalculator:
         div_classic = self._divergence(fn_classic, fz_ordinary, radial, depth)
         div_tilted = self._divergence(fn_classic, fz_tilted, radial, depth)
         frame = build_bishop_frame(self.axis)
-        curved_div = div_tilted + frame.curvature_proxy_per_m[:, None] * fn_classic
+        curvature_per_m = frame.curvature_proxy_per_m[:, None]
+        curvature_radius_product = curvature_per_m * radial[None, :]
+        curved_div = div_tilted
+        curvature_sensitivity_upper = curvature_per_m * fn_classic
 
         pv_flux = self._pv_flux_proxy(psi, ur_p, radial, theta, depth)
         profiles = self._profiles_table(
@@ -97,6 +100,8 @@ class EPFluxCalculator:
             div_classic,
             div_tilted,
             curved_div,
+            curvature_sensitivity_upper,
+            curvature_radius_product,
             pv_flux,
         )
         return EPFluxResult(profiles=profiles, metrics=self._metrics(profiles))
@@ -169,6 +174,8 @@ class EPFluxCalculator:
             "divF_classic",
             "divF_tilted",
             "divF_curved_tube_qg_approx",
+            "divF_curvature_sensitivity_upper",
+            "curvature_radius_product",
             "pv_flux_proxy",
         ]
         rows: list[dict[str, float | str]] = []
@@ -207,6 +214,11 @@ class EPFluxCalculator:
         mask = np.isfinite(div) & np.isfinite(pv)
         out["divF_pv_flux_corr_core"] = float(np.corrcoef(div[mask], pv[mask])[0, 1]) if mask.sum() > 2 else float("nan")
         curved = core["divF_curved_tube_qg_approx"].to_numpy(float)
+        sensitivity = core["divF_curvature_sensitivity_upper"].to_numpy(float)
         denom_div = np.nanmedian(np.abs(div)) + 1e-30
         out["median_abs_curved_minus_tilted_over_tilted"] = float(np.nanmedian(np.abs(curved - div)) / denom_div)
+        out["median_abs_curvature_sensitivity_upper_over_tilted"] = float(
+            np.nanmedian(np.abs(sensitivity)) / denom_div
+        )
+        out["median_curvature_radius_product"] = float(np.nanmedian(np.abs(core["curvature_radius_product"])))
         return out

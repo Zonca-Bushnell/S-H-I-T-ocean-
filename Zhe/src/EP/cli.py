@@ -51,7 +51,7 @@ def cmd_build_smoke(args: argparse.Namespace) -> int:
         return 0
     from .diagnostics import build_smoke
 
-    outputs = build_smoke(config, n2_profile_path=Path(args.n2_profile) if args.n2_profile else None)
+    outputs = build_smoke(config, n2_profile=args.n2_profile)
     print("EP smoke outputs:")
     for key, path in outputs.items():
         print(f"{key}: {path}")
@@ -116,7 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--tau", type=float, default=0.5)
     smoke.add_argument("--reference-lat", type=float, default=30.0)
     smoke.add_argument("--constant-n2", type=float, default=2.0e-5)
-    smoke.add_argument("--n2-profile", default=None)
+    smoke.add_argument(
+        "--n2-profile",
+        default="auto",
+        help="Path to an N2 npz profile, 'auto' to search common result paths, or 'none' for constant N2.",
+    )
     smoke.add_argument("--shape-label", default="coherent-only")
     smoke.add_argument("--run-label", default="subgrid_1_24deg")
     smoke.add_argument("--dry-run", action="store_true")
