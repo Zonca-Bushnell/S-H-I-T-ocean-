@@ -1,0 +1,22 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+.venv/
+venv/
+
+# Local scratch and generated previews
+tmp/
+
+# Large local outputs and downloaded result bundles
+outputs/
+*.tar.gz
+
+# EP validation generated result folders.
+# Keep curated EP-FLUX reports, theory PDFs, figures, and tools trackable.
+EP-FLUX/full_lifecycle_validation/
+EP-FLUX/smoke_outputs/
