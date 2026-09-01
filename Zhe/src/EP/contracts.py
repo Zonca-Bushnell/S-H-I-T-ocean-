@@ -18,6 +18,7 @@ DEFAULT_OUTPUT_ROOT = Path("G:/EDDY_detection/S-H-I-T-ocean-/EP-FLUX/smoke_outpu
 AXIS_SOURCES = ("radial_seed", "composite_hua_refined")
 ORIENTATIONS = ("turned", "unturned")
 BUOYANCY_SOURCES = ("thermal_wind", "streamfunction_dz")
+CURVED_TUBE_MODES = ("scale_audit", "jacobian_only", "jacobian_christoffel")
 
 
 def tau_tag(tau: float) -> str:
@@ -64,6 +65,8 @@ class EPFluxConfig:
     reference_lat: float = DEFAULT_REFERENCE_LAT
     constant_n2: float = DEFAULT_CONSTANT_N2
     buoyancy_source: str = "thermal_wind"
+    curved_tube_mode: str = "scale_audit"
+    large_curvature_threshold: float = 1.0
     shape_label: str = "coherent-only"
     run_label: str = "subgrid_1_24deg"
 
@@ -76,6 +79,10 @@ class EPFluxConfig:
             raise ValueError("constant_n2 must be positive")
         if self.buoyancy_source not in BUOYANCY_SOURCES:
             raise ValueError(f"buoyancy_source must be one of {BUOYANCY_SOURCES}")
+        if self.curved_tube_mode not in CURVED_TUBE_MODES:
+            raise ValueError(f"curved_tube_mode must be one of {CURVED_TUBE_MODES}")
+        if self.large_curvature_threshold <= 0:
+            raise ValueError("large_curvature_threshold must be positive")
 
     @property
     def vortex_npz(self) -> Path:
@@ -108,6 +115,8 @@ class EPFluxConfig:
             "f0": self.f0,
             "constant_n2": self.constant_n2,
             "buoyancy_source": self.buoyancy_source,
+            "curved_tube_mode": self.curved_tube_mode,
+            "large_curvature_threshold": self.large_curvature_threshold,
             "shape_label": self.shape_label,
             "run_label": self.run_label,
         }

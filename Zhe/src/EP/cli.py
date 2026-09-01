@@ -6,6 +6,7 @@ from pathlib import Path
 from .contracts import (
     AXIS_SOURCES,
     BUOYANCY_SOURCES,
+    CURVED_TUBE_MODES,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_RESULT_ROOT,
     DEFAULT_SHAPE_OUTPUT_NAME,
@@ -37,6 +38,8 @@ def _config_from_args(args: argparse.Namespace) -> EPFluxConfig:
         reference_lat=args.reference_lat,
         constant_n2=args.constant_n2,
         buoyancy_source=args.buoyancy_source,
+        curved_tube_mode=args.curved_tube_mode,
+        large_curvature_threshold=args.large_curvature_threshold,
         shape_label=args.shape_label,
         run_label=args.run_label,
     )
@@ -51,6 +54,8 @@ def cmd_build_smoke(args: argparse.Namespace) -> int:
             print(f"{key}: {value}")
         print("mode: classic EP + tilted EP + curved-tube EP QG approximation")
         print(f"buoyancy_source: {config.buoyancy_source}")
+        print(f"curved_tube_mode: {config.curved_tube_mode}")
+        print(f"large_curvature_threshold: {config.large_curvature_threshold}")
         return 0
     from .diagnostics import build_smoke
 
@@ -93,8 +98,8 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
                 "  uses ordinary vertical derivative plus an explicit axis-tilt correction term.",
                 "",
                 "Curved-tube EP first version:",
-                "  exposes a local-axis tensor/divergence framework and currently uses a QG first-order",
-                "  curvature proxy. It is a smoke implementation, not the final full tensor theory.",
+                "  exposes metric/Jacobian/Christoffel audit terms on a local-axis framework.",
+                "  Christoffel remains a QG first-order approximation, not the final full tensor theory.",
                 "",
                 "Boundaries:",
                 "  src.EP does not import src.utils.ep_flux as an implementation dependency.",
@@ -121,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--reference-lat", type=float, default=30.0)
     smoke.add_argument("--constant-n2", type=float, default=2.0e-5)
     smoke.add_argument("--buoyancy-source", choices=BUOYANCY_SOURCES, default="thermal_wind")
+    smoke.add_argument("--curved-tube-mode", choices=CURVED_TUBE_MODES, default="scale_audit")
+    smoke.add_argument(
+        "--large-curvature-threshold",
+        type=float,
+        default=1.0,
+        help="Flag metric cells as large-curvature when kappa*radius exceeds this value.",
+    )
     smoke.add_argument(
         "--n2-profile",
         default="auto",

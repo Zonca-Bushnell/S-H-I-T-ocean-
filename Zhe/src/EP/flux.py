@@ -8,6 +8,7 @@ import pandas as pd
 from .contracts import RHO0
 from .fields import RepresentativeSlice
 from .geometry import AxisLine, build_bishop_frame
+from .metric import CurvedTubeMetric, jacobian_weighted_divergence
 
 
 def _azimuthal_anomaly(values: np.ndarray) -> np.ndarray:
@@ -58,6 +59,8 @@ class EPFluxCalculator:
         f0: float,
         n2: np.ndarray | float,
         buoyancy_source: str = "thermal_wind",
+        curved_tube_mode: str = "scale_audit",
+        large_curvature_threshold: float = 1.0,
     ) -> None:
         self.rep = representative
         self.axis = axis.interpolate_to(representative.depth_m)
@@ -65,7 +68,11 @@ class EPFluxCalculator:
         self.n2 = self._coerce_n2(n2)
         if buoyancy_source not in ("thermal_wind", "streamfunction_dz"):
             raise ValueError("buoyancy_source must be thermal_wind or streamfunction_dz")
+        if curved_tube_mode not in ("scale_audit", "jacobian_only", "jacobian_christoffel"):
+            raise ValueError("curved_tube_mode must be scale_audit, jacobian_only, or jacobian_christoffel")
         self.buoyancy_source = buoyancy_source
+        self.curved_tube_mode = curved_tube_mode
+        self.large_curvature_threshold = float(large_curvature_threshold)
 
     def compute(self) -> EPFluxResult:
         rep = self.rep
@@ -97,10 +104,33 @@ class EPFluxCalculator:
         div_classic = self._divergence(fn_classic, fz_ordinary, radial, depth)
         div_tilted = self._divergence(fn_classic, fz_tilted, radial, depth)
         frame = build_bishop_frame(self.axis)
-        curvature_per_m = frame.curvature_proxy_per_m[:, None]
-        curvature_radius_product = curvature_per_m * radial[None, :]
-        curved_div = div_tilted
-        curvature_sensitivity_upper = curvature_per_m * fn_classic
+        metric = CurvedTubeMetric.from_axis(
+            self.axis,
+            radial,
+            theta,
+            large_curvature_threshold=self.large_curvature_threshold,
+        )
+        support_mask = np.isfinite(rep.speed)
+        jacobian_mean = metric.jacobian_mean(support_mask)
+        jacobian_min = metric.jacobian_min(support_mask)
+        jacobian_max = metric.jacobian_max(support_mask)
+        metric_valid_fraction = metric.valid_fraction(support_mask)
+        epsilon_tilt = metric.epsilon_tilt[:, None] * np.ones_like(fn_classic)
+        epsilon_curvature = metric.epsilon_curvature
+        invalid_or_large = metric_valid_fraction < 0.999
+
+        div_jacobian = jacobian_weighted_divergence(fn_classic, fz_tilted, radial, depth, jacobian_mean)
+        div_jacobian_correction = div_jacobian - div_tilted
+        curvature_per_m = metric.kappa_magnitude_per_m[:, None]
+        div_christoffel = curvature_per_m * fn_classic
+        div_curved_total = div_jacobian + div_christoffel
+        scale_upper_bound = frame.curvature_proxy_per_m[:, None] * fn_classic
+        if self.curved_tube_mode == "scale_audit":
+            curved_div = div_tilted
+        elif self.curved_tube_mode == "jacobian_only":
+            curved_div = div_jacobian
+        else:
+            curved_div = div_curved_total
 
         pv_flux = self._pv_flux_proxy(psi, ur_p, radial, theta, depth)
         profiles = self._profiles_table(
@@ -110,9 +140,19 @@ class EPFluxCalculator:
             fz_tilt_correction,
             div_classic,
             div_tilted,
+            div_jacobian,
+            div_jacobian_correction,
+            div_christoffel,
+            div_curved_total,
             curved_div,
-            curvature_sensitivity_upper,
-            curvature_radius_product,
+            scale_upper_bound,
+            epsilon_tilt,
+            epsilon_curvature,
+            jacobian_mean,
+            jacobian_min,
+            jacobian_max,
+            metric_valid_fraction,
+            invalid_or_large,
             pv_flux,
         )
         return EPFluxResult(profiles=profiles, metrics=self._metrics(profiles))
@@ -230,9 +270,19 @@ class EPFluxCalculator:
             "F_z_tilt_correction",
             "divF_classic",
             "divF_tilted",
+            "divF_jacobian",
+            "divF_jacobian_correction",
+            "divF_christoffel_qg_approx",
+            "divF_curved_total",
             "divF_curved_tube_qg_approx",
-            "divF_curvature_sensitivity_upper",
-            "curvature_radius_product",
+            "divF_scale_upper_bound",
+            "epsilon_tilt",
+            "epsilon_curvature",
+            "jacobian_mean",
+            "jacobian_min",
+            "jacobian_max",
+            "metric_valid_fraction",
+            "metric_invalid_or_large_curvature",
             "pv_flux_proxy",
         ]
         rows: list[dict[str, float | str]] = []
@@ -248,9 +298,14 @@ class EPFluxCalculator:
                     "axis_y_km": float(self.axis.y_km[iz]),
                     "axis_tilt_km": float(self.axis.tilt_km[iz]),
                     "buoyancy_source": self.buoyancy_source,
+                    "curved_tube_mode": self.curved_tube_mode,
                 }
                 for name, values in zip(names, arrays):
-                    row[name] = float(values[iz, ir])
+                    value = values[iz, ir]
+                    if isinstance(value, (bool, np.bool_)):
+                        row[name] = bool(value)
+                    else:
+                        row[name] = float(value)
                 rows.append(row)
         return pd.DataFrame(rows)
 
@@ -272,11 +327,24 @@ class EPFluxCalculator:
         mask = np.isfinite(div) & np.isfinite(pv)
         out["divF_pv_flux_corr_core"] = float(np.corrcoef(div[mask], pv[mask])[0, 1]) if mask.sum() > 2 else float("nan")
         curved = core["divF_curved_tube_qg_approx"].to_numpy(float)
-        sensitivity = core["divF_curvature_sensitivity_upper"].to_numpy(float)
+        curved_total = core["divF_curved_total"].to_numpy(float)
+        jacobian_correction = core["divF_jacobian_correction"].to_numpy(float)
+        christoffel = core["divF_christoffel_qg_approx"].to_numpy(float)
+        scale_upper = core["divF_scale_upper_bound"].to_numpy(float)
         denom_div = np.nanmedian(np.abs(div)) + 1e-30
         out["median_abs_curved_minus_tilted_over_tilted"] = float(np.nanmedian(np.abs(curved - div)) / denom_div)
-        out["median_abs_curvature_sensitivity_upper_over_tilted"] = float(
-            np.nanmedian(np.abs(sensitivity)) / denom_div
+        out["median_abs_curved_total_minus_tilted_over_tilted"] = float(
+            np.nanmedian(np.abs(curved_total - div)) / denom_div
         )
-        out["median_curvature_radius_product"] = float(np.nanmedian(np.abs(core["curvature_radius_product"])))
+        out["median_abs_jacobian_correction_over_tilted"] = float(
+            np.nanmedian(np.abs(jacobian_correction)) / denom_div
+        )
+        out["median_abs_christoffel_over_tilted"] = float(np.nanmedian(np.abs(christoffel)) / denom_div)
+        out["median_abs_scale_upper_bound_over_tilted"] = float(np.nanmedian(np.abs(scale_upper)) / denom_div)
+        out["median_epsilon_tilt"] = float(np.nanmedian(np.abs(core["epsilon_tilt"])))
+        out["median_epsilon_curvature"] = float(np.nanmedian(np.abs(core["epsilon_curvature"])))
+        out["p90_epsilon_curvature"] = float(np.nanpercentile(np.abs(core["epsilon_curvature"]), 90))
+        out["metric_valid_fraction_core"] = float(np.nanmean(core["metric_valid_fraction"]))
+        out["jacobian_min_core"] = float(np.nanmin(core["jacobian_min"]))
+        out["jacobian_max_core"] = float(np.nanmax(core["jacobian_max"]))
         return out
