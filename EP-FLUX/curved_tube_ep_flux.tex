@@ -39,6 +39,19 @@
 \begin{document}
 \maketitle
 
+\begin{tcolorbox}[colback=red!3,colframe=red!65!black,title={适用条件警告},fonttitle=\bfseries]
+本文采用的是小曲率细涡管近似，核心几何量为
+\[
+  J=1-\kappa_\alpha x^\alpha .
+\]
+只有当 $\kappa r\ll1$ 且 $J>0$ 时，Bishop-frame 曲管坐标才可作为局地单射映射，
+其 Jacobian/Christoffel 项才可进入近似闭合。当前全生命周期验证显示
+$\epsilon_\kappa=\kappa r$ 的组合中位数约为 $10$ 到 $35$，且
+metric valid fraction 的中位数为 $0$；因此本文的曲管项在这些样本中只能作为
+几何风险审计，不能作为大曲率涡旋的闭合物理 forcing。大曲率版本应改用
+\texttt{large\_curvature\_material\_volume\_ep\_flux.tex} 中的 Cartesian 材料体框架。
+\end{tcolorbox}
+
 本文档是 \texttt{E-P\_flux理论整理.tex} 的续篇，目标是把传统基于纬向平均和经圈平面
 $(y,z)$ 的 E-P flux 思想，推广到三维中尺度涡的弯曲材料涡管。这里的 ``涡旋速度''
 不再指相对于纬向平均的扰动，而是指相对于材料涡管截面平均的局地扰动。
