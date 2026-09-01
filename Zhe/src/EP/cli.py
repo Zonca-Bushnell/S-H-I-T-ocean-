@@ -102,6 +102,11 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
                 "  exposes metric/Jacobian/Christoffel audit terms on a local-axis framework.",
                 "  Christoffel remains a QG first-order approximation, not the final full tensor theory.",
                 "",
+                "Material-volume EP validation:",
+                "  uses a Cartesian coherent-volume mask on the representative vortex field.",
+                "  It reports R_ij, B_i, P_i, centroid drift, and boundary-leakage proxies.",
+                "  It is the large-curvature validation route; it does not require thin-tube metric validity.",
+                "",
                 "Boundaries:",
                 "  src.EP does not import src.utils.ep_flux as an implementation dependency.",
                 "  src.EP does not overwrite representative vortex npz/catalog files.",
@@ -119,6 +124,19 @@ def cmd_run_lifecycle_validation(args: argparse.Namespace) -> int:
     if args.dry_run:
         return 0
     print("EP lifecycle validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
+def cmd_run_material_volume_validation(args: argparse.Namespace) -> int:
+    from .material_volume import request_from_args, run_material_volume_validation
+
+    request = request_from_args(args)
+    outputs = run_material_volume_validation(request)
+    if args.dry_run:
+        return 0
+    print("Material-volume EP validation outputs:")
     for key, path in outputs.items():
         print(f"{key}: {path}")
     return 0
@@ -188,6 +206,35 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--skip-missing", action="store_true")
     lifecycle.add_argument("--dry-run", action="store_true")
     lifecycle.set_defaults(func=cmd_run_lifecycle_validation)
+
+    material = sub.add_parser(
+        "run-material-volume-validation",
+        help="Run Cartesian material-volume EP diagnostics on representative vortices",
+    )
+    material.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    material.add_argument(
+        "--output-root",
+        default=str(DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"),
+    )
+    material.add_argument("--shapes", default="coherent,upright_like")
+    material.add_argument("--axis-sources", default="radial_seed")
+    material.add_argument("--orientations", default="turned")
+    material.add_argument("--buoyancy-sources", default="thermal_wind")
+    material.add_argument(
+        "--tau-values",
+        default="",
+        help="Comma-separated tau values. Empty means all tau nodes from the representative npz.",
+    )
+    material.add_argument("--reference-lat", type=float, default=30.0)
+    material.add_argument("--constant-n2", type=float, default=2.0e-5)
+    material.add_argument("--n2-profile", default="auto")
+    material.add_argument("--core-radius-over-R", type=float, default=1.5)
+    material.add_argument("--speed-core-quantile", type=float, default=0.45)
+    material.add_argument("--pv-core-quantile", type=float, default=0.70)
+    material.add_argument("--min-mask-fraction", type=float, default=0.01)
+    material.add_argument("--skip-missing", action="store_true")
+    material.add_argument("--dry-run", action="store_true")
+    material.set_defaults(func=cmd_run_material_volume_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
