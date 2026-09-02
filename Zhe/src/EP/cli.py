@@ -142,6 +142,53 @@ def cmd_run_material_volume_validation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_material_boundary_validation(args: argparse.Namespace) -> int:
+    from .material_volume import request_from_args, run_material_volume_validation
+
+    request = request_from_args(args)
+    outputs = run_material_volume_validation(request)
+    if args.dry_run:
+        return 0
+    print("Material-volume dynamic-boundary validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
+def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
+    from .dynamic_boundary import BOUNDARY_MODES
+
+    parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--output-root", default=output_root)
+    parser.add_argument("--shapes", default="coherent,upright_like")
+    parser.add_argument("--axis-sources", default="radial_seed")
+    parser.add_argument("--orientations", default="turned")
+    parser.add_argument("--buoyancy-sources", default="thermal_wind")
+    parser.add_argument(
+        "--tau-values",
+        default="",
+        help="Comma-separated tau values. Empty means all tau nodes from the representative npz.",
+    )
+    parser.add_argument("--reference-lat", type=float, default=30.0)
+    parser.add_argument("--constant-n2", type=float, default=2.0e-5)
+    parser.add_argument("--n2-profile", default="auto")
+    parser.add_argument("--core-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--speed-core-quantile", type=float, default=0.45)
+    parser.add_argument("--pv-core-quantile", type=float, default=0.70)
+    parser.add_argument("--min-mask-fraction", type=float, default=0.01)
+    parser.add_argument("--boundary-mode", choices=BOUNDARY_MODES, default=boundary_mode)
+    parser.add_argument("--active-contour-iterations", type=int, default=12)
+    parser.add_argument("--leakage-weight", type=float, default=1.0)
+    parser.add_argument("--smoothness-weight", type=float, default=0.08)
+    parser.add_argument("--containment-weight", type=float, default=0.35)
+    parser.add_argument("--area-weight", type=float, default=0.12)
+    parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--min-area-fraction", type=float, default=0.15)
+    parser.add_argument("--max-area-fraction", type=float, default=0.65)
+    parser.add_argument("--skip-missing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Object-oriented EP flux diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -211,30 +258,23 @@ def build_parser() -> argparse.ArgumentParser:
         "run-material-volume-validation",
         help="Run Cartesian material-volume EP diagnostics on representative vortices",
     )
-    material.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
-    material.add_argument(
-        "--output-root",
-        default=str(DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"),
+    _add_material_arguments(
+        material,
+        output_root=str(DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"),
+        boundary_mode="threshold",
     )
-    material.add_argument("--shapes", default="coherent,upright_like")
-    material.add_argument("--axis-sources", default="radial_seed")
-    material.add_argument("--orientations", default="turned")
-    material.add_argument("--buoyancy-sources", default="thermal_wind")
-    material.add_argument(
-        "--tau-values",
-        default="",
-        help="Comma-separated tau values. Empty means all tau nodes from the representative npz.",
-    )
-    material.add_argument("--reference-lat", type=float, default=30.0)
-    material.add_argument("--constant-n2", type=float, default=2.0e-5)
-    material.add_argument("--n2-profile", default="auto")
-    material.add_argument("--core-radius-over-R", type=float, default=1.5)
-    material.add_argument("--speed-core-quantile", type=float, default=0.45)
-    material.add_argument("--pv-core-quantile", type=float, default=0.70)
-    material.add_argument("--min-mask-fraction", type=float, default=0.01)
-    material.add_argument("--skip-missing", action="store_true")
-    material.add_argument("--dry-run", action="store_true")
     material.set_defaults(func=cmd_run_material_volume_validation)
+
+    dynamic = sub.add_parser(
+        "run-material-boundary-validation",
+        help="Run material-volume EP diagnostics with low-leakage dynamic boundary optimization",
+    )
+    _add_material_arguments(
+        dynamic,
+        output_root=str(DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_validation"),
+        boundary_mode="active_contour",
+    )
+    dynamic.set_defaults(func=cmd_run_material_boundary_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)

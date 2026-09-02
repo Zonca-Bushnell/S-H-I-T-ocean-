@@ -21,8 +21,10 @@ from .contracts import (
     default_radial_seed_root,
     shape_output_name,
 )
+from .dynamic_boundary import BOUNDARY_MODES, DynamicBoundaryConfig, boundary_flux_metrics, optimize_boundary
 
 DEFAULT_MATERIAL_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"
+DEFAULT_DYNAMIC_BOUNDARY_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_validation"
 
 
 def _require_pandas() -> None:
@@ -67,6 +69,15 @@ class MaterialVolumeRequest:
     speed_core_quantile: float = 0.45
     pv_core_quantile: float = 0.70
     min_mask_fraction: float = 0.01
+    boundary_mode: str = "threshold"
+    active_contour_iterations: int = 12
+    leakage_weight: float = 1.0
+    smoothness_weight: float = 0.08
+    containment_weight: float = 0.35
+    area_weight: float = 0.12
+    min_core_retention: float = 0.75
+    min_area_fraction: float = 0.15
+    max_area_fraction: float = 0.65
     skip_missing: bool = False
     dry_run: bool = False
 
@@ -286,8 +297,9 @@ def _layer_diagnostics(
     speed_core_quantile: float,
     pv_core_quantile: float,
     min_mask_fraction: float,
-) -> dict[str, object]:
-    mask, meta = _layer_material_mask(
+    boundary_config: DynamicBoundaryConfig,
+) -> tuple[dict[str, object], np.ndarray]:
+    initial_mask, meta = _layer_material_mask(
         rep=rep,
         axis=axis,
         q_proxy=q_proxy,
@@ -298,6 +310,36 @@ def _layer_diagnostics(
         speed_core_quantile=speed_core_quantile,
         pv_core_quantile=pv_core_quantile,
         min_mask_fraction=min_mask_fraction,
+    )
+    radial_over_R = rep.radial_m[:, None] / rep.radius_m
+    finite = np.isfinite(rep.speed[depth_index]) & np.isfinite(q_proxy[depth_index])
+    core_domain = finite & (radial_over_R <= core_radius_over_R)
+    speed_threshold = float(meta.get("speed_threshold_ms", np.nan))
+    pv_threshold = float(meta.get("pv_abs_threshold", np.nan))
+    speed_core = core_domain & np.isfinite(rep.speed[depth_index])
+    pv_core = core_domain & np.isfinite(q_proxy[depth_index])
+    if np.isfinite(speed_threshold):
+        speed_core = speed_core & (rep.speed[depth_index] <= speed_threshold)
+    if np.isfinite(pv_threshold):
+        pv_core = pv_core & (np.abs(q_proxy[depth_index]) >= pv_threshold)
+    candidate = core_domain & (speed_core | pv_core)
+    seed = _seed_index(axis, depth_index, x_km, y_km, candidate)
+    mean_u_initial = _weighted_mean(rep.u[depth_index], initial_mask)
+    mean_v_initial = _weighted_mean(rep.v[depth_index], initial_mask)
+    mask, boundary_meta = optimize_boundary(
+        initial_mask=initial_mask,
+        core_domain=core_domain,
+        seed=seed,
+        u=rep.u[depth_index],
+        v=rep.v[depth_index],
+        q_proxy=q_proxy[depth_index],
+        speed_core=speed_core,
+        pv_core=pv_core,
+        x_km=x_km,
+        y_km=y_km,
+        mean_u=mean_u_initial,
+        mean_v=mean_v_initial,
+        config=boundary_config,
     )
     edge = _edge_mask(mask)
     u = rep.u[depth_index]
@@ -324,6 +366,9 @@ def _layer_diagnostics(
     py_field = vp * qp
     gx_field = -_divergence_xy(rxx_field, rxy_field, rep.radial_m, rep.theta_rad)
     gy_field = -_divergence_xy(rxy_field, ryy_field, rep.radial_m, rep.theta_rad)
+    px_mean = _weighted_mean(px_field, mask)
+    py_mean = _weighted_mean(py_field, mask)
+    pv_flux_magnitude = float(np.hypot(px_mean, py_mean))
 
     pv_weight = np.abs(q)
     weak_weight = 1.0 / (speed + np.nanmedian(speed[mask]) + 1e-12)
@@ -339,6 +384,33 @@ def _layer_diagnostics(
     ny = np.divide(edge_y, edge_norm, out=np.zeros_like(edge_y), where=edge_norm > 0)
     boundary_normal_velocity = (u - mean_u) * nx + (v - mean_v) * ny
 
+    flux_meta = boundary_flux_metrics(
+        mask=mask,
+        u=u,
+        v=v,
+        buoyancy=b,
+        q_proxy=q,
+        theta_prime=b,
+        x_km=x_km,
+        y_km=y_km,
+        mean_u=mean_u,
+        mean_v=mean_v,
+        internal_flux_scale=pv_flux_magnitude,
+    )
+    initial_flux_meta = boundary_flux_metrics(
+        mask=initial_mask,
+        u=u,
+        v=v,
+        buoyancy=b,
+        q_proxy=q,
+        theta_prime=b,
+        x_km=x_km,
+        y_km=y_km,
+        mean_u=mean_u_initial,
+        mean_v=mean_v_initial,
+        internal_flux_scale=pv_flux_magnitude,
+    )
+
     row = {
         "depth_m": float(rep.depth_m[depth_index]),
         "axis_x_km": float(axis.x_km[depth_index]),
@@ -347,6 +419,8 @@ def _layer_diagnostics(
         "mask_fraction": float(np.count_nonzero(mask) / max(1, mask.size)),
         "mask_core_fraction": float(np.count_nonzero(mask) / max(1, int(meta.get("core_domain_cell_count", 1)))),
         "edge_cell_count": int(np.count_nonzero(edge)),
+        "initial_mask_fraction": float(np.count_nonzero(initial_mask) / max(1, initial_mask.size)),
+        "initial_edge_cell_count": int(np.count_nonzero(_edge_mask(initial_mask))),
         "mean_u_ms": mean_u,
         "mean_v_ms": mean_v,
         "mean_speed_ms": _weighted_mean(speed, mask),
@@ -357,12 +431,12 @@ def _layer_diagnostics(
         "R_yy": _weighted_mean(ryy_field, mask),
         "B_x": _weighted_mean(bx_field, mask),
         "B_y": _weighted_mean(by_field, mask),
-        "P_x": _weighted_mean(px_field, mask),
-        "P_y": _weighted_mean(py_field, mask),
+        "P_x": px_mean,
+        "P_y": py_mean,
         "G_x_proxy": _weighted_mean(gx_field, mask),
         "G_y_proxy": _weighted_mean(gy_field, mask),
         "G_magnitude_proxy": float(np.hypot(_weighted_mean(gx_field, mask), _weighted_mean(gy_field, mask))),
-        "pv_flux_magnitude": float(np.hypot(_weighted_mean(px_field, mask), _weighted_mean(py_field, mask))),
+        "pv_flux_magnitude": pv_flux_magnitude,
         "pv_centroid_x_km": pv_centroid_x,
         "pv_centroid_y_km": pv_centroid_y,
         "pv_centroid_distance_from_axis_km": float(np.hypot(pv_centroid_x - axis.x_km[depth_index], pv_centroid_y - axis.y_km[depth_index])),
@@ -371,10 +445,19 @@ def _layer_diagnostics(
         "weak_speed_centroid_distance_from_axis_km": float(np.hypot(weak_centroid_x - axis.x_km[depth_index], weak_centroid_y - axis.y_km[depth_index])),
         "boundary_leakage_proxy_mean_abs_ms": _weighted_mean(np.abs(boundary_normal_velocity), edge),
         "boundary_leakage_proxy_signed_ms": _weighted_mean(boundary_normal_velocity, edge),
+        "initial_leakage_mean_abs_ms": initial_flux_meta["leakage_mean_abs_ms"],
+        "leakage_reduction_fraction": (
+            (initial_flux_meta["leakage_mean_abs_ms"] - flux_meta["leakage_mean_abs_ms"])
+            / (abs(initial_flux_meta["leakage_mean_abs_ms"]) + 1e-12)
+            if np.isfinite(initial_flux_meta["leakage_mean_abs_ms"]) and np.isfinite(flux_meta["leakage_mean_abs_ms"])
+            else np.nan
+        ),
         "psi_volume_mean": _weighted_mean(psi[depth_index], mask),
         **meta,
+        **boundary_meta,
+        **flux_meta,
     }
-    return row
+    return row, mask
 
 
 def _compute_one_slice(
@@ -396,10 +479,21 @@ def _compute_one_slice(
     else:
         raise ValueError(f"Unsupported buoyancy source: {buoyancy_source}")
     x_km, y_km = rep.mesh_xy_km
+    boundary_config = DynamicBoundaryConfig(
+        mode=request.boundary_mode,
+        iterations=request.active_contour_iterations,
+        leakage_weight=request.leakage_weight,
+        smoothness_weight=request.smoothness_weight,
+        containment_weight=request.containment_weight,
+        area_weight=request.area_weight,
+        min_core_retention=request.min_core_retention,
+        min_area_fraction=request.min_area_fraction,
+        max_area_fraction=request.max_area_fraction,
+    )
     rows = []
     masks = []
     for iz in range(rep.depth_m.size):
-        row = _layer_diagnostics(
+        row, mask = _layer_diagnostics(
             rep=rep,
             axis=axis,
             q_proxy=q_proxy,
@@ -412,20 +506,9 @@ def _compute_one_slice(
             speed_core_quantile=request.speed_core_quantile,
             pv_core_quantile=request.pv_core_quantile,
             min_mask_fraction=request.min_mask_fraction,
+            boundary_config=boundary_config,
         )
         rows.append(row)
-        mask, _ = _layer_material_mask(
-            rep=rep,
-            axis=axis,
-            q_proxy=q_proxy,
-            depth_index=iz,
-            x_km=x_km,
-            y_km=y_km,
-            core_radius_over_R=request.core_radius_over_R,
-            speed_core_quantile=request.speed_core_quantile,
-            pv_core_quantile=request.pv_core_quantile,
-            min_mask_fraction=request.min_mask_fraction,
-        )
         masks.append(mask)
     return pd.DataFrame(rows), {"psi": psi, "q_proxy": q_proxy, "buoyancy": buoyancy, "mask": np.asarray(masks)}
 
@@ -437,6 +520,17 @@ def _combo_output(root: Path, shape: str, axis_source: str, orientation: str, bu
 def _summary_table(profiles: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for polarity, sub in profiles.groupby("polarity", sort=True):
+        leakage = sub["leakage_mean_abs_ms"] if "leakage_mean_abs_ms" in sub else sub["boundary_leakage_proxy_mean_abs_ms"]
+        reduction = sub["leakage_reduction_fraction"] if "leakage_reduction_fraction" in sub else np.nan
+        boundary_ratio = sub["boundary_flux_over_internal_flux"] if "boundary_flux_over_internal_flux" in sub else np.nan
+        weak_retention = sub["weak_core_retention"] if "weak_core_retention" in sub else np.nan
+        pv_retention = sub["pv_core_retention"] if "pv_core_retention" in sub else np.nan
+        mask_instability = float(np.nanstd(sub["mask_core_fraction"].to_numpy(float)))
+        materiality_score = float(
+            np.nanmedian(leakage.to_numpy(float))
+            + 0.5 * np.nanmedian(boundary_ratio.to_numpy(float))
+            + 0.25 * mask_instability
+        )
         rows.append(
             {
                 "polarity": polarity,
@@ -444,7 +538,13 @@ def _summary_table(profiles: pd.DataFrame) -> pd.DataFrame:
                 "n_depth": int(sub["depth_m"].nunique()),
                 "finite_G_fraction": float(np.nanmean(np.isfinite(sub["G_magnitude_proxy"].to_numpy(float)))),
                 "mask_fraction_median": float(np.nanmedian(sub["mask_fraction"].to_numpy(float))),
-                "boundary_leakage_median_ms": float(np.nanmedian(sub["boundary_leakage_proxy_mean_abs_ms"].to_numpy(float))),
+                "boundary_leakage_median_ms": float(np.nanmedian(leakage.to_numpy(float))),
+                "leakage_reduction_fraction_median": float(np.nanmedian(np.asarray(reduction, dtype=float))),
+                "boundary_flux_over_internal_flux_median": float(np.nanmedian(np.asarray(boundary_ratio, dtype=float))),
+                "weak_core_retention_median": float(np.nanmedian(np.asarray(weak_retention, dtype=float))),
+                "pv_core_retention_median": float(np.nanmedian(np.asarray(pv_retention, dtype=float))),
+                "mask_core_fraction_std": mask_instability,
+                "materiality_score": materiality_score,
                 "pv_centroid_offset_median_km": float(np.nanmedian(sub["pv_centroid_distance_from_axis_km"].to_numpy(float))),
                 "weak_centroid_offset_median_km": float(np.nanmedian(sub["weak_speed_centroid_distance_from_axis_km"].to_numpy(float))),
                 "G_magnitude_median": float(np.nanmedian(np.abs(sub["G_magnitude_proxy"].to_numpy(float)))),
@@ -557,13 +657,15 @@ def _write_summary_md(path: Path, combo: dict[str, str], summary: pd.DataFrame, 
         f"- axis source: `{combo['axis_source']}`",
         f"- orientation: `{combo['orientation']}`",
         f"- buoyancy source: `{combo['buoyancy_source']}`",
+        f"- boundary mode: `{request.boundary_mode}`",
         "- object: representative coherent material volume in Cartesian coordinates",
         "",
         "## 验证版定义",
         f"- core radius: `r/R <= {request.core_radius_over_R}`",
         f"- speed core quantile: `{request.speed_core_quantile}`",
         f"- abs(PV proxy) core quantile: `{request.pv_core_quantile}`",
-        "- mask: low-speed core OR high-|PV proxy| core, keeping the component connected to the axis.",
+        "- threshold mask: low-speed core OR high-|PV proxy| core, keeping the component connected to the axis.",
+        "- active boundary: starts from the threshold mask and adjusts edge cells to reduce normal velocity leakage while retaining the speed/PV core.",
         "",
         "## 结果摘要",
         "```text",
@@ -579,11 +681,52 @@ def _write_summary_md(path: Path, combo: dict[str, str], summary: pd.DataFrame, 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_root_dynamic_summary(path: Path, root_summary: pd.DataFrame, request: MaterialVolumeRequest) -> None:
+    lines = [
+        "# Dynamic Material-Boundary EP Validation Summary",
+        "",
+        "## 核心问题",
+        "本轮把代表涡材料体边界从固定阈值选区升级为低 leakage 的动力边界，检验边界法向速度是否能被压低，以及 coherent/upright_like 哪一种更接近材料体。",
+        "",
+        "## 方法",
+        f"- boundary mode: `{request.boundary_mode}`",
+        f"- active contour iterations: `{request.active_contour_iterations}`",
+        f"- minimum speed/PV core retention: `{request.min_core_retention}`",
+        "- 初始 mask 来自低速核心或高 |PV proxy| 核心；优化只移动边界，不改变代表涡合成场。",
+        "- 输出的 boundary flux 是当前 polar 网格上的边界通量代理，不是 object-level 严格材料面闭合。",
+        "",
+        "## 汇总表",
+        "```text",
+        root_summary.to_string(index=False),
+        "```",
+        "",
+        "## 初步判读",
+        "- 若 `leakage_reduction_fraction_median > 0`，说明动力边界相对阈值 mask 确实降低了穿越速度。",
+        "- 若 `pv_core_retention_median` 和 `weak_core_retention_median` 仍较高，说明降 leakage 没有靠丢掉涡核来实现。",
+        "- `materiality_score` 越低，表示该组合在当前代表涡诊断下越接近材料体。",
+        "- 下一步若要建立真正材料体结论，需要进入 object-level，沿每个原始涡旋的三维边界做同样的 leakage 优化和随时间追踪。",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, Path]:
     bad_axis = sorted(set(request.axis_sources) - set(AXIS_SOURCES))
     bad_buoy = sorted(set(request.buoyancy_sources) - set(BUOYANCY_SOURCES))
     if bad_axis or bad_buoy:
         raise ValueError(f"Bad options: axis={bad_axis}, buoyancy={bad_buoy}")
+    if request.boundary_mode not in BOUNDARY_MODES:
+        raise ValueError(f"boundary_mode must be one of {BOUNDARY_MODES}")
+    DynamicBoundaryConfig(
+        mode=request.boundary_mode,
+        iterations=request.active_contour_iterations,
+        leakage_weight=request.leakage_weight,
+        smoothness_weight=request.smoothness_weight,
+        containment_weight=request.containment_weight,
+        area_weight=request.area_weight,
+        min_core_retention=request.min_core_retention,
+        min_area_fraction=request.min_area_fraction,
+        max_area_fraction=request.max_area_fraction,
+    ).validate()
     if request.core_radius_over_R <= 0:
         raise ValueError("core_radius_over_R must be positive")
     if not 0.0 < request.speed_core_quantile < 1.0:
@@ -601,7 +744,10 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
             me_root = default_me_liutex_root(request.result_root, output_name, orientation)
             npz_path = me_root / "azimuthal_representative_velocity.npz"
             if request.dry_run:
-                print(f"[dry-run] shape={shape} orientation={orientation} me_root={me_root}")
+                print(
+                    f"[dry-run] shape={shape} orientation={orientation} "
+                    f"boundary_mode={request.boundary_mode} me_root={me_root}"
+                )
                 continue
             _require_pandas()
             if not npz_path.exists():
@@ -682,6 +828,15 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                         "speed_core_quantile": request.speed_core_quantile,
                         "pv_core_quantile": request.pv_core_quantile,
                         "min_mask_fraction": request.min_mask_fraction,
+                        "boundary_mode": request.boundary_mode,
+                        "active_contour_iterations": request.active_contour_iterations,
+                        "leakage_weight": request.leakage_weight,
+                        "smoothness_weight": request.smoothness_weight,
+                        "containment_weight": request.containment_weight,
+                        "area_weight": request.area_weight,
+                        "min_core_retention": request.min_core_retention,
+                        "min_area_fraction": request.min_area_fraction,
+                        "max_area_fraction": request.max_area_fraction,
                         "n2_profile": request.n2_profile,
                         "diagnostic_status": "representative-volume validation; not object-level material-boundary closure",
                         "G_proxy_definition": "horizontal divergence of momentum stress only; buoyancy mapping T_ij[B_j] not closed in v1",
@@ -707,9 +862,22 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                     )
                     _plot_tau_depth(
                         profiles,
-                        "boundary_leakage_proxy_mean_abs_ms",
+                        "leakage_mean_abs_ms",
                         figures / "boundary_leakage_tau_depth.png",
                         title="Boundary leakage proxy: edge mean |u_n|",
+                    )
+                    _plot_tau_depth(
+                        profiles,
+                        "leakage_reduction_fraction",
+                        figures / "leakage_reduction_tau_depth.png",
+                        title="Leakage reduction relative to threshold mask",
+                        cmap="coolwarm",
+                    )
+                    _plot_tau_depth(
+                        profiles,
+                        "boundary_flux_over_internal_flux",
+                        figures / "boundary_flux_terms_tau_depth.png",
+                        title="Boundary PV flux proxy over internal PV flux proxy",
                     )
                     _plot_tau_depth(
                         profiles,
@@ -732,6 +900,12 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
     if not request.dry_run and root_summaries:
         root_summary = pd.concat(root_summaries, ignore_index=True)
         _write_table(root_summary, request.output_root / "material_volume_all_combo_summary.csv")
+        _write_table(root_summary, request.output_root / "shape_materiality_comparison.csv")
+        _write_root_dynamic_summary(
+            request.output_root / "dynamic_material_boundary_validation_summary_zh.md",
+            root_summary,
+            request,
+        )
         (request.output_root / "material_volume_manifest.json").write_text(
             json.dumps(_json_ready(manifest_rows), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -756,6 +930,15 @@ def request_from_args(args) -> MaterialVolumeRequest:
         speed_core_quantile=float(args.speed_core_quantile),
         pv_core_quantile=float(args.pv_core_quantile),
         min_mask_fraction=float(args.min_mask_fraction),
+        boundary_mode=str(getattr(args, "boundary_mode", "threshold")),
+        active_contour_iterations=int(getattr(args, "active_contour_iterations", 12)),
+        leakage_weight=float(getattr(args, "leakage_weight", 1.0)),
+        smoothness_weight=float(getattr(args, "smoothness_weight", 0.08)),
+        containment_weight=float(getattr(args, "containment_weight", 0.35)),
+        area_weight=float(getattr(args, "area_weight", 0.12)),
+        min_core_retention=float(getattr(args, "min_core_retention", 0.75)),
+        min_area_fraction=float(getattr(args, "min_area_fraction", 0.15)),
+        max_area_fraction=float(getattr(args, "max_area_fraction", 0.65)),
         skip_missing=bool(args.skip_missing),
         dry_run=bool(args.dry_run),
     )
