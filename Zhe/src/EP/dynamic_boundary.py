@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover - dependency-light dry-run suppo
     ndimage = None
 
 
-BOUNDARY_MODES = ("threshold", "active_contour")
+BOUNDARY_MODES = ("threshold", "active_contour", "levelset_v2")
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,9 @@ class DynamicBoundaryConfig:
     smoothness_weight: float = 0.08
     containment_weight: float = 0.35
     area_weight: float = 0.12
+    vertical_continuity_weight: float = 0.18
+    time_continuity_weight: float = 0.08
+    levelset_sigma_cells: float = 1.0
     min_core_retention: float = 0.75
     min_area_fraction: float = 0.15
     max_area_fraction: float = 0.65
@@ -31,6 +34,8 @@ class DynamicBoundaryConfig:
             raise ValueError(f"boundary mode must be one of {BOUNDARY_MODES}")
         if self.iterations < 0:
             raise ValueError("active-contour iterations must be non-negative")
+        if self.levelset_sigma_cells < 0:
+            raise ValueError("levelset sigma must be non-negative")
         if not 0.0 < self.min_core_retention <= 1.0:
             raise ValueError("min core retention must be in (0, 1]")
         if not 0.0 < self.min_area_fraction < self.max_area_fraction <= 1.0:
@@ -79,6 +84,42 @@ def connected_component(candidate: np.ndarray, seed: tuple[int, int] | None) -> 
             changed = bool(np.any(expanded != component))
             component = expanded
     return component
+
+
+def vertical_mask_roughness(mask: np.ndarray, previous_mask: np.ndarray | None = None, next_mask: np.ndarray | None = None) -> float:
+    refs = [item for item in (previous_mask, next_mask) if item is not None and item.shape == mask.shape]
+    if not refs:
+        return 0.0
+    diffs = [np.mean(np.logical_xor(mask, ref)) for ref in refs]
+    return float(np.nanmean(diffs))
+
+
+def levelset_candidate_masks(
+    mask: np.ndarray,
+    core_domain: np.ndarray,
+    seed: tuple[int, int] | None,
+    *,
+    sigma_cells: float,
+) -> list[np.ndarray]:
+    if ndimage is None:
+        raise ModuleNotFoundError("scipy is required for level-set material-boundary optimization")
+    if seed is None or not np.any(mask):
+        return []
+    phi = ndimage.distance_transform_edt(mask) - ndimage.distance_transform_edt(~mask)
+    if sigma_cells > 0:
+        phi = ndimage.gaussian_filter(phi.astype(float), sigma=float(sigma_cells), mode=("nearest", "wrap"))
+    candidates: list[np.ndarray] = []
+    for threshold in (-1.0, -0.5, 0.0, 0.5, 1.0):
+        candidate = connected_component((phi >= threshold) & core_domain, seed)
+        if np.any(candidate):
+            candidates.append(candidate)
+    closed = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool))
+    opened = ndimage.binary_opening(mask, structure=np.ones((3, 3), dtype=bool))
+    for candidate in (closed, opened):
+        component = connected_component(candidate & core_domain, seed)
+        if np.any(component):
+            candidates.append(component)
+    return candidates
 
 
 def boundary_normal_from_level_set(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -206,6 +247,8 @@ def optimize_boundary(
     mean_u: float,
     mean_v: float,
     config: DynamicBoundaryConfig,
+    previous_mask: np.ndarray | None = None,
+    next_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, float | str]]:
     config.validate()
     if config.mode == "threshold":
@@ -254,11 +297,13 @@ def optimize_boundary(
         area_penalty = max(0.0, config.min_area_fraction - area_fraction) + max(
             0.0, area_fraction - config.max_area_fraction
         )
+        vertical_penalty = vertical_mask_roughness(mask, previous_mask, next_mask)
         energy = (
             config.leakage_weight * leakage
             + config.smoothness_weight * perimeter_fraction
             + config.containment_weight * containment_loss
             + config.area_weight * area_penalty
+            + config.vertical_continuity_weight * vertical_penalty
         )
         return energy, {
             "leakage_energy": leakage,
@@ -266,6 +311,7 @@ def optimize_boundary(
             "perimeter_fraction_of_core_domain": perimeter_fraction,
             "weak_core_retention": speed_retention,
             "pv_core_retention": pv_retention,
+            "vertical_mask_roughness": vertical_penalty,
         }
 
     current = connected_component(initial_mask & core_domain, seed)
@@ -277,6 +323,23 @@ def optimize_boundary(
         candidates = [current]
         candidates.append(connected_component((current | neighbors4(current)) & core_domain, seed))
         candidates.append(connected_component((current & ~edge_mask(current)) & core_domain, seed))
+        if config.mode == "levelset_v2":
+            candidates.extend(
+                levelset_candidate_masks(
+                    current,
+                    core_domain,
+                    seed,
+                    sigma_cells=config.levelset_sigma_cells,
+                )
+            )
+            refs = [item for item in (previous_mask, next_mask) if item is not None and item.shape == current.shape]
+            if refs:
+                vote = np.zeros_like(current, dtype=int)
+                for ref in refs:
+                    vote += ref.astype(int)
+                consensus = vote >= max(1, len(refs))
+                candidates.append(connected_component((current | consensus) & core_domain, seed))
+                candidates.append(connected_component((current & (consensus | speed_core | pv_core)) & core_domain, seed))
         edge = edge_mask(current)
         un = normal_velocity(u=u, v=v, mean_u=mean_u, mean_v=mean_v, x_km=x_km, y_km=y_km, mask=current)
         edge_values = np.abs(un[edge & np.isfinite(un)])
@@ -320,6 +383,8 @@ def optimize_boundary(
         "boundary_mode": config.mode,
         "boundary_status": status,
         "active_contour_iterations_used": float(iterations_used),
+        "levelset_sigma_cells": float(config.levelset_sigma_cells) if config.mode == "levelset_v2" else np.nan,
+        "vertical_continuity_weight": float(config.vertical_continuity_weight),
         "boundary_energy_initial": float(initial_energy),
         "boundary_energy_final": float(best_energy),
         "boundary_energy_reduction_fraction": float((initial_energy - best_energy) / (abs(initial_energy) + 1e-12)),

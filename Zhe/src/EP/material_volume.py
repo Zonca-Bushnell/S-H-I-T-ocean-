@@ -25,6 +25,7 @@ from .dynamic_boundary import BOUNDARY_MODES, DynamicBoundaryConfig, boundary_fl
 
 DEFAULT_MATERIAL_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"
 DEFAULT_DYNAMIC_BOUNDARY_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_validation"
+DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_v2"
 
 
 def _require_pandas() -> None:
@@ -75,6 +76,9 @@ class MaterialVolumeRequest:
     smoothness_weight: float = 0.08
     containment_weight: float = 0.35
     area_weight: float = 0.12
+    vertical_continuity_weight: float = 0.18
+    time_continuity_weight: float = 0.08
+    levelset_sigma_cells: float = 1.0
     min_core_retention: float = 0.75
     min_area_fraction: float = 0.15
     max_area_fraction: float = 0.65
@@ -298,6 +302,8 @@ def _layer_diagnostics(
     pv_core_quantile: float,
     min_mask_fraction: float,
     boundary_config: DynamicBoundaryConfig,
+    previous_reference_mask: np.ndarray | None = None,
+    next_reference_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, object], np.ndarray]:
     initial_mask, meta = _layer_material_mask(
         rep=rep,
@@ -340,6 +346,8 @@ def _layer_diagnostics(
         mean_u=mean_u_initial,
         mean_v=mean_v_initial,
         config=boundary_config,
+        previous_mask=previous_reference_mask,
+        next_mask=next_reference_mask,
     )
     edge = _edge_mask(mask)
     u = rep.u[depth_index]
@@ -486,13 +494,34 @@ def _compute_one_slice(
         smoothness_weight=request.smoothness_weight,
         containment_weight=request.containment_weight,
         area_weight=request.area_weight,
+        vertical_continuity_weight=request.vertical_continuity_weight,
+        time_continuity_weight=request.time_continuity_weight,
+        levelset_sigma_cells=request.levelset_sigma_cells,
         min_core_retention=request.min_core_retention,
         min_area_fraction=request.min_area_fraction,
         max_area_fraction=request.max_area_fraction,
     )
+    reference_masks: list[np.ndarray] = []
+    if request.boundary_mode == "levelset_v2":
+        for iz in range(rep.depth_m.size):
+            ref_mask, _ = _layer_material_mask(
+                rep=rep,
+                axis=axis,
+                q_proxy=q_proxy,
+                depth_index=iz,
+                x_km=x_km,
+                y_km=y_km,
+                core_radius_over_R=request.core_radius_over_R,
+                speed_core_quantile=request.speed_core_quantile,
+                pv_core_quantile=request.pv_core_quantile,
+                min_mask_fraction=request.min_mask_fraction,
+            )
+            reference_masks.append(ref_mask)
     rows = []
     masks = []
     for iz in range(rep.depth_m.size):
+        previous_reference = reference_masks[iz - 1] if iz > 0 and reference_masks else None
+        next_reference = reference_masks[iz + 1] if iz + 1 < len(reference_masks) else None
         row, mask = _layer_diagnostics(
             rep=rep,
             axis=axis,
@@ -507,6 +536,8 @@ def _compute_one_slice(
             pv_core_quantile=request.pv_core_quantile,
             min_mask_fraction=request.min_mask_fraction,
             boundary_config=boundary_config,
+            previous_reference_mask=previous_reference,
+            next_reference_mask=next_reference,
         )
         rows.append(row)
         masks.append(mask)
@@ -723,6 +754,9 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
         smoothness_weight=request.smoothness_weight,
         containment_weight=request.containment_weight,
         area_weight=request.area_weight,
+        vertical_continuity_weight=request.vertical_continuity_weight,
+        time_continuity_weight=request.time_continuity_weight,
+        levelset_sigma_cells=request.levelset_sigma_cells,
         min_core_retention=request.min_core_retention,
         min_area_fraction=request.min_area_fraction,
         max_area_fraction=request.max_area_fraction,
@@ -818,6 +852,32 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                     summary = _summary_table(profiles)
                     _write_table(profiles, combo_dir / "material_volume_profiles.csv")
                     _write_table(summary, combo_dir / "material_volume_summary.csv")
+                    if request.boundary_mode == "levelset_v2":
+                        _write_table(profiles, combo_dir / "boundary_v2_profiles.csv")
+                        _write_table(summary, combo_dir / "boundary_v2_summary.csv")
+                        flux_cols = [
+                            col
+                            for col in profiles.columns
+                            if col
+                            in {
+                                "shape",
+                                "axis_source",
+                                "orientation",
+                                "buoyancy_source",
+                                "polarity",
+                                "tau",
+                                "depth_m",
+                                "leakage_mean_abs_ms",
+                                "leakage_rms_ms",
+                                "signed_leakage_ms",
+                                "boundary_flux_over_internal_flux",
+                                "leakage_reduction_fraction",
+                                "vertical_mask_roughness",
+                            }
+                            or col.endswith("_boundary_flux_proxy")
+                            or col.endswith("_boundary_flux_integral_proxy")
+                        ]
+                        _write_table(profiles[flux_cols], combo_dir / "boundary_flux_budget.csv")
                     manifest = {
                         "combo": combo,
                         "result_root": request.result_root,
@@ -834,6 +894,9 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                         "smoothness_weight": request.smoothness_weight,
                         "containment_weight": request.containment_weight,
                         "area_weight": request.area_weight,
+                        "vertical_continuity_weight": request.vertical_continuity_weight,
+                        "time_continuity_weight": request.time_continuity_weight,
+                        "levelset_sigma_cells": request.levelset_sigma_cells,
                         "min_core_retention": request.min_core_retention,
                         "min_area_fraction": request.min_area_fraction,
                         "max_area_fraction": request.max_area_fraction,
@@ -901,6 +964,8 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
         root_summary = pd.concat(root_summaries, ignore_index=True)
         _write_table(root_summary, request.output_root / "material_volume_all_combo_summary.csv")
         _write_table(root_summary, request.output_root / "shape_materiality_comparison.csv")
+        if request.boundary_mode == "levelset_v2":
+            _write_table(root_summary, request.output_root / "boundary_v2_all_combo_summary.csv")
         _write_root_dynamic_summary(
             request.output_root / "dynamic_material_boundary_validation_summary_zh.md",
             root_summary,
@@ -936,6 +1001,9 @@ def request_from_args(args) -> MaterialVolumeRequest:
         smoothness_weight=float(getattr(args, "smoothness_weight", 0.08)),
         containment_weight=float(getattr(args, "containment_weight", 0.35)),
         area_weight=float(getattr(args, "area_weight", 0.12)),
+        vertical_continuity_weight=float(getattr(args, "vertical_continuity_weight", 0.18)),
+        time_continuity_weight=float(getattr(args, "time_continuity_weight", 0.08)),
+        levelset_sigma_cells=float(getattr(args, "levelset_sigma_cells", 1.0)),
         min_core_retention=float(getattr(args, "min_core_retention", 0.75)),
         min_area_fraction=float(getattr(args, "min_area_fraction", 0.15)),
         max_area_fraction=float(getattr(args, "max_area_fraction", 0.65)),

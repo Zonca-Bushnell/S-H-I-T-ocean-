@@ -155,6 +155,30 @@ def cmd_run_material_boundary_validation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_object_material_boundary_validation(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        print("Object-level material-boundary validation dry-run")
+        print(f"result_root: {args.result_root}")
+        print(f"filter_root: {args.filter_root}")
+        print(f"output_root: {args.output_root}")
+        print(f"shapes: {args.shapes}")
+        print(f"orientations: {args.orientations}")
+        print(f"boundary_mode: {args.boundary_mode}")
+        print(f"max_tracks_per_shape: {args.max_tracks_per_shape}")
+        print(f"max_objectdays: {args.max_objectdays}")
+        return 0
+    from .object_material_boundary import request_from_args, run_object_material_boundary_validation
+
+    request = request_from_args(args)
+    outputs = run_object_material_boundary_validation(request)
+    if args.dry_run:
+        return 0
+    print("Object-level material-boundary validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
 
@@ -182,9 +206,49 @@ def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str
     parser.add_argument("--smoothness-weight", type=float, default=0.08)
     parser.add_argument("--containment-weight", type=float, default=0.35)
     parser.add_argument("--area-weight", type=float, default=0.12)
+    parser.add_argument("--vertical-continuity-weight", type=float, default=0.18)
+    parser.add_argument("--time-continuity-weight", type=float, default=0.08)
+    parser.add_argument("--levelset-sigma-cells", type=float, default=1.0)
     parser.add_argument("--min-core-retention", type=float, default=0.75)
     parser.add_argument("--min-area-fraction", type=float, default=0.15)
     parser.add_argument("--max-area-fraction", type=float, default=0.65)
+    parser.add_argument("--skip-missing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
+def _add_object_boundary_arguments(parser: argparse.ArgumentParser) -> None:
+    from .dynamic_boundary import BOUNDARY_MODES
+
+    parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--filter-root", default="/root/autodl-fs/kuroshiou/Filter")
+    parser.add_argument("--output-root", default="/root/autodl-fs/kuroshiou/EP-FLUX/object_material_boundary_validation")
+    parser.add_argument("--shapes", default="coherent,upright_like")
+    parser.add_argument("--orientations", default="turned")
+    parser.add_argument("--buoyancy-sources", default="thermal_wind")
+    parser.add_argument("--filter-template", default="global_phy_{year}_bandpass_30_180d.nc")
+    parser.add_argument("--radial-bins", type=int, default=24)
+    parser.add_argument("--azimuth-bins", type=int, default=48)
+    parser.add_argument("--rmax", type=float, default=1.5)
+    parser.add_argument("--reference-lat", type=float, default=30.0)
+    parser.add_argument("--constant-n2", type=float, default=2.0e-5)
+    parser.add_argument("--core-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--speed-core-quantile", type=float, default=0.45)
+    parser.add_argument("--pv-core-quantile", type=float, default=0.70)
+    parser.add_argument("--min-mask-fraction", type=float, default=0.01)
+    parser.add_argument("--boundary-mode", choices=BOUNDARY_MODES, default="levelset_v2")
+    parser.add_argument("--active-contour-iterations", type=int, default=14)
+    parser.add_argument("--leakage-weight", type=float, default=1.0)
+    parser.add_argument("--smoothness-weight", type=float, default=0.08)
+    parser.add_argument("--containment-weight", type=float, default=0.35)
+    parser.add_argument("--area-weight", type=float, default=0.12)
+    parser.add_argument("--vertical-continuity-weight", type=float, default=0.18)
+    parser.add_argument("--time-continuity-weight", type=float, default=0.08)
+    parser.add_argument("--levelset-sigma-cells", type=float, default=1.0)
+    parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--min-area-fraction", type=float, default=0.15)
+    parser.add_argument("--max-area-fraction", type=float, default=0.65)
+    parser.add_argument("--max-tracks-per-shape", type=int, default=0)
+    parser.add_argument("--max-objectdays", type=int, default=0)
     parser.add_argument("--skip-missing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
@@ -275,6 +339,13 @@ def build_parser() -> argparse.ArgumentParser:
         boundary_mode="active_contour",
     )
     dynamic.set_defaults(func=cmd_run_material_boundary_validation)
+
+    object_boundary = sub.add_parser(
+        "run-object-material-boundary-validation",
+        help="Run object-day/track material-boundary diagnostics on original eddy fields",
+    )
+    _add_object_boundary_arguments(object_boundary)
+    object_boundary.set_defaults(func=cmd_run_object_material_boundary_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
