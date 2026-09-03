@@ -21,11 +21,13 @@ from .contracts import (
     default_radial_seed_root,
     shape_output_name,
 )
-from .dynamic_boundary import BOUNDARY_MODES, DynamicBoundaryConfig, boundary_flux_metrics, optimize_boundary
+from .dynamic_boundary import BOUNDARY_MODES, DynamicBoundaryConfig, boundary_flux_metrics, edge_mask, normal_velocity, optimize_boundary
 
 DEFAULT_MATERIAL_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"
 DEFAULT_DYNAMIC_BOUNDARY_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_validation"
 DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_dynamic_boundary_v2"
+CP0 = 3990.0
+BOUNDARY_BUDGETS = ("edge_proxy", "full_3d")
 
 
 def _require_pandas() -> None:
@@ -71,6 +73,7 @@ class MaterialVolumeRequest:
     pv_core_quantile: float = 0.70
     min_mask_fraction: float = 0.01
     boundary_mode: str = "threshold"
+    boundary_budget: str = "edge_proxy"
     active_contour_iterations: int = 12
     leakage_weight: float = 1.0
     smoothness_weight: float = 0.08
@@ -229,6 +232,155 @@ def _divergence_xy(fx: np.ndarray, fy: np.ndarray, radial: np.ndarray, theta: np
     return dfx_dx + dfy_dy
 
 
+def _grid_cell_area_m2(radial_m: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    radial = np.asarray(radial_m, dtype=float)
+    if radial.size == 1:
+        edges = np.asarray([0.0, max(float(radial[0]), 1.0)], dtype=float)
+    else:
+        edges = np.empty(radial.size + 1, dtype=float)
+        edges[1:-1] = 0.5 * (radial[:-1] + radial[1:])
+        edges[0] = max(0.0, radial[0] - 0.5 * (radial[1] - radial[0]))
+        edges[-1] = radial[-1] + 0.5 * (radial[-1] - radial[-2])
+    dtheta = float(np.nanmedian(np.diff(np.unwrap(theta)))) if theta.size > 1 else 2.0 * np.pi
+    area_r = 0.5 * (edges[1:] ** 2 - edges[:-1] ** 2) * abs(dtheta)
+    return np.repeat(area_r[:, None], theta.size, axis=1)
+
+
+def _depth_cell_thickness_m(depth: np.ndarray) -> np.ndarray:
+    depth = np.asarray(depth, dtype=float)
+    if depth.size == 1:
+        return np.asarray([1.0], dtype=float)
+    edges = np.empty(depth.size + 1, dtype=float)
+    edges[1:-1] = 0.5 * (depth[:-1] + depth[1:])
+    edges[0] = max(0.0, depth[0] - 0.5 * (depth[1] - depth[0]))
+    edges[-1] = depth[-1] + 0.5 * (depth[-1] - depth[-2])
+    return np.diff(edges)
+
+
+def _continuity_w_faces_proxy(u: np.ndarray, v: np.ndarray, radial_m: np.ndarray, theta: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    dz = _depth_cell_thickness_m(depth)
+    div_h = _divergence_xy(u, v, radial_m, theta)
+    w_faces = np.zeros((u.shape[0] + 1, u.shape[1], u.shape[2]), dtype=float)
+    for iz in range(u.shape[0]):
+        w_faces[iz + 1] = w_faces[iz] - div_h[iz] * dz[iz]
+    return w_faces
+
+
+def _surface_flux_terms(prefix: str, normal_velocity_field: np.ndarray, area_m2: np.ndarray, *, u: np.ndarray, v: np.ndarray, theta: np.ndarray, q: np.ndarray, b: np.ndarray, mean_u: float, mean_v: float, valid: np.ndarray) -> dict[str, float]:
+    if not np.any(valid):
+        return {
+            f"{prefix}_area_m2": 0.0,
+            f"{prefix}_signed_volume_flux_m3s_proxy": np.nan,
+            f"{prefix}_abs_volume_flux_m3s_proxy": np.nan,
+            f"{prefix}_heat_flux_watt_proxy": np.nan,
+            f"{prefix}_pv_flux_proxy": np.nan,
+            f"{prefix}_buoyancy_flux_proxy": np.nan,
+            f"{prefix}_momentum_x_flux_proxy": np.nan,
+            f"{prefix}_momentum_y_flux_proxy": np.nan,
+        }
+    un = normal_velocity_field[valid]
+    area = area_m2[valid]
+    up = u[valid] - mean_u
+    vp = v[valid] - mean_v
+    return {
+        f"{prefix}_area_m2": float(np.nansum(area)),
+        f"{prefix}_signed_volume_flux_m3s_proxy": float(np.nansum(un * area)),
+        f"{prefix}_abs_volume_flux_m3s_proxy": float(np.nansum(np.abs(un) * area)),
+        f"{prefix}_heat_flux_watt_proxy": float(RHO0 * CP0 * np.nansum(theta[valid] * un * area)),
+        f"{prefix}_pv_flux_proxy": float(np.nansum(q[valid] * un * area)),
+        f"{prefix}_buoyancy_flux_proxy": float(np.nansum(b[valid] * un * area)),
+        f"{prefix}_momentum_x_flux_proxy": float(RHO0 * np.nansum(up * un * area)),
+        f"{prefix}_momentum_y_flux_proxy": float(RHO0 * np.nansum(vp * un * area)),
+    }
+
+
+def _full_boundary_flux_budget(
+    *,
+    rep: RepresentativeSlice,
+    masks: np.ndarray,
+    q_proxy: np.ndarray,
+    buoyancy: np.ndarray,
+    x_km: np.ndarray,
+    y_km: np.ndarray,
+) -> pd.DataFrame:
+    cell_area = _grid_cell_area_m2(rep.radial_m, rep.theta_rad)
+    dz = _depth_cell_thickness_m(rep.depth_m)
+    w_faces = _continuity_w_faces_proxy(rep.u, rep.v, rep.radial_m, rep.theta_rad, rep.depth_m)
+    theta = rep.theta_prime if rep.theta_prime is not None else np.full_like(buoyancy, np.nan)
+    rows: list[dict[str, float]] = []
+    for iz, mask in enumerate(masks.astype(bool)):
+        u = rep.u[iz]
+        v = rep.v[iz]
+        q = q_proxy[iz]
+        b = buoyancy[iz]
+        th = theta[iz]
+        mean_u = _weighted_mean(u, mask)
+        mean_v = _weighted_mean(v, mask)
+        edge = edge_mask(mask)
+        lateral_area = np.sqrt(cell_area) * dz[iz]
+        lateral_un = normal_velocity(u=u, v=v, mean_u=mean_u, mean_v=mean_v, x_km=x_km, y_km=y_km, mask=mask)
+        row = {"depth_index": float(iz), "depth_m": float(rep.depth_m[iz]), "w_proxy_top_mean_ms": float(np.nanmean(w_faces[iz][mask])) if np.any(mask) else np.nan, "w_proxy_bottom_mean_ms": float(np.nanmean(w_faces[iz + 1][mask])) if np.any(mask) else np.nan}
+        row.update(
+            _surface_flux_terms(
+                "lateral",
+                lateral_un,
+                lateral_area,
+                u=u,
+                v=v,
+                theta=th,
+                q=q,
+                b=b,
+                mean_u=mean_u,
+                mean_v=mean_v,
+                valid=edge & np.isfinite(lateral_un),
+            )
+        )
+        row.update(
+            _surface_flux_terms(
+                "top",
+                -w_faces[iz],
+                cell_area,
+                u=u,
+                v=v,
+                theta=th,
+                q=q,
+                b=b,
+                mean_u=mean_u,
+                mean_v=mean_v,
+                valid=mask & np.isfinite(w_faces[iz]),
+            )
+        )
+        row.update(
+            _surface_flux_terms(
+                "bottom",
+                w_faces[iz + 1],
+                cell_area,
+                u=u,
+                v=v,
+                theta=th,
+                q=q,
+                b=b,
+                mean_u=mean_u,
+                mean_v=mean_v,
+                valid=mask & np.isfinite(w_faces[iz + 1]),
+            )
+        )
+        for field in (
+            "signed_volume_flux_m3s_proxy",
+            "abs_volume_flux_m3s_proxy",
+            "heat_flux_watt_proxy",
+            "pv_flux_proxy",
+            "buoyancy_flux_proxy",
+            "momentum_x_flux_proxy",
+            "momentum_y_flux_proxy",
+        ):
+            row[f"total_{field}"] = float(np.nansum([row.get(f"lateral_{field}", np.nan), row.get(f"top_{field}", np.nan), row.get(f"bottom_{field}", np.nan)]))
+        row["boundary_budget"] = "full_3d"
+        row["vertical_velocity_source"] = "continuity_w_proxy_from_bandpass_uv"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _seed_index(axis: AxisLine, depth_index: int, x_km: np.ndarray, y_km: np.ndarray, candidate: np.ndarray) -> tuple[int, int] | None:
     ax = float(axis.x_km[depth_index])
     ay = float(axis.y_km[depth_index])
@@ -304,6 +456,7 @@ def _layer_diagnostics(
     boundary_config: DynamicBoundaryConfig,
     previous_reference_mask: np.ndarray | None = None,
     next_reference_mask: np.ndarray | None = None,
+    time_reference_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, object], np.ndarray]:
     initial_mask, meta = _layer_material_mask(
         rep=rep,
@@ -348,6 +501,7 @@ def _layer_diagnostics(
         config=boundary_config,
         previous_mask=previous_reference_mask,
         next_mask=next_reference_mask,
+        time_reference_mask=time_reference_mask,
     )
     edge = _edge_mask(mask)
     u = rep.u[depth_index]
@@ -355,6 +509,7 @@ def _layer_diagnostics(
     b = buoyancy[depth_index]
     q = q_proxy[depth_index]
     speed = rep.speed[depth_index]
+    theta_for_flux = rep.theta_prime[depth_index] if rep.theta_prime is not None else np.full_like(b, np.nan)
 
     mean_u = _weighted_mean(u, mask)
     mean_v = _weighted_mean(v, mask)
@@ -398,7 +553,7 @@ def _layer_diagnostics(
         v=v,
         buoyancy=b,
         q_proxy=q,
-        theta_prime=b,
+        theta_prime=theta_for_flux,
         x_km=x_km,
         y_km=y_km,
         mean_u=mean_u,
@@ -411,7 +566,7 @@ def _layer_diagnostics(
         v=v,
         buoyancy=b,
         q_proxy=q,
-        theta_prime=b,
+        theta_prime=theta_for_flux,
         x_km=x_km,
         y_km=y_km,
         mean_u=mean_u_initial,
@@ -420,6 +575,7 @@ def _layer_diagnostics(
     )
 
     row = {
+        "depth_index": int(depth_index),
         "depth_m": float(rep.depth_m[depth_index]),
         "axis_x_km": float(axis.x_km[depth_index]),
         "axis_y_km": float(axis.y_km[depth_index]),
@@ -460,6 +616,9 @@ def _layer_diagnostics(
             if np.isfinite(initial_flux_meta["leakage_mean_abs_ms"]) and np.isfinite(flux_meta["leakage_mean_abs_ms"])
             else np.nan
         ),
+        "leakage_before_time_constraint": initial_flux_meta["leakage_mean_abs_ms"],
+        "leakage_after_time_constraint": flux_meta["leakage_mean_abs_ms"],
+        "time_reference_available": bool(time_reference_mask is not None),
         "psi_volume_mean": _weighted_mean(psi[depth_index], mask),
         **meta,
         **boundary_meta,
@@ -476,6 +635,7 @@ def _compute_one_slice(
     n2: np.ndarray,
     buoyancy_source: str,
     request: MaterialVolumeRequest,
+    time_reference_masks: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
     ur, ut = rep.polar_velocity()
     psi = _streamfunction_from_tangential(ut, rep.radial_m)
@@ -502,7 +662,7 @@ def _compute_one_slice(
         max_area_fraction=request.max_area_fraction,
     )
     reference_masks: list[np.ndarray] = []
-    if request.boundary_mode == "levelset_v2":
+    if request.boundary_mode in {"levelset_v2", "lagrangian_v1"}:
         for iz in range(rep.depth_m.size):
             ref_mask, _ = _layer_material_mask(
                 rep=rep,
@@ -522,6 +682,11 @@ def _compute_one_slice(
     for iz in range(rep.depth_m.size):
         previous_reference = reference_masks[iz - 1] if iz > 0 and reference_masks else None
         next_reference = reference_masks[iz + 1] if iz + 1 < len(reference_masks) else None
+        time_reference = (
+            time_reference_masks[iz]
+            if time_reference_masks is not None and iz < int(time_reference_masks.shape[0])
+            else None
+        )
         row, mask = _layer_diagnostics(
             rep=rep,
             axis=axis,
@@ -538,10 +703,23 @@ def _compute_one_slice(
             boundary_config=boundary_config,
             previous_reference_mask=previous_reference,
             next_reference_mask=next_reference,
+            time_reference_mask=time_reference,
         )
         rows.append(row)
         masks.append(mask)
-    return pd.DataFrame(rows), {"psi": psi, "q_proxy": q_proxy, "buoyancy": buoyancy, "mask": np.asarray(masks)}
+    table = pd.DataFrame(rows)
+    mask_array = np.asarray(masks)
+    if request.boundary_budget == "full_3d" and not table.empty:
+        budget = _full_boundary_flux_budget(
+            rep=rep,
+            masks=mask_array,
+            q_proxy=q_proxy,
+            buoyancy=buoyancy,
+            x_km=x_km,
+            y_km=y_km,
+        )
+        table = table.merge(budget, on=["depth_index", "depth_m"], how="left")
+    return table, {"psi": psi, "q_proxy": q_proxy, "buoyancy": buoyancy, "mask": mask_array}
 
 
 def _combo_output(root: Path, shape: str, axis_source: str, orientation: str, buoyancy_source: str) -> Path:
@@ -747,6 +925,8 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
         raise ValueError(f"Bad options: axis={bad_axis}, buoyancy={bad_buoy}")
     if request.boundary_mode not in BOUNDARY_MODES:
         raise ValueError(f"boundary_mode must be one of {BOUNDARY_MODES}")
+    if request.boundary_budget not in BOUNDARY_BUDGETS:
+        raise ValueError(f"boundary_budget must be one of {BOUNDARY_BUDGETS}")
     DynamicBoundaryConfig(
         mode=request.boundary_mode,
         iterations=request.active_contour_iterations,
@@ -852,7 +1032,7 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                     summary = _summary_table(profiles)
                     _write_table(profiles, combo_dir / "material_volume_profiles.csv")
                     _write_table(summary, combo_dir / "material_volume_summary.csv")
-                    if request.boundary_mode == "levelset_v2":
+                    if request.boundary_mode in {"levelset_v2", "lagrangian_v1"}:
                         _write_table(profiles, combo_dir / "boundary_v2_profiles.csv")
                         _write_table(summary, combo_dir / "boundary_v2_summary.csv")
                         flux_cols = [
@@ -878,6 +1058,27 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                             or col.endswith("_boundary_flux_integral_proxy")
                         ]
                         _write_table(profiles[flux_cols], combo_dir / "boundary_flux_budget.csv")
+                    if request.boundary_budget == "full_3d":
+                        full_cols = [
+                            col
+                            for col in profiles.columns
+                            if col
+                            in {
+                                "shape",
+                                "axis_source",
+                                "orientation",
+                                "buoyancy_source",
+                                "polarity",
+                                "tau",
+                                "depth_index",
+                                "depth_m",
+                                "boundary_budget",
+                                "vertical_velocity_source",
+                            }
+                            or col.startswith(("lateral_", "top_", "bottom_", "total_"))
+                            or col.startswith("w_proxy_")
+                        ]
+                        _write_table(profiles[full_cols], combo_dir / "full_boundary_flux_budget.csv")
                     manifest = {
                         "combo": combo,
                         "result_root": request.result_root,
@@ -889,6 +1090,7 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                         "pv_core_quantile": request.pv_core_quantile,
                         "min_mask_fraction": request.min_mask_fraction,
                         "boundary_mode": request.boundary_mode,
+                        "boundary_budget": request.boundary_budget,
                         "active_contour_iterations": request.active_contour_iterations,
                         "leakage_weight": request.leakage_weight,
                         "smoothness_weight": request.smoothness_weight,
@@ -964,7 +1166,7 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
         root_summary = pd.concat(root_summaries, ignore_index=True)
         _write_table(root_summary, request.output_root / "material_volume_all_combo_summary.csv")
         _write_table(root_summary, request.output_root / "shape_materiality_comparison.csv")
-        if request.boundary_mode == "levelset_v2":
+        if request.boundary_mode in {"levelset_v2", "lagrangian_v1"}:
             _write_table(root_summary, request.output_root / "boundary_v2_all_combo_summary.csv")
         _write_root_dynamic_summary(
             request.output_root / "dynamic_material_boundary_validation_summary_zh.md",
@@ -996,6 +1198,7 @@ def request_from_args(args) -> MaterialVolumeRequest:
         pv_core_quantile=float(args.pv_core_quantile),
         min_mask_fraction=float(args.min_mask_fraction),
         boundary_mode=str(getattr(args, "boundary_mode", "threshold")),
+        boundary_budget=str(getattr(args, "boundary_budget", "edge_proxy")),
         active_contour_iterations=int(getattr(args, "active_contour_iterations", 12)),
         leakage_weight=float(getattr(args, "leakage_weight", 1.0)),
         smoothness_weight=float(getattr(args, "smoothness_weight", 0.08)),

@@ -164,6 +164,7 @@ def cmd_run_object_material_boundary_validation(args: argparse.Namespace) -> int
         print(f"shapes: {args.shapes}")
         print(f"orientations: {args.orientations}")
         print(f"boundary_mode: {args.boundary_mode}")
+        print(f"boundary_budget: {args.boundary_budget}")
         print(f"max_tracks_per_shape: {args.max_tracks_per_shape}")
         print(f"max_objectdays: {args.max_objectdays}")
         return 0
@@ -181,6 +182,7 @@ def cmd_run_object_material_boundary_validation(args: argparse.Namespace) -> int
 
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
+    from .material_volume import BOUNDARY_BUDGETS
 
     parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
     parser.add_argument("--output-root", default=output_root)
@@ -201,6 +203,7 @@ def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str
     parser.add_argument("--pv-core-quantile", type=float, default=0.70)
     parser.add_argument("--min-mask-fraction", type=float, default=0.01)
     parser.add_argument("--boundary-mode", choices=BOUNDARY_MODES, default=boundary_mode)
+    parser.add_argument("--boundary-budget", choices=BOUNDARY_BUDGETS, default="edge_proxy")
     parser.add_argument("--active-contour-iterations", type=int, default=12)
     parser.add_argument("--leakage-weight", type=float, default=1.0)
     parser.add_argument("--smoothness-weight", type=float, default=0.08)
@@ -218,6 +221,7 @@ def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str
 
 def _add_object_boundary_arguments(parser: argparse.ArgumentParser) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
+    from .material_volume import BOUNDARY_BUDGETS
 
     parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
     parser.add_argument("--filter-root", default="/root/autodl-fs/kuroshiou/Filter")
@@ -236,6 +240,7 @@ def _add_object_boundary_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pv-core-quantile", type=float, default=0.70)
     parser.add_argument("--min-mask-fraction", type=float, default=0.01)
     parser.add_argument("--boundary-mode", choices=BOUNDARY_MODES, default="levelset_v2")
+    parser.add_argument("--boundary-budget", choices=BOUNDARY_BUDGETS, default="edge_proxy")
     parser.add_argument("--active-contour-iterations", type=int, default=14)
     parser.add_argument("--leakage-weight", type=float, default=1.0)
     parser.add_argument("--smoothness-weight", type=float, default=0.08)

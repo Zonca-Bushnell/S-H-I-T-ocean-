@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover - dependency-light dry-run suppo
     ndimage = None
 
 
-BOUNDARY_MODES = ("threshold", "active_contour", "levelset_v2")
+BOUNDARY_MODES = ("threshold", "active_contour", "levelset_v2", "lagrangian_v1")
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,12 @@ def vertical_mask_roughness(mask: np.ndarray, previous_mask: np.ndarray | None =
         return 0.0
     diffs = [np.mean(np.logical_xor(mask, ref)) for ref in refs]
     return float(np.nanmean(diffs))
+
+
+def mask_mismatch(mask: np.ndarray, reference_mask: np.ndarray | None) -> float:
+    if reference_mask is None or reference_mask.shape != mask.shape:
+        return 0.0
+    return float(np.mean(np.logical_xor(mask.astype(bool), reference_mask.astype(bool))))
 
 
 def levelset_candidate_masks(
@@ -182,6 +188,10 @@ def boundary_flux_metrics(
             "pv_boundary_flux_integral_proxy": np.nan,
             "buoyancy_boundary_flux_proxy": np.nan,
             "buoyancy_boundary_flux_integral_proxy": np.nan,
+            "momentum_x_boundary_flux_proxy": np.nan,
+            "momentum_y_boundary_flux_proxy": np.nan,
+            "momentum_x_boundary_flux_integral_proxy": np.nan,
+            "momentum_y_boundary_flux_integral_proxy": np.nan,
             "abs_leakage_integral_proxy": np.nan,
             "signed_leakage_integral_proxy": np.nan,
             "boundary_flux_over_internal_flux": np.nan,
@@ -202,6 +212,10 @@ def boundary_flux_metrics(
             "pv_boundary_flux_integral_proxy": np.nan,
             "buoyancy_boundary_flux_proxy": np.nan,
             "buoyancy_boundary_flux_integral_proxy": np.nan,
+            "momentum_x_boundary_flux_proxy": np.nan,
+            "momentum_y_boundary_flux_proxy": np.nan,
+            "momentum_x_boundary_flux_integral_proxy": np.nan,
+            "momentum_y_boundary_flux_integral_proxy": np.nan,
             "abs_leakage_integral_proxy": np.nan,
             "signed_leakage_integral_proxy": np.nan,
             "boundary_flux_over_internal_flux": np.nan,
@@ -211,6 +225,8 @@ def boundary_flux_metrics(
     heat_flux = np.nanmean(theta_prime[valid] * un[valid]) if np.any(np.isfinite(theta_prime[valid])) else np.nan
     pv_flux = np.nanmean(q_proxy[valid] * un[valid]) if np.any(np.isfinite(q_proxy[valid])) else np.nan
     b_flux = np.nanmean(buoyancy[valid] * un[valid]) if np.any(np.isfinite(buoyancy[valid])) else np.nan
+    mom_x_flux = np.nanmean((u[valid] - mean_u) * un[valid]) if np.any(np.isfinite(u[valid])) else np.nan
+    mom_y_flux = np.nanmean((v[valid] - mean_v) * un[valid]) if np.any(np.isfinite(v[valid])) else np.nan
     boundary_scale = np.nanmean(np.abs(pv_flux)) if np.isfinite(pv_flux) else np.nan
     return {
         "edge_cell_count": float(np.count_nonzero(edge)),
@@ -224,6 +240,10 @@ def boundary_flux_metrics(
         "pv_boundary_flux_integral_proxy": float(np.nansum(q_proxy[valid] * un[valid])),
         "buoyancy_boundary_flux_proxy": float(b_flux) if np.isfinite(b_flux) else np.nan,
         "buoyancy_boundary_flux_integral_proxy": float(np.nansum(buoyancy[valid] * un[valid])),
+        "momentum_x_boundary_flux_proxy": float(mom_x_flux) if np.isfinite(mom_x_flux) else np.nan,
+        "momentum_y_boundary_flux_proxy": float(mom_y_flux) if np.isfinite(mom_y_flux) else np.nan,
+        "momentum_x_boundary_flux_integral_proxy": float(np.nansum((u[valid] - mean_u) * un[valid])),
+        "momentum_y_boundary_flux_integral_proxy": float(np.nansum((v[valid] - mean_v) * un[valid])),
         "abs_leakage_integral_proxy": float(np.nansum(abs_un)),
         "signed_leakage_integral_proxy": float(np.nansum(un[valid])),
         "boundary_flux_over_internal_flux": float(boundary_scale / (abs(internal_flux_scale) + 1e-18))
@@ -249,6 +269,7 @@ def optimize_boundary(
     config: DynamicBoundaryConfig,
     previous_mask: np.ndarray | None = None,
     next_mask: np.ndarray | None = None,
+    time_reference_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, float | str]]:
     config.validate()
     if config.mode == "threshold":
@@ -298,12 +319,14 @@ def optimize_boundary(
             0.0, area_fraction - config.max_area_fraction
         )
         vertical_penalty = vertical_mask_roughness(mask, previous_mask, next_mask)
+        time_penalty = mask_mismatch(mask, time_reference_mask)
         energy = (
             config.leakage_weight * leakage
             + config.smoothness_weight * perimeter_fraction
             + config.containment_weight * containment_loss
             + config.area_weight * area_penalty
             + config.vertical_continuity_weight * vertical_penalty
+            + config.time_continuity_weight * time_penalty
         )
         return energy, {
             "leakage_energy": leakage,
@@ -312,6 +335,7 @@ def optimize_boundary(
             "weak_core_retention": speed_retention,
             "pv_core_retention": pv_retention,
             "vertical_mask_roughness": vertical_penalty,
+            "time_mask_roughness": time_penalty,
         }
 
     current = connected_component(initial_mask & core_domain, seed)
@@ -323,7 +347,7 @@ def optimize_boundary(
         candidates = [current]
         candidates.append(connected_component((current | neighbors4(current)) & core_domain, seed))
         candidates.append(connected_component((current & ~edge_mask(current)) & core_domain, seed))
-        if config.mode == "levelset_v2":
+        if config.mode in {"levelset_v2", "lagrangian_v1"}:
             candidates.extend(
                 levelset_candidate_masks(
                     current,
@@ -340,6 +364,12 @@ def optimize_boundary(
                 consensus = vote >= max(1, len(refs))
                 candidates.append(connected_component((current | consensus) & core_domain, seed))
                 candidates.append(connected_component((current & (consensus | speed_core | pv_core)) & core_domain, seed))
+            if config.mode == "lagrangian_v1" and time_reference_mask is not None and time_reference_mask.shape == current.shape:
+                time_ref = time_reference_mask.astype(bool)
+                time_band = time_ref | neighbors4(time_ref)
+                candidates.append(connected_component((current | time_ref) & core_domain, seed))
+                candidates.append(connected_component((current & (time_band | speed_core | pv_core)) & core_domain, seed))
+                candidates.append(connected_component(((current | time_band) & (core_domain | speed_core | pv_core)), seed))
         edge = edge_mask(current)
         un = normal_velocity(u=u, v=v, mean_u=mean_u, mean_v=mean_v, x_km=x_km, y_km=y_km, mask=current)
         edge_values = np.abs(un[edge & np.isfinite(un)])
@@ -383,8 +413,10 @@ def optimize_boundary(
         "boundary_mode": config.mode,
         "boundary_status": status,
         "active_contour_iterations_used": float(iterations_used),
-        "levelset_sigma_cells": float(config.levelset_sigma_cells) if config.mode == "levelset_v2" else np.nan,
+        "levelset_sigma_cells": float(config.levelset_sigma_cells) if config.mode in {"levelset_v2", "lagrangian_v1"} else np.nan,
         "vertical_continuity_weight": float(config.vertical_continuity_weight),
+        "time_continuity_weight": float(config.time_continuity_weight),
+        "time_constraint_skipped": "false" if time_reference_mask is not None else "true",
         "boundary_energy_initial": float(initial_energy),
         "boundary_energy_final": float(best_energy),
         "boundary_energy_reduction_fraction": float((initial_energy - best_energy) / (abs(initial_energy) + 1e-12)),

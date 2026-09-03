@@ -15,9 +15,11 @@ except ModuleNotFoundError:  # pragma: no cover - dependency-light dry-run suppo
     pd = None
 
 from .contracts import DEFAULT_RESULT_ROOT, RHO0, shape_output_name
+from .dynamic_boundary import BOUNDARY_MODES, neighbors4
 from .fields import RepresentativeSlice
 from .geometry import AxisLine
 from .material_volume import (
+    BOUNDARY_BUDGETS,
     DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT,
     MaterialVolumeRequest,
     _compute_one_slice,
@@ -33,6 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - import checked at run time.
 
 
 DEFAULT_OBJECT_BOUNDARY_OUTPUT_ROOT = DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT.parent / "object_material_boundary_validation"
+DEFAULT_OBJECT_LAGRANGIAN_OUTPUT_ROOT = DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT.parent / "object_lagrangian_boundary_validation"
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,7 @@ class ObjectBoundaryRequest:
     pv_core_quantile: float = 0.70
     min_mask_fraction: float = 0.01
     boundary_mode: str = "levelset_v2"
+    boundary_budget: str = "edge_proxy"
     active_contour_iterations: int = 14
     leakage_weight: float = 1.0
     smoothness_weight: float = 0.08
@@ -158,6 +162,7 @@ def _sample_object_slice(
     lat: np.ndarray,
     u: np.ndarray,
     v: np.ndarray,
+    theta_prime: np.ndarray,
     radial: np.ndarray,
     theta: np.ndarray,
     radial_mesh: np.ndarray,
@@ -175,6 +180,7 @@ def _sample_object_slice(
     local_y = radial_mesh * radius_m * np.sin(theta_mesh)
     u_layers: list[np.ndarray] = []
     v_layers: list[np.ndarray] = []
+    theta_layers: list[np.ndarray] = []
     depth_values: list[float] = []
     for row in center_line.itertuples(index=False):
         k = int(row.depth_index)
@@ -187,13 +193,16 @@ def _sample_object_slice(
         target_lon, target_lat = xy_to_lonlat(x_orig, y_orig, float(obj.surface_lon), float(obj.surface_lat))
         u_s = bilinear_sample(lon, lat, u[k], target_lon, target_lat)
         v_s = bilinear_sample(lon, lat, v[k], target_lon, target_lat)
+        theta_s = bilinear_sample(lon, lat, theta_prime[k], target_lon, target_lat)
         u_layers.append(u_s * cos_a - v_s * sin_a)
         v_layers.append(u_s * sin_a + v_s * cos_a)
+        theta_layers.append(theta_s)
         depth_values.append(float(row.depth_m))
     if len(u_layers) < 3:
         return None
     u_arr = np.asarray(u_layers, dtype="float64")
     v_arr = np.asarray(v_layers, dtype="float64")
+    theta_arr = np.asarray(theta_layers, dtype="float64")
     depth_arr = np.asarray(depth_values, dtype="float64")
     rep = RepresentativeSlice(
         polarity=str(obj.polarity),
@@ -206,9 +215,93 @@ def _sample_object_slice(
         v=v_arr,
         speed=np.hypot(u_arr, v_arr),
         count=None,
+        theta_prime=theta_arr,
     )
     axis = AxisLine.zero(depth_arr)
     return rep, axis
+
+
+def _mask_iou(mask: np.ndarray, reference: np.ndarray) -> float:
+    valid_shape = mask.shape == reference.shape
+    if not valid_shape:
+        return np.nan
+    union = np.count_nonzero(mask | reference)
+    if union == 0:
+        return np.nan
+    return float(np.count_nonzero(mask & reference) / union)
+
+
+def _advect_mask_stack_center_following(rep: RepresentativeSlice, masks: np.ndarray, dt_seconds: float) -> np.ndarray:
+    x_km, y_km = rep.mesh_xy_km
+    radial = np.asarray(rep.radius_coord, dtype=float)
+    dr = float(np.nanmedian(np.diff(radial))) if radial.size > 1 else 1.0
+    dtheta = float(2.0 * np.pi / rep.theta_rad.size)
+    out = np.zeros_like(masks, dtype=bool)
+    for iz, mask in enumerate(masks.astype(bool)):
+        if not np.any(mask):
+            continue
+        u = rep.u[iz]
+        v = rep.v[iz]
+        mean_u = float(np.nanmean(u[mask])) if np.any(mask & np.isfinite(u)) else 0.0
+        mean_v = float(np.nanmean(v[mask])) if np.any(mask & np.isfinite(v)) else 0.0
+        x_new_km = x_km + (u - mean_u) * dt_seconds / 1000.0
+        y_new_km = y_km + (v - mean_v) * dt_seconds / 1000.0
+        r_new = np.hypot(x_new_km, y_new_km) * 1000.0 / max(float(rep.radius_m), 1.0)
+        theta_new = np.mod(np.arctan2(y_new_km, x_new_km), 2.0 * np.pi)
+        valid = mask & np.isfinite(r_new) & np.isfinite(theta_new)
+        ir = np.rint((r_new[valid] - radial[0]) / dr).astype(int)
+        it = np.rint(theta_new[valid] / dtheta).astype(int) % rep.theta_rad.size
+        keep = (ir >= 0) & (ir < radial.size)
+        if np.any(keep):
+            out[iz, ir[keep], it[keep]] = True
+            out[iz] = out[iz] | (neighbors4(out[iz]) & ~mask)
+    return out
+
+
+def _align_reference_masks_by_depth(previous_depth: np.ndarray, previous_masks: np.ndarray, current_depth: np.ndarray) -> np.ndarray | None:
+    if previous_masks.ndim != 3:
+        return None
+    out = np.zeros((current_depth.size, previous_masks.shape[1], previous_masks.shape[2]), dtype=bool)
+    if previous_depth.size == 0:
+        return None
+    spacing = float(np.nanmedian(np.diff(np.sort(np.unique(previous_depth))))) if previous_depth.size > 1 else np.inf
+    tolerance = max(1.0, spacing * 0.6) if np.isfinite(spacing) else np.inf
+    any_match = False
+    for iz, depth_value in enumerate(current_depth):
+        idx = int(np.nanargmin(np.abs(previous_depth - depth_value)))
+        if abs(float(previous_depth[idx] - depth_value)) <= tolerance:
+            out[iz] = previous_masks[idx]
+            any_match = True
+    return out if any_match else None
+
+
+def _time_advection_audit(final_masks: np.ndarray, reference_masks: np.ndarray | None) -> pd.DataFrame:
+    rows: list[dict[str, float | bool]] = []
+    for iz in range(final_masks.shape[0]):
+        if reference_masks is None or iz >= reference_masks.shape[0]:
+            rows.append(
+                {
+                    "depth_index": iz,
+                    "advected_overlap": np.nan,
+                    "time_boundary_mismatch": np.nan,
+                    "mask_area_drift_fraction": np.nan,
+                    "time_constraint_skipped": True,
+                }
+            )
+            continue
+        ref = reference_masks[iz].astype(bool)
+        final = final_masks[iz].astype(bool)
+        ref_count = max(1, int(np.count_nonzero(ref)))
+        rows.append(
+            {
+                "depth_index": iz,
+                "advected_overlap": _mask_iou(final, ref),
+                "time_boundary_mismatch": float(np.mean(np.logical_xor(final, ref))),
+                "mask_area_drift_fraction": float((np.count_nonzero(final) - np.count_nonzero(ref)) / ref_count),
+                "time_constraint_skipped": False,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _summary_table(profiles: pd.DataFrame) -> pd.DataFrame:
@@ -227,6 +320,9 @@ def _summary_table(profiles: pd.DataFrame) -> pd.DataFrame:
                 "leakage_reduction_fraction_median": float(np.nanmedian(sub["leakage_reduction_fraction"].to_numpy(float))),
                 "boundary_flux_over_internal_flux_median": float(np.nanmedian(sub["boundary_flux_over_internal_flux"].to_numpy(float))),
                 "vertical_mask_roughness_median": float(np.nanmedian(sub.get("vertical_mask_roughness", pd.Series(dtype=float)).to_numpy(float))),
+                "advected_overlap_median": float(np.nanmedian(sub.get("advected_overlap", pd.Series(dtype=float)).to_numpy(float))),
+                "time_boundary_mismatch_median": float(np.nanmedian(sub.get("time_boundary_mismatch", pd.Series(dtype=float)).to_numpy(float))),
+                "mask_area_drift_fraction_median": float(np.nanmedian(sub.get("mask_area_drift_fraction", pd.Series(dtype=float)).to_numpy(float))),
                 "pv_core_retention_median": float(np.nanmedian(sub["pv_core_retention"].to_numpy(float))),
                 "weak_core_retention_median": float(np.nanmedian(sub["weak_core_retention"].to_numpy(float))),
             }
@@ -329,6 +425,54 @@ def _plot_object_summaries(output_root: Path, profiles: pd.DataFrame, summary: p
         plt.close(fig)
         written.append(path)
 
+    if not summary.empty and {"shape", "track3d_id", "advected_overlap_median"}.issubset(summary.columns):
+        plot_table = summary.dropna(subset=["advected_overlap_median"]).copy()
+        if not plot_table.empty:
+            plot_table["track_label"] = plot_table["shape"].astype(str) + "/" + plot_table["track3d_id"].astype(str)
+            plot_table = plot_table.sort_values("advected_overlap_median", ascending=False)
+            fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+            ax.bar(np.arange(plot_table.shape[0]), plot_table["advected_overlap_median"].to_numpy(float), color="#59a14f")
+            ax.set_xticks(np.arange(plot_table.shape[0]))
+            ax.set_xticklabels(plot_table["track_label"], rotation=45, ha="right")
+            ax.set_ylim(0, 1.0)
+            ax.set_ylabel("median advected-mask overlap")
+            ax.set_title("Track time-continuity after one-day mask advection")
+            ax.grid(True, axis="y", alpha=0.25)
+            path = figures / "advected_overlap_by_track.png"
+            fig.savefig(path, dpi=180)
+            plt.close(fig)
+            written.append(path)
+
+    volume_terms = ["lateral_abs_volume_flux_m3s_proxy", "top_abs_volume_flux_m3s_proxy", "bottom_abs_volume_flux_m3s_proxy"]
+    if not finite.empty and {"shape", *volume_terms}.issubset(finite.columns):
+        rows = []
+        for shape, sub in finite.groupby("shape", sort=True):
+            rows.append(
+                {
+                    "shape": str(shape),
+                    "lateral": float(np.nanmedian(sub[volume_terms[0]].to_numpy(float))),
+                    "top": float(np.nanmedian(sub[volume_terms[1]].to_numpy(float))),
+                    "bottom": float(np.nanmedian(sub[volume_terms[2]].to_numpy(float))),
+                }
+            )
+        budget = pd.DataFrame(rows)
+        fig, ax = plt.subplots(figsize=(7.5, 4.5), constrained_layout=True)
+        x = np.arange(budget.shape[0])
+        width = 0.25
+        ax.bar(x - width, budget["lateral"], width=width, label="lateral")
+        ax.bar(x, budget["top"], width=width, label="top w_proxy")
+        ax.bar(x + width, budget["bottom"], width=width, label="bottom w_proxy")
+        ax.set_xticks(x)
+        ax.set_xticklabels(budget["shape"])
+        ax.set_ylabel("median absolute volume flux proxy (m3/s)")
+        ax.set_title("Full 3D boundary flux budget by boundary part")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.legend(frameon=False)
+        path = figures / "lateral_vs_top_bottom_flux.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        written.append(path)
+
     return written
 
 
@@ -363,6 +507,39 @@ def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundary
 
 def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundaryRequest) -> None:
     lines = [
+        "# Object-Level Lagrangian Material Boundary Validation Summary",
+        "",
+        "## 目标",
+        "本诊断把材料边界验证推进到原始涡旋 object-day/track 层面。"
+        "当 `boundary_mode=lagrangian_v1` 时，同一条 track 的上一日 mask 会用 30-180 天带通异常速度平流一天，"
+        "作为下一日边界优化的时间连续参考。",
+        "",
+        "## 方法",
+        f"- boundary mode: `{request.boundary_mode}`",
+        f"- boundary budget: `{request.boundary_budget}`",
+        f"- shapes: `{','.join(request.shapes)}`",
+        f"- orientations: `{','.join(request.orientations)}`",
+        f"- buoyancy sources: `{','.join(request.buoyancy_sources)}`",
+        f"- radial grid: `{request.radial_bins} x {request.azimuth_bins}`, r/R <= `{request.rmax}`",
+        "- 平流速度：30-180 天带通 `uo_glor/vo_glor`，采用中心随动局地坐标的一阶半拉格朗日近似。",
+        "- 完整边界预算：侧壁使用水平法向速度；顶面/底面使用由水平散度积分得到的 `w_proxy`，因此顶底项是诊断代理。",
+        "",
+        "## 结果摘要",
+        "```text",
+        summary.to_string(index=False) if not summary.empty else "empty",
+        "```",
+        "",
+        "## 判读边界",
+        "- `advected_overlap` 越高，说明上一日边界随流场平流后越接近下一日优化边界。",
+        "- `time_boundary_mismatch` 和 `mask_area_drift_fraction` 用来审计时间连续约束是否在强行扭曲边界。",
+        "- `full_boundary_flux_budget.csv` 中的 lateral/top/bottom/total 项分别对应侧壁、顶面、底面和总边界交换。",
+        "- heat/PV/buoyancy/momentum 边界通量不为零时，体内 EP forcing 不能被单独解释为严格闭合材料体的全部动力。",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundaryRequest) -> None:
+    lines = [
         "# Object-Level Material Boundary Validation Summary",
         "",
         "## 目标",
@@ -391,7 +568,44 @@ def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundary
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundaryRequest) -> None:
+    lines = [
+        "# Object-Level Lagrangian Material Boundary Validation Summary",
+        "",
+        "## 目标",
+        "本诊断把材料边界验证推进到原始涡旋 object-day/track 层面。"
+        "当 `boundary_mode=lagrangian_v1` 时，同一条 track 的上一日 mask 会用 30-180 天带通异常速度平流一天，"
+        "作为下一日边界优化的时间连续参考。",
+        "",
+        "## 方法",
+        f"- boundary mode: `{request.boundary_mode}`",
+        f"- boundary budget: `{request.boundary_budget}`",
+        f"- shapes: `{','.join(request.shapes)}`",
+        f"- orientations: `{','.join(request.orientations)}`",
+        f"- buoyancy sources: `{','.join(request.buoyancy_sources)}`",
+        f"- radial grid: `{request.radial_bins} x {request.azimuth_bins}`, r/R <= `{request.rmax}`",
+        "- 平流速度：30-180 天带通 `uo_glor/vo_glor`，采用中心随动局地坐标的一阶半拉格朗日近似。",
+        "- 完整边界预算：侧壁使用水平法向速度；顶面/底面使用由水平散度积分得到的 `w_proxy`，因此顶底项是诊断代理。",
+        "",
+        "## 结果摘要",
+        "```text",
+        summary.to_string(index=False) if not summary.empty else "empty",
+        "```",
+        "",
+        "## 判读边界",
+        "- `advected_overlap` 越高，说明上一日边界随流场平流后越接近下一日优化边界。",
+        "- `time_boundary_mismatch` 和 `mask_area_drift_fraction` 用来审计时间连续约束是否在强行扭曲边界。",
+        "- `full_boundary_flux_budget.csv` 中的 lateral/top/bottom/total 项分别对应侧壁、顶面、底面和总边界交换。",
+        "- heat/PV/buoyancy/momentum 边界通量不为零时，体内 EP forcing 不能被单独解释为严格闭合材料体的全部动力。",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> dict[str, Path]:
+    if request.boundary_mode not in BOUNDARY_MODES:
+        raise ValueError(f"boundary_mode must be one of {BOUNDARY_MODES}")
+    if request.boundary_budget not in BOUNDARY_BUDGETS:
+        raise ValueError(f"boundary_budget must be one of {BOUNDARY_BUDGETS}")
     if request.dry_run:
         print("Object-level material-boundary validation dry-run")
         print(f"result_root: {request.result_root}")
@@ -399,6 +613,7 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
         print(f"output_root: {request.output_root}")
         print(f"shapes: {','.join(request.shapes)}")
         print(f"boundary_mode: {request.boundary_mode}")
+        print(f"boundary_budget: {request.boundary_budget}")
         print(f"max_tracks_per_shape: {request.max_tracks_per_shape}")
         print(f"max_objectdays: {request.max_objectdays}")
         return {}
@@ -429,11 +644,12 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                 combo_dir.mkdir(parents=True, exist_ok=True)
                 rows: list[pd.DataFrame] = []
                 day_cache: dict[date, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+                previous_by_track: dict[int, tuple[date, RepresentativeSlice, np.ndarray]] = {}
                 for obj in objects.sort_values(["track3d_id", "date", "eddy3d_object_id"]).itertuples(index=False):
                     day = pd.Timestamp(obj.date).date()
                     if day not in day_cache:
                         day_cache[day] = _read_filter_day(request.filter_root, request.filter_template, day)
-                    lon, lat, u, v, _theta = day_cache[day]
+                    lon, lat, u, v, theta_prime = day_cache[day]
                     sampled = _sample_object_slice(
                         obj,
                         points,
@@ -441,6 +657,7 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                         lat,
                         u,
                         v,
+                        theta_prime,
                         radial,
                         theta,
                         radial_mesh,
@@ -464,6 +681,7 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                         pv_core_quantile=request.pv_core_quantile,
                         min_mask_fraction=request.min_mask_fraction,
                         boundary_mode=request.boundary_mode,
+                        boundary_budget=request.boundary_budget,
                         active_contour_iterations=request.active_contour_iterations,
                         leakage_weight=request.leakage_weight,
                         smoothness_weight=request.smoothness_weight,
@@ -477,6 +695,19 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                         max_area_fraction=request.max_area_fraction,
                     )
                     n2 = np.full(rep.depth_m.shape, float(request.constant_n2), dtype="float64")
+                    track_id = int(obj.track3d_id)
+                    time_reference_masks = None
+                    previous = previous_by_track.get(track_id)
+                    if request.boundary_mode == "lagrangian_v1" and previous is not None:
+                        previous_day, previous_rep, previous_masks = previous
+                        day_gap = (day - previous_day).days
+                        if day_gap == 1:
+                            advected = _advect_mask_stack_center_following(previous_rep, previous_masks, 86400.0)
+                            time_reference_masks = _align_reference_masks_by_depth(
+                                previous_rep.depth_m,
+                                advected,
+                                rep.depth_m,
+                            )
                     table, _debug = _compute_one_slice(
                         rep=rep,
                         axis=axis,
@@ -484,17 +715,30 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                         n2=n2,
                         buoyancy_source=buoyancy_source,
                         request=material_request,
+                        time_reference_masks=time_reference_masks,
                     )
+                    time_audit = _time_advection_audit(_debug["mask"], time_reference_masks)
+                    table = table.merge(time_audit, on="depth_index", how="left", suffixes=("", "_advection"))
+                    if "time_constraint_skipped_advection" in table.columns:
+                        table["time_constraint_skipped"] = table["time_constraint_skipped_advection"]
+                        table = table.drop(columns=["time_constraint_skipped_advection"])
                     table["shape"] = shape
                     table["orientation"] = orientation
                     table["buoyancy_source"] = buoyancy_source
                     table["polarity"] = str(obj.polarity)
                     table["tau"] = float(rep.tau) if np.isfinite(rep.tau) else np.nan
                     table["date"] = str(obj.date)
-                    table["track3d_id"] = int(obj.track3d_id)
+                    table["track3d_id"] = track_id
                     table["eddy3d_object_id"] = int(obj.eddy3d_object_id)
                     table["mean_radius_m"] = float(obj.mean_radius_m)
+                    table["boundary_budget"] = request.boundary_budget
+                    table["lagrangian_advection_model"] = (
+                        "center_following_bandpass_anomaly_rk1"
+                        if request.boundary_mode == "lagrangian_v1"
+                        else "none"
+                    )
                     rows.append(table)
+                    previous_by_track[track_id] = (day, rep, _debug["mask"])
                 if not rows:
                     continue
                 profiles = pd.concat(rows, ignore_index=True)
@@ -524,6 +768,53 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                     or col.endswith("_boundary_flux_integral_proxy")
                 ]
                 _write_table(profiles[flux_cols], combo_dir / "boundary_flux_budget.csv")
+                if request.boundary_budget == "full_3d":
+                    full_cols = [
+                        col
+                        for col in profiles.columns
+                        if col
+                        in {
+                            "shape",
+                            "orientation",
+                            "buoyancy_source",
+                            "polarity",
+                            "tau",
+                            "date",
+                            "track3d_id",
+                            "eddy3d_object_id",
+                            "depth_index",
+                            "depth_m",
+                            "boundary_budget",
+                            "vertical_velocity_source",
+                        }
+                        or col.startswith(("lateral_", "top_", "bottom_", "total_"))
+                        or col.startswith("w_proxy_")
+                    ]
+                    _write_table(profiles[full_cols], combo_dir / "full_boundary_flux_budget.csv")
+                time_cols = [
+                    col
+                    for col in profiles.columns
+                    if col
+                    in {
+                        "shape",
+                        "orientation",
+                        "buoyancy_source",
+                        "polarity",
+                        "tau",
+                        "date",
+                        "track3d_id",
+                        "eddy3d_object_id",
+                        "depth_index",
+                        "depth_m",
+                        "advected_overlap",
+                        "time_boundary_mismatch",
+                        "mask_area_drift_fraction",
+                        "time_constraint_skipped",
+                        "leakage_before_time_constraint",
+                        "leakage_after_time_constraint",
+                    }
+                ]
+                _write_table(profiles[time_cols], combo_dir / "time_advection_audit.csv")
                 (combo_dir / "object_material_boundary_manifest.json").write_text(
                     json.dumps(
                         _json_ready(
@@ -533,6 +824,8 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
                                 "buoyancy_source": buoyancy_source,
                                 "rv_root": rv_root,
                                 "boundary_mode": request.boundary_mode,
+                                "boundary_budget": request.boundary_budget,
+                                "lagrangian_advection_model": "center_following_bandpass_anomaly_rk1",
                                 "radial_bins": request.radial_bins,
                                 "azimuth_bins": request.azimuth_bins,
                                 "rmax": request.rmax,
@@ -555,6 +848,53 @@ def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> d
         root_summary = pd.concat(all_summaries, ignore_index=True)
         _write_table(root_profiles, request.output_root / "object_material_boundary_profiles.csv")
         _write_table(root_summary, request.output_root / "object_track_materiality_summary.csv")
+        if request.boundary_budget == "full_3d":
+            root_full_cols = [
+                col
+                for col in root_profiles.columns
+                if col
+                in {
+                    "shape",
+                    "orientation",
+                    "buoyancy_source",
+                    "polarity",
+                    "tau",
+                    "date",
+                    "track3d_id",
+                    "eddy3d_object_id",
+                    "depth_index",
+                    "depth_m",
+                    "boundary_budget",
+                    "vertical_velocity_source",
+                }
+                or col.startswith(("lateral_", "top_", "bottom_", "total_"))
+                or col.startswith("w_proxy_")
+            ]
+            _write_table(root_profiles[root_full_cols], request.output_root / "full_boundary_flux_budget.csv")
+        root_time_cols = [
+            col
+            for col in root_profiles.columns
+            if col
+            in {
+                "shape",
+                "orientation",
+                "buoyancy_source",
+                "polarity",
+                "tau",
+                "date",
+                "track3d_id",
+                "eddy3d_object_id",
+                "depth_index",
+                "depth_m",
+                "advected_overlap",
+                "time_boundary_mismatch",
+                "mask_area_drift_fraction",
+                "time_constraint_skipped",
+                "leakage_before_time_constraint",
+                "leakage_after_time_constraint",
+            }
+        ]
+        _write_table(root_profiles[root_time_cols], request.output_root / "time_advection_audit.csv")
         for plot_path in _plot_object_summaries(request.output_root, root_profiles, root_summary):
             outputs[f"figure:{plot_path.name}"] = plot_path
         _write_summary_md(request.output_root / "object_material_boundary_validation_summary_zh.md", root_summary, request)
@@ -585,6 +925,7 @@ def request_from_args(args) -> ObjectBoundaryRequest:
         pv_core_quantile=float(args.pv_core_quantile),
         min_mask_fraction=float(args.min_mask_fraction),
         boundary_mode=str(args.boundary_mode),
+        boundary_budget=str(getattr(args, "boundary_budget", "edge_proxy")),
         active_contour_iterations=int(args.active_contour_iterations),
         leakage_weight=float(args.leakage_weight),
         smoothness_weight=float(args.smoothness_weight),

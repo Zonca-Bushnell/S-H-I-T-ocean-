@@ -36,6 +36,7 @@ class RepresentativeSlice:
     v: np.ndarray
     speed: np.ndarray
     count: np.ndarray | None = None
+    theta_prime: np.ndarray | None = None
 
     @property
     def radial_m(self) -> np.ndarray:
