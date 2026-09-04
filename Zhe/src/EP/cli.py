@@ -199,6 +199,23 @@ def cmd_run_object_material_coherence_validation(args: argparse.Namespace) -> in
     return 0
 
 
+def cmd_run_object_material_geodesic_validation(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        from .material_geodesic import request_from_args, run_object_material_geodesic_validation
+
+        request = request_from_args(args)
+        run_object_material_geodesic_validation(request)
+        return 0
+    from .material_geodesic import request_from_args, run_object_material_geodesic_validation
+
+    request = request_from_args(args)
+    outputs = run_object_material_geodesic_validation(request)
+    print("Object material-geodesic EP validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
     from .material_volume import BOUNDARY_BUDGETS
@@ -322,6 +339,44 @@ def _add_material_coherence_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true")
 
 
+def _add_material_geodesic_arguments(parser: argparse.ArgumentParser) -> None:
+    from .material_geodesic import BOUNDARY_BUDGETS, GEODESIC_BOUNDARY_MODES
+
+    parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--filter-root", default="/root/autodl-fs/kuroshiou/Filter")
+    parser.add_argument("--output-root", default="/root/autodl-fs/kuroshiou/EP-FLUX/object_material_geodesic_ep_validation")
+    parser.add_argument("--shapes", default="coherent,upright_like")
+    parser.add_argument("--orientations", default="turned")
+    parser.add_argument("--buoyancy-sources", default="thermal_wind")
+    parser.add_argument(
+        "--boundary-mode",
+        default=",".join(GEODESIC_BOUNDARY_MODES),
+        help="Comma-separated modes: cauchy_green_geodesic_v1,lavd_material_v1,hybrid_geodesic_lavd_v1",
+    )
+    parser.add_argument("--boundary-budget", choices=BOUNDARY_BUDGETS, default="full_3d")
+    parser.add_argument("--filter-template", default="global_phy_{year}_bandpass_30_180d.nc")
+    parser.add_argument("--radial-bins", type=int, default=18)
+    parser.add_argument("--azimuth-bins", type=int, default=36)
+    parser.add_argument("--rmax", type=float, default=1.5)
+    parser.add_argument("--reference-lat", type=float, default=30.0)
+    parser.add_argument("--constant-n2", type=float, default=2.0e-5)
+    parser.add_argument("--core-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--speed-core-quantile", type=float, default=0.45)
+    parser.add_argument("--pv-core-quantile", type=float, default=0.70)
+    parser.add_argument("--min-mask-fraction", type=float, default=0.01)
+    parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--min-area-fraction", type=float, default=0.10)
+    parser.add_argument("--max-area-fraction", type=float, default=0.75)
+    parser.add_argument("--trajectory-window-days", type=int, default=7)
+    parser.add_argument("--particle-spacing-km", type=float, default=5.0)
+    parser.add_argument("--advection-step-hours", type=float, default=6.0)
+    parser.add_argument("--max-tracks-per-shape", type=int, default=0)
+    parser.add_argument("--max-objectdays", type=int, default=0)
+    parser.add_argument("--max-depth-layers", type=int, default=0)
+    parser.add_argument("--skip-missing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Object-oriented EP flux diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -422,6 +477,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_material_coherence_arguments(object_coherence)
     object_coherence.set_defaults(func=cmd_run_object_material_coherence_validation)
+
+    object_geodesic = sub.add_parser(
+        "run-object-material-geodesic-validation",
+        help="Run object-level finite-time Cauchy-Green/LAVD material-boundary EP diagnostics",
+    )
+    _add_material_geodesic_arguments(object_geodesic)
+    object_geodesic.set_defaults(func=cmd_run_object_material_geodesic_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
