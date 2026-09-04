@@ -26,6 +26,9 @@ GEODESIC_BOUNDARY_MODES = (
     "cauchy_green_geodesic_v1",
     "lavd_material_v1",
     "hybrid_geodesic_lavd_v1",
+    "pv_retention_geodesic_v1",
+    "pv_retention_lavd_v1",
+    "pv_retention_hybrid_v1",
 )
 BOUNDARY_BUDGETS = ("edge_proxy", "full_3d")
 DEFAULT_GEODESIC_OUTPUT_ROOT = Path(
@@ -54,6 +57,11 @@ class MaterialGeodesicRequest:
     pv_core_quantile: float = 0.70
     min_mask_fraction: float = 0.01
     min_core_retention: float = 0.75
+    min_pv_retention: float = 0.75
+    pv_retention_weight: float = 0.80
+    weak_retention_weight: float = 0.40
+    particle_retention_weight: float = 0.20
+    require_pv_retention: bool = False
     min_area_fraction: float = 0.10
     max_area_fraction: float = 0.75
     trajectory_window_days: int = 7
@@ -82,6 +90,15 @@ def _validate_request(request: MaterialGeodesicRequest) -> None:
         raise ValueError("trajectory_window_days must be positive")
     if request.advection_step_hours <= 0:
         raise ValueError("advection_step_hours must be positive")
+    if not 0.0 < request.min_pv_retention <= 1.0:
+        raise ValueError("min_pv_retention must be in (0, 1]")
+    for name, value in {
+        "pv_retention_weight": request.pv_retention_weight,
+        "weak_retention_weight": request.weak_retention_weight,
+        "particle_retention_weight": request.particle_retention_weight,
+    }.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
 
 
 def _require_runtime() -> None:
@@ -557,6 +574,52 @@ def _core_retention(mask: np.ndarray, core_domain: np.ndarray, weak_core: np.nda
     )
 
 
+def _pv_retention_audit(
+    mask: np.ndarray,
+    q_layer: np.ndarray,
+    core_domain: np.ndarray,
+    pv_core: np.ndarray,
+    x_km: np.ndarray,
+    y_km: np.ndarray,
+) -> dict[str, float | str]:
+    q_abs = np.abs(q_layer)
+    finite_core = core_domain & np.isfinite(q_abs)
+    finite_pv_core = pv_core & np.isfinite(q_abs)
+    pv_abs_total = float(np.nansum(q_abs[finite_core]))
+    pv_high_total = float(np.nansum(q_abs[finite_pv_core]))
+    pv_abs_retention = float(np.nansum(q_abs[mask & finite_core]) / (pv_abs_total + 1e-12))
+    pv_high_retention = float(np.nansum(q_abs[mask & finite_pv_core]) / (pv_high_total + 1e-12))
+
+    if not np.any(finite_pv_core):
+        return {
+            "pv_abs_retention": pv_abs_retention,
+            "pv_high_quantile_retention": pv_high_retention,
+            "pv_centroid_inside_mask": "false",
+            "pv_centroid_x_km": np.nan,
+            "pv_centroid_y_km": np.nan,
+            "distance_mask_to_pv_centroid_km": np.nan,
+        }
+
+    weights = q_abs[finite_pv_core]
+    px = float(np.nansum(x_km[finite_pv_core] * weights) / (np.nansum(weights) + 1e-12))
+    py = float(np.nansum(y_km[finite_pv_core] * weights) / (np.nansum(weights) + 1e-12))
+    nearest = np.nanargmin((x_km - px) ** 2 + (y_km - py) ** 2)
+    nearest_ij = np.unravel_index(int(nearest), x_km.shape)
+    inside = bool(mask[nearest_ij])
+    if np.any(mask):
+        distance = float(np.nanmin(np.hypot(x_km[mask] - px, y_km[mask] - py)))
+    else:
+        distance = np.nan
+    return {
+        "pv_abs_retention": pv_abs_retention,
+        "pv_high_quantile_retention": pv_high_retention,
+        "pv_centroid_inside_mask": "true" if inside else "false",
+        "pv_centroid_x_km": px,
+        "pv_centroid_y_km": py,
+        "distance_mask_to_pv_centroid_km": distance,
+    }
+
+
 def _select_best_candidate(
     candidates: list[tuple[np.ndarray, dict[str, float | str]]],
     *,
@@ -584,6 +647,7 @@ def _select_best_candidate(
         if not np.any(mask):
             continue
         weak_ret, pv_ret = _core_retention(mask, core_domain, weak_core, pv_core)
+        pv_audit = _pv_retention_audit(mask, q_proxy[depth_index], core_domain, pv_core, x_km, y_km)
         ret_f = _retention_for_mask(mask, xf, yf, x_km, y_km, rep.radius_m, rep.radius_coord)
         ret_b = _retention_for_mask(mask, xb, yb, x_km, y_km, rep.radius_m, rep.radius_coord)
         ret_values = np.asarray([ret_f, ret_b], dtype=float)
@@ -593,14 +657,28 @@ def _select_best_candidate(
         stretch_penalty = float(meta.get("mean_log_lambda2_abs", 0.0) or 0.0)
         closure_penalty = 0.0 if bool(meta.get("closed_geodesic_found", meta.get("lavd_closed_contour_found", False))) else 0.25
         retention_penalty = 1.0 - particle_ret if np.isfinite(particle_ret) else 1.0
-        core_penalty = max(0.0, request.min_core_retention - min(weak_ret, pv_ret))
-        score = (
-            flux["leakage_mean_abs_ms"]
-            + 0.20 * retention_penalty
-            + 0.15 * core_penalty
-            + 0.05 * stretch_penalty
-            + closure_penalty
-        )
+        if bool(meta.get("pv_retention_focused", False)):
+            pv_loss = max(0.0, request.min_pv_retention - pv_ret)
+            weak_loss = max(0.0, request.min_core_retention - weak_ret)
+            if request.require_pv_retention and pv_ret < request.min_pv_retention:
+                pv_loss += 10.0 * (request.min_pv_retention - pv_ret)
+            score = (
+                flux["leakage_mean_abs_ms"]
+                + request.particle_retention_weight * retention_penalty
+                + request.pv_retention_weight * pv_loss
+                + request.weak_retention_weight * weak_loss
+                + 0.05 * stretch_penalty
+                + closure_penalty
+            )
+        else:
+            core_penalty = max(0.0, request.min_core_retention - min(weak_ret, pv_ret))
+            score = (
+                flux["leakage_mean_abs_ms"]
+                + 0.20 * retention_penalty
+                + 0.15 * core_penalty
+                + 0.05 * stretch_penalty
+                + closure_penalty
+            )
         if score < best_score:
             best_score = float(score)
             best_mask = mask
@@ -619,6 +697,7 @@ def _select_best_candidate(
                 "backward_valid_fraction": float(np.nanmean(vb)),
                 "weak_core_retention": weak_ret,
                 "pv_core_retention": pv_ret,
+                **pv_audit,
                 "mask_fraction": _mask_area_fraction(mask, core_domain),
             }
     return best_mask, best_meta if best_meta else {"boundary_status": "no_scored_candidate"}
@@ -681,8 +760,17 @@ def _layer_geodesic_boundary(
         step_hours=request.advection_step_hours,
     )
 
+    candidate_family = mode.replace("pv_retention_", "")
+    if candidate_family == "geodesic_v1":
+        candidate_family = "cauchy_green_geodesic_v1"
+    if candidate_family == "lavd_v1":
+        candidate_family = "lavd_material_v1"
+    if candidate_family == "hybrid_v1":
+        candidate_family = "hybrid_geodesic_lavd_v1"
+    pv_retention_focused = mode.startswith("pv_retention_")
+
     candidates: list[tuple[np.ndarray, dict[str, float | str]]] = []
-    if mode in {"cauchy_green_geodesic_v1", "hybrid_geodesic_lavd_v1"}:
+    if candidate_family in {"cauchy_green_geodesic_v1", "hybrid_geodesic_lavd_v1"}:
         candidates.extend(
             _candidate_from_stretch(
                 cg["lambda2"],
@@ -693,7 +781,7 @@ def _layer_geodesic_boundary(
                 max_area_fraction=request.max_area_fraction,
             )
         )
-    if mode in {"lavd_material_v1", "hybrid_geodesic_lavd_v1"}:
+    if candidate_family in {"lavd_material_v1", "hybrid_geodesic_lavd_v1"}:
         candidates.extend(
             _candidate_from_lavd(
                 lavd,
@@ -704,7 +792,7 @@ def _layer_geodesic_boundary(
                 max_area_fraction=request.max_area_fraction,
             )
         )
-    if mode == "hybrid_geodesic_lavd_v1" and np.any(base_mask):
+    if candidate_family == "hybrid_geodesic_lavd_v1" and np.any(base_mask):
         hybrid_domain = core_domain & cg["valid_cg"] & lavd_valid
         if np.any(hybrid_domain):
             stretch_error = np.abs(np.log(cg["lambda2"]))
@@ -733,6 +821,12 @@ def _layer_geodesic_boundary(
                     )
                 )
 
+    if pv_retention_focused:
+        candidates = [
+            (mask, {**meta, "pv_retention_focused": "true"})
+            for mask, meta in candidates
+        ]
+
     mask, meta = _select_best_candidate(
         candidates,
         rep=rep,
@@ -748,6 +842,8 @@ def _layer_geodesic_boundary(
         backward_map=backward,
         request=request,
     )
+    if pv_retention_focused and float(meta.get("pv_core_retention", 0.0) or 0.0) < request.min_pv_retention:
+        meta["boundary_status"] = "pv_retention_below_target"
     meta.update(
         {
             "boundary_mode": mode,
@@ -926,6 +1022,9 @@ def _summary_table(profiles: pd.DataFrame) -> pd.DataFrame:
                 "closure_residual_proxy_median": median_col("closure_residual_proxy"),
                 "weak_core_retention_median": median_col("weak_core_retention"),
                 "pv_core_retention_median": median_col("pv_core_retention"),
+                "pv_abs_retention_median": median_col("pv_abs_retention"),
+                "pv_high_quantile_retention_median": median_col("pv_high_quantile_retention"),
+                "distance_mask_to_pv_centroid_median_km": median_col("distance_mask_to_pv_centroid_km"),
             }
         )
     return pd.DataFrame(rows)
@@ -1043,6 +1142,14 @@ def _write_subset_tables(root: Path, profiles: pd.DataFrame) -> None:
             "heat_boundary_abs_proxy",
             "momentum_boundary_abs_proxy",
             "closure_residual_proxy",
+            "weak_core_retention",
+            "pv_core_retention",
+            "pv_abs_retention",
+            "pv_high_quantile_retention",
+            "pv_centroid_inside_mask",
+            "pv_centroid_x_km",
+            "pv_centroid_y_km",
+            "distance_mask_to_pv_centroid_km",
         }
     ]
     _write_table(profiles[trajectory_cols], root / "particle_trajectory_audit.csv")
@@ -1106,6 +1213,48 @@ def _plot_outputs(output_root: Path, profiles: pd.DataFrame, summary: pd.DataFra
         plt.close(fig)
         written.append(path)
 
+    if {"pv_core_retention", "leakage_mean_abs_ms", "boundary_mode"}.issubset(clean.columns):
+        fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+        for mode, part in clean.groupby("boundary_mode", sort=True):
+            ax.scatter(part["pv_core_retention"], part["leakage_mean_abs_ms"], s=10, alpha=0.35, label=str(mode))
+        ax.set_xlabel("PV-core retention fraction")
+        ax.set_ylabel("boundary leakage |u_n| (m/s)")
+        ax.set_title("PV retention versus boundary leakage")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7)
+        path = figures / "pv_retention_vs_leakage.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        written.append(path)
+
+    if {"pv_core_retention", "closure_residual_proxy", "boundary_mode"}.issubset(clean.columns):
+        fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+        for mode, part in clean.groupby("boundary_mode", sort=True):
+            ax.scatter(part["pv_core_retention"], part["closure_residual_proxy"], s=10, alpha=0.35, label=str(mode))
+        ax.set_xlabel("PV-core retention fraction")
+        ax.set_ylabel("closure residual proxy")
+        ax.set_title("Closure residual versus PV retention")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7)
+        path = figures / "closure_residual_vs_pv_retention.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        written.append(path)
+
+    if {"distance_mask_to_pv_centroid_km", "leakage_mean_abs_ms", "boundary_mode"}.issubset(clean.columns):
+        fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+        for mode, part in clean.groupby("boundary_mode", sort=True):
+            ax.scatter(part["distance_mask_to_pv_centroid_km"], part["leakage_mean_abs_ms"], s=10, alpha=0.35, label=str(mode))
+        ax.set_xlabel("mask distance to PV centroid (km)")
+        ax.set_ylabel("boundary leakage |u_n| (m/s)")
+        ax.set_title("PV core separation audit")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7)
+        path = figures / "hua_lavd_pv_core_separation.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        written.append(path)
+
     if {"total_heat_flux_watt_proxy", "total_pv_flux_proxy", "total_momentum_x_flux_proxy", "boundary_mode"}.issubset(clean.columns):
         grouped = clean.groupby("boundary_mode", sort=True)[
             ["total_heat_flux_watt_proxy", "total_pv_flux_proxy", "total_momentum_x_flux_proxy"]
@@ -1135,6 +1284,8 @@ def _write_summary(path: Path, summary: pd.DataFrame, request: MaterialGeodesicR
         f"- advection step: `{request.advection_step_hours}` hours",
         "- particle advection: RK4 on 30-180d bandpass velocity in object-following local coordinates",
         "- vertical velocity is not used for particle trajectories; top/bottom flux still uses continuity `w_proxy`.",
+        f"- PV retention target: `{request.min_pv_retention}`; require PV retention: `{request.require_pv_retention}`",
+        f"- PV/weak/particle weights: `{request.pv_retention_weight}` / `{request.weak_retention_weight}` / `{request.particle_retention_weight}`",
         "",
         "## 结果摘要",
         "```text",
@@ -1144,6 +1295,8 @@ def _write_summary(path: Path, summary: pd.DataFrame, request: MaterialGeodesicR
         "## 判读边界",
         "- `closed_geodesic_found_fraction` 和 `lavd_closed_contour_found_fraction` 是能否形成强材料边界结论的第一门槛。",
         "- 若 leakage、boundary exchange、closure residual 未低于 proxy 边界，不能强行宣称严格材料体闭合成立。",
+        "- `pv_retention_*` 模式把 PV core retention 从弱惩罚升级为主目标，用于检查闭合失败是否来自边界没有围住 PV anomaly 核心。",
+        "- 若 PV retention 提高但 leakage 明显变差，说明 PV 动力核心可能不属于低泄漏旋转材料核，应解释为双核心或核心-剪切环分裂。",
         "- 该版本已使用真实粒子 flow map 与轨迹 LAVD，但 Cauchy-Green 闭合曲线搜索仍是 v1 数值实现，需用成功率和失败原因审计。",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1163,6 +1316,11 @@ def _print_dry_run(request: MaterialGeodesicRequest) -> None:
     print(f"particle_spacing_km: {request.particle_spacing_km}")
     print(f"advection_step_hours: {request.advection_step_hours}")
     print(f"max_depth_layers: {request.max_depth_layers or 'all'}")
+    print(f"min_pv_retention: {request.min_pv_retention}")
+    print(f"require_pv_retention: {request.require_pv_retention}")
+    print(f"pv_retention_weight: {request.pv_retention_weight}")
+    print(f"weak_retention_weight: {request.weak_retention_weight}")
+    print(f"particle_retention_weight: {request.particle_retention_weight}")
     print("advection_velocity: 30-180d bandpass uo_glor/vo_glor")
     print("method: RK4 particles + Cauchy-Green flow map + trajectory LAVD + closed boundary search")
 
@@ -1288,10 +1446,19 @@ def run_object_material_geodesic_validation(request: MaterialGeodesicRequest) ->
         root_summary = pd.concat(all_summaries, ignore_index=True)
         _write_table(root_profiles, request.output_root / "hybrid_material_boundary_profiles.csv")
         _write_table(root_summary, request.output_root / "shape_materiality_comparison.csv")
+        if any(str(mode).startswith("pv_retention_") for mode in request.boundary_modes):
+            _write_table(root_profiles, request.output_root / "pv_retention_boundary_profiles.csv")
+            _write_table(root_summary, request.output_root / "pv_retention_boundary_summary.csv")
+            (request.output_root / "pv_retention_boundary_summary.json").write_text(
+                json.dumps(_json_ready(root_summary.to_dict(orient="records")), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         _write_subset_tables(request.output_root, root_profiles)
         for plot_path in _plot_outputs(request.output_root, root_profiles, root_summary):
             outputs[f"figure:{plot_path.name}"] = plot_path
         _write_summary(request.output_root / "object_material_geodesic_ep_validation_summary_zh.md", root_summary, request)
+        if any(str(mode).startswith("pv_retention_") for mode in request.boundary_modes):
+            _write_summary(request.output_root / "pv_retention_ep_validation_summary_zh.md", root_summary, request)
         (request.output_root / "material_geodesic_manifest.json").write_text(
             json.dumps(_json_ready({"request": request.__dict__}), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1321,6 +1488,11 @@ def request_from_args(args) -> MaterialGeodesicRequest:
         pv_core_quantile=float(args.pv_core_quantile),
         min_mask_fraction=float(args.min_mask_fraction),
         min_core_retention=float(args.min_core_retention),
+        min_pv_retention=float(args.min_pv_retention),
+        pv_retention_weight=float(args.pv_retention_weight),
+        weak_retention_weight=float(args.weak_retention_weight),
+        particle_retention_weight=float(args.particle_retention_weight),
+        require_pv_retention=bool(args.require_pv_retention),
         min_area_fraction=float(args.min_area_fraction),
         max_area_fraction=float(args.max_area_fraction),
         trajectory_window_days=int(args.trajectory_window_days),
