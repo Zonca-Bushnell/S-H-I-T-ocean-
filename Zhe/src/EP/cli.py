@@ -180,6 +180,25 @@ def cmd_run_object_material_boundary_validation(args: argparse.Namespace) -> int
     return 0
 
 
+def cmd_run_object_material_coherence_validation(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        from .material_coherence import request_from_args
+
+        request = request_from_args(args)
+        from .material_coherence import run_object_material_coherence_validation
+
+        run_object_material_coherence_validation(request)
+        return 0
+    from .material_coherence import request_from_args, run_object_material_coherence_validation
+
+    request = request_from_args(args)
+    outputs = run_object_material_coherence_validation(request)
+    print("Object material-coherence EP validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
     from .material_volume import BOUNDARY_BUDGETS
@@ -252,6 +271,51 @@ def _add_object_boundary_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-core-retention", type=float, default=0.75)
     parser.add_argument("--min-area-fraction", type=float, default=0.15)
     parser.add_argument("--max-area-fraction", type=float, default=0.65)
+    parser.add_argument("--max-tracks-per-shape", type=int, default=0)
+    parser.add_argument("--max-objectdays", type=int, default=0)
+    parser.add_argument("--skip-missing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
+def _add_material_coherence_arguments(parser: argparse.ArgumentParser) -> None:
+    from .material_coherence import BOUNDARY_BUDGETS, MATERIAL_COHERENCE_BOUNDARY_MODES
+
+    parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--filter-root", default="/root/autodl-fs/kuroshiou/Filter")
+    parser.add_argument("--output-root", default="/root/autodl-fs/kuroshiou/EP-FLUX/object_material_coherence_ep_validation")
+    parser.add_argument("--shapes", default="coherent,upright_like")
+    parser.add_argument("--orientations", default="turned")
+    parser.add_argument("--buoyancy-sources", default="thermal_wind")
+    parser.add_argument(
+        "--boundary-mode",
+        default=",".join(MATERIAL_COHERENCE_BOUNDARY_MODES),
+        help="Comma-separated material-coherence modes: particle_retention_v1,lavd_hybrid_v1",
+    )
+    parser.add_argument("--boundary-budget", choices=BOUNDARY_BUDGETS, default="full_3d")
+    parser.add_argument("--filter-template", default="global_phy_{year}_bandpass_30_180d.nc")
+    parser.add_argument("--radial-bins", type=int, default=24)
+    parser.add_argument("--azimuth-bins", type=int, default=48)
+    parser.add_argument("--rmax", type=float, default=1.5)
+    parser.add_argument("--reference-lat", type=float, default=30.0)
+    parser.add_argument("--constant-n2", type=float, default=2.0e-5)
+    parser.add_argument("--core-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--speed-core-quantile", type=float, default=0.45)
+    parser.add_argument("--pv-core-quantile", type=float, default=0.70)
+    parser.add_argument("--min-mask-fraction", type=float, default=0.01)
+    parser.add_argument("--active-contour-iterations", type=int, default=14)
+    parser.add_argument("--leakage-weight", type=float, default=1.0)
+    parser.add_argument("--smoothness-weight", type=float, default=0.08)
+    parser.add_argument("--containment-weight", type=float, default=0.35)
+    parser.add_argument("--area-weight", type=float, default=0.12)
+    parser.add_argument("--vertical-continuity-weight", type=float, default=0.18)
+    parser.add_argument("--time-continuity-weight", type=float, default=0.08)
+    parser.add_argument("--levelset-sigma-cells", type=float, default=1.0)
+    parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--min-area-fraction", type=float, default=0.15)
+    parser.add_argument("--max-area-fraction", type=float, default=0.65)
+    parser.add_argument("--trajectory-window-days", type=int, default=7)
+    parser.add_argument("--particle-spacing-km", type=float, default=5.0)
+    parser.add_argument("--advection-step-hours", type=float, default=6.0)
     parser.add_argument("--max-tracks-per-shape", type=int, default=0)
     parser.add_argument("--max-objectdays", type=int, default=0)
     parser.add_argument("--skip-missing", action="store_true")
@@ -351,6 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_object_boundary_arguments(object_boundary)
     object_boundary.set_defaults(func=cmd_run_object_material_boundary_validation)
+
+    object_coherence = sub.add_parser(
+        "run-object-material-coherence-validation",
+        help="Run object-level particle-retention/LAVD material-coherence EP diagnostics",
+    )
+    _add_material_coherence_arguments(object_coherence)
+    object_coherence.set_defaults(func=cmd_run_object_material_coherence_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
