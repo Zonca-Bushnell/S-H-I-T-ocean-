@@ -216,6 +216,19 @@ def cmd_run_object_material_geodesic_validation(args: argparse.Namespace) -> int
     return 0
 
 
+def cmd_run_core_shell_ep_validation(args: argparse.Namespace) -> int:
+    from .core_shell import request_from_args, run_core_shell_ep_validation
+
+    request = request_from_args(args)
+    outputs = run_core_shell_ep_validation(request)
+    if args.dry_run:
+        return 0
+    print("Core-shell EP validation outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
     from .material_volume import BOUNDARY_BUDGETS
@@ -382,6 +395,39 @@ def _add_material_geodesic_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true")
 
 
+def _add_core_shell_arguments(parser: argparse.ArgumentParser) -> None:
+    from .core_shell import DEFAULT_CORE_SHELL_OUTPUT_ROOT
+    from .dynamic_boundary import BOUNDARY_MODES
+    from .material_volume import BOUNDARY_BUDGETS
+
+    parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    parser.add_argument("--output-root", default=str(DEFAULT_CORE_SHELL_OUTPUT_ROOT))
+    parser.add_argument("--shapes", default="coherent,upright_like")
+    parser.add_argument("--axis-sources", default="radial_seed")
+    parser.add_argument("--orientations", default="turned")
+    parser.add_argument("--buoyancy-sources", default="thermal_wind")
+    parser.add_argument(
+        "--tau-values",
+        default="",
+        help="Comma-separated tau values. Empty means all tau nodes from the representative npz.",
+    )
+    parser.add_argument("--reference-lat", type=float, default=30.0)
+    parser.add_argument("--constant-n2", type=float, default=2.0e-5)
+    parser.add_argument("--n2-profile", default="auto")
+    parser.add_argument("--inner-boundary-mode", choices=BOUNDARY_MODES, default="levelset_v2")
+    parser.add_argument("--boundary-budget", choices=BOUNDARY_BUDGETS, default="full_3d")
+    parser.add_argument("--core-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--shell-outer-radius-over-R", type=float, default=1.5)
+    parser.add_argument("--speed-core-quantile", type=float, default=0.45)
+    parser.add_argument("--pv-core-quantile", type=float, default=0.70)
+    parser.add_argument("--pv-shell-quantile", type=float, default=0.80)
+    parser.add_argument("--shell-dilation-cells", type=int, default=2)
+    parser.add_argument("--min-mask-fraction", type=float, default=0.01)
+    parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--skip-missing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Object-oriented EP flux diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -489,6 +535,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_material_geodesic_arguments(object_geodesic)
     object_geodesic.set_defaults(func=cmd_run_object_material_geodesic_validation)
+
+    core_shell = sub.add_parser(
+        "run-core-shell-ep-validation",
+        help="Run core-shell EP diagnostics separating material core, PV-active shell, and boundary exchange",
+    )
+    _add_core_shell_arguments(core_shell)
+    core_shell.set_defaults(func=cmd_run_core_shell_ep_validation)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
