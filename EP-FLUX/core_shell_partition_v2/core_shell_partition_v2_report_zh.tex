@@ -1,0 +1,252 @@
+\documentclass[UTF8,12pt]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Core-Shell V2 Partition}
+\rhead{\thepage}
+\setlist[itemize]{leftmargin=1.5em}
+\graphicspath{{figures/}}
+
+\title{\textbf{Core-Shell V2 / PV-Active Shell\\分区判据与 EP 闭合验证说明}}
+\author{S-H-I-T-ocean / EP-FLUX 工作记录}
+\date{2026-09-05}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文把当前 core-shell 经验分区升级为 V2 判据：不再要求一个低泄漏材料边界同时圈住 Hua/LAVD 旋转核与 PV anomaly 动力核，而是把涡旋拆成
+\[
+\mathcal{T}_{total}
+=
+\mathcal{T}_{core}^{trap}
++
+\mathcal{T}_{shell}^{stir}
++
+\mathcal{T}_{exchange}.
+\]
+其中 inner material core 用于 trapping/material coherence，PV-active shell 用于 heat/PV stirring 与 EP 倾斜修正，exchange layer 用于解释边界热、PV 与动量交换。这个划分并不是为了逃避闭合，而是为了避免把物理角色不同的区域强行塞进同一个材料体。
+\end{abstract}
+
+\section{为什么需要 V2 分区}
+
+单一材料涡体积假设要求同一个边界同时满足三件事：低泄漏、包住速度/旋转相干核、包住主要 PV anomaly。我们的现有验证显示，这个要求过强。
+
+第一，Hua 弱速中心与 LAVD 旋转相干中心通常较接近，说明运动学旋转核可以作为材料 trapping core 的候选。第二，PV anomaly core 与 Hua/LAVD core 存在系统性分离，PV 高值区更容易出现在外壳、强剪切带或月牙强速带附近。第三，EP 倾斜修正不是小量，且其绝对贡献更偏向 shell。若继续强迫
+\[
+PV\ core \subset M_{LAVD},
+\]
+就会把低泄漏的材料相干问题和 PV/热输送问题混成一个过约束问题。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.78\linewidth]{dual_zone_framework_summary.png}
+  \caption{双区结构工作图像。inner core 是低泄漏 trapping/material core；PV-active shell 是协方差 stirring 与倾斜修正活跃区；exchange layer 负责二者之间的边界交换。}
+\end{figure}
+
+\section{文献约束}
+
+Haller 与 Beron-Vera 的 geodesic eddy 理论强调有限时间内低拉伸、低泄漏的闭合材料曲线 \cite{HallerBeronVera2013}。Haller 等人的 LAVD 方法强调由轨迹涡度偏差积分定义客观旋转相干核 \cite{HallerEtAl2016}。这两类理论适合定义 inner material core，但它们并不要求 PV anomaly 最大区必须在同一边界内。
+
+Abernathey 与 Haller 对 eastern Pacific 的研究指出，Eulerian 涡旋与 Lagrangian coherent vortex 并不等价，表观涡输送会受到 filamentation 和 leakage 影响 \cite{AbernatheyHaller2018}。Zhang、Wolfe 与 Abernathey 的 PV 输送研究进一步支持 coherent core 与 periphery/shell 的分账：PV transport 不应只归因于低泄漏 core \cite{ZhangWolfeAbernathey2020}。
+
+热输送方面，Hausmann 与 Czaja、Dong 等工作都说明 mesoscale eddy heat transport 需要使用协方差或乘积后平均，而不能用平均结构相乘代替 \cite{HausmannCzaja2012,DongEtAl2014}。因此 V2 分区必须保存
+\[
+\langle v'X'\rangle_M,\quad
+\langle v'\rangle_M\langle X'\rangle_M,\quad
+\langle v'X'\rangle_M-\langle v'\rangle_M\langle X'\rangle_M,
+\]
+其中 \(X=\theta\) 或 \(q\)，\(M\) 可以是 inner core、PV-active shell 或 combined volume。
+
+\section{V2 分区判据}
+
+\subsection{Inner material core}
+
+Inner material core 的物理角色是 trapping/material coherence。它不是全部输送的代表区，而是低泄漏、旋转相干、弱速核心连通的材料核。
+
+\begin{itemize}
+  \item 默认范围：\(r/R \le 1.2\)。
+  \item 中心约束：Hua 弱速中心与 LAVD 旋转中心近同位；若使用代表涡，则默认 axis source 为 radial seed，可显式改为 composite-Hua refined axis。
+  \item 核心约束：低 \(|\bm{u}'|\) 区域连通，weak-core retention 不低于 0.75。
+  \item 边界约束：优先使用 levelset/geodesic/LAVD 类低 leakage 边界；boundary leakage 与 particle retention 必须单独记录。
+\end{itemize}
+
+\subsection{PV-active shell}
+
+PV-active shell 的物理角色是 stirring。它可以不是严格材料边界，因为它承担的是 PV anomaly、热异常和动量异常的交换与协方差输送。
+
+\begin{itemize}
+  \item 默认范围：inner core 外侧到 \(r/R \le 2.5\)。
+  \item PV 判据：取 shell domain 内 \(|q'|\) 前 20\%，即默认 \(Q_{0.80}(|q'|)\) 以上。
+  \item 剪切判据：优先保留高 \(|\nabla q'|\)、强速度剪切或月牙强速带区域。
+  \item 连通判据：保留围绕 inner core 或 PV centroid 的主连通区，但不要求完全低 leakage。
+\end{itemize}
+
+\subsection{Exchange layer}
+
+Exchange layer 是 inner core 和 PV-active shell 的界面，不应被解释为 trapping core，也不应被并入内部 EP forcing。
+
+\begin{itemize}
+  \item 默认范围：inner core 边界外侧 1--2 个网格，或 inner core 与 PV shell 的接触带。
+  \item 预算项：
+  \[
+  \oint_{\partial M}\rho_0 C_p\theta' u_n\,dS,\quad
+  \oint_{\partial M}q'u_n\,dS,\quad
+  \oint_{\partial M}b'u_n\,dS,\quad
+  \oint_{\partial M}u_i'u_n\,dS.
+  \]
+  \item 判读：若 exchange 不小，说明闭合残差可能来自 core-shell 交换，而不是 EP 公式本身错误。
+\end{itemize}
+
+\section{当前证据如何支持 V2}
+
+现有 core-shell 结果虽然仍是 v1 参数，但已经显示了分区必要性。热通量在 coherent 中接近 core/shell 分担，在 upright\_like 中更偏 shell；PV stirring 通常更偏 PV-active shell。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{object_aggregate_heat_core_vs_shell_partition.png}
+  \caption{object-day aggregate-product 热通量分区。热输送不能用平均速度场乘平均温度场替代，必须看区域内 \(v'\theta'\) 的乘积后平均。}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{object_aggregate_pv_core_vs_shell_partition.png}
+  \caption{object-day aggregate-product PV 通量分区。PV covariance 更偏 shell，支持 PV-active shell 是动力输送活跃区。}
+\end{figure}
+
+EP 倾斜修正也显示类似特征。此前全生命周期验证中，
+\[
+\frac{|F_z^{tilt\ correction}|}{|F_z^{ordinary}|}
+\]
+中位数约为 0.47，说明倾斜坐标会显著改写热/浮力相关的垂向 EP flux。core-shell 分区进一步显示，这一修正的绝对贡献更偏向 shell。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{ep_tilt_correction_core_vs_shell.png}
+  \caption{EP 倾斜修正的 core-shell 分区。倾斜修正不是只发生在低泄漏 inner core 内；shell 对绝对贡献有重要作用。}
+\end{figure}
+
+边界交换图说明了为什么不能把 combined volume 直接称为严格闭合材料体。若提高 PV retention 的同时 boundary exchange 增大，则更合理的解释是 PV-active shell 与 material core 分离。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{core_shell_exchange_budget.png}
+  \caption{core-shell exchange budget。边界交换必须单独列账，不能并入内部 EP forcing。}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{pv_retention_vs_boundary_exchange.png}
+  \caption{PV retention 与 boundary exchange 的关系。高 PV retention 若伴随高 exchange，说明 PV 动力核不一定属于低泄漏材料核。}
+\end{figure}
+
+\section{V2 与 V1 的实现差别}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.27\linewidth}p{0.30\linewidth}p{0.32\linewidth}}
+\toprule
+项目 & V1 当前口径 & V2 推荐口径 \\
+\midrule
+inner core 半径 & \(r/R\le1.5\) & \(r/R\le1.2\) \\
+shell 外半径 & 默认仍在 \(r/R\le1.5\) & 扩展到 \(r/R\le2.5\) \\
+shell 判据 & inner 外侧高 \(|q'|\) 连通区 & 高 \(|q'|\)+高 \(|\nabla q'|\)+剪切/月牙强速带 \\
+exchange layer & 主要作为边界预算诊断 & 作为第三个显式物理层 \\
+主解释对象 & core/shell 初步分账 & trapping core + stirring shell + exchange \\
+\bottomrule
+\end{tabular}
+\caption{V1 与 V2 分区策略对照。V2 的关键不是多调一个阈值，而是把材料相干、PV stirring 和边界交换拆开。}
+\end{table}
+
+\section{判读规则}
+
+若 inner material core 低 leakage、高 retention，但 heat/PV covariance 弱，则它应被解释为 trapping/material core。若 PV-active shell 的 \(v'\theta'\)、\(v'q'\) 与 \(F_z^{tilt\ correction}\) 更强，则输送主结论应写在 shell 上。若 exchange layer 的 heat/PV/momentum 通量不小，则 single material volume 闭合不成立，但 core-shell-exchange 分账仍然成立。
+
+因此 V2 的核心判定不是 ``是否找到一个完美材料涡''，而是：
+\[
+\text{material core 是否稳定},\quad
+\text{PV shell 是否承载 stirring},\quad
+\text{exchange 是否解释闭合残差}.
+\]
+
+\section{后续运行建议}
+
+服务器 smoke 建议先跑：
+\begin{verbatim}
+python -m src.EP.cli run-core-shell-v2-validation \
+  --shapes coherent,upright_like \
+  --orientations turned \
+  --axis-sources radial_seed \
+  --buoyancy-sources thermal_wind \
+  --tau-values 0.50 \
+  --core-radius-over-R 1.2 \
+  --shell-outer-radius-over-R 2.5 \
+  --pv-shell-quantile 0.80
+\end{verbatim}
+
+若 smoke 表明 shell 区域稳定，再扩展到全部 tau。最终报告应优先比较 coherent 与 upright\_like：前者若 materiality 更高而 shell stirring 较弱，说明 coherent 更像稳定材料核；后者若 shell stirring 和 exchange 更强，则说明 upright\_like 更像倾斜/交换活跃结构。
+
+\begin{thebibliography}{99}
+\bibitem{HallerBeronVera2013}
+Haller, G. and Beron-Vera, F. J. (2013).
+Coherent Lagrangian vortices: the black holes of turbulence.
+\textit{Journal of Fluid Mechanics}, 731, R4.
+\href{https://doi.org/10.1017/jfm.2013.391}{doi:10.1017/jfm.2013.391}.
+
+\bibitem{HallerEtAl2016}
+Haller, G., Hadjighasem, A., Farazmand, M., and Huhn, F. (2016).
+Defining coherent vortices objectively from the vorticity.
+\textit{Journal of Fluid Mechanics}, 795, 136--173.
+\href{https://doi.org/10.1017/jfm.2016.151}{doi:10.1017/jfm.2016.151}.
+
+\bibitem{AbernatheyHaller2018}
+Abernathey, R. and Haller, G. (2018).
+Transport by Lagrangian Vortices in the Eastern Pacific.
+\textit{Journal of Physical Oceanography}, 48, 667--685.
+\href{https://doi.org/10.1175/JPO-D-17-0102.1}{doi:10.1175/JPO-D-17-0102.1}.
+
+\bibitem{ZhangWolfeAbernathey2020}
+Zhang, Z., Wolfe, C. L. P., and Abernathey, R. (2020).
+Role of Surface-Layer Coherent Eddies in Potential Vorticity Transport in Quasigeostrophic Turbulence Driven by Eastward Shear.
+\textit{Fluids}, 5(1), 2.
+\href{https://doi.org/10.3390/fluids5010002}{doi:10.3390/fluids5010002}.
+
+\bibitem{HausmannCzaja2012}
+Hausmann, U. and Czaja, A. (2012).
+The observed signature of mesoscale eddies in sea surface temperature and the associated heat transport.
+\textit{Nature Communications}, 3, 884.
+\href{https://doi.org/10.1038/ncomms1595}{doi:10.1038/ncomms1595}.
+
+\bibitem{DongEtAl2014}
+Dong, C., Zhang, Y., Gille, S. T., and others (2014).
+Global estimates of oceanic mesoscale eddy heat and salt transports from Argo and altimetry.
+\textit{Nature Communications}, 5, 3294.
+\href{https://doi.org/10.1038/ncomms4294}{doi:10.1038/ncomms4294}.
+
+\bibitem{Greatbatch1998}
+Greatbatch, R. J. (1998).
+Exploring the relationship between eddy-induced transport velocity, vertical momentum transfer, and the isopycnal flux of potential vorticity.
+\textit{Journal of Physical Oceanography}, 28, 422--432.
+\href{https://doi.org/10.1175/1520-0485(1998)028<0422:ETRBEI>2.0.CO;2}{doi:10.1175/1520-0485(1998)028<0422:ETRBEI>2.0.CO;2}.
+\end{thebibliography}
+
+\end{document}
