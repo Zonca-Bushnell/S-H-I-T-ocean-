@@ -22,6 +22,7 @@ from .contracts import (
     DEFAULT_RESULT_ROOT,
     ORIENTATIONS,
     EPFluxConfig,
+    RHO0,
     axis_source_filename,
     default_me_liutex_root,
     default_radial_seed_root,
@@ -30,6 +31,7 @@ from .contracts import (
 from .dynamic_boundary import BOUNDARY_MODES, boundary_flux_metrics, connected_component, edge_mask, normal_velocity
 from .material_volume import (
     BOUNDARY_BUDGETS,
+    CP0,
     MaterialVolumeRequest,
     _compute_one_slice,
     _full_boundary_flux_budget,
@@ -40,7 +42,7 @@ from .material_volume import (
 
 
 DEFAULT_CORE_SHELL_OUTPUT_ROOT = Path(
-    "/root/autodl-fs/kuroshiou/EP-FLUX/core_shell_ep_validation"
+    "/root/autodl-fs/kuroshiou/EP-FLUX/core_shell_transport_tilt_partition"
 )
 
 
@@ -232,6 +234,131 @@ def _region_internal_stats(
     }
 
 
+def _region_flux_partition_stats(
+    *,
+    region: str,
+    mask: np.ndarray,
+    v_rot: np.ndarray,
+    theta_prime: np.ndarray | None,
+    q_prime: np.ndarray,
+) -> dict[str, float | str]:
+    row: dict[str, float | str] = {"region": region}
+    if not np.any(mask):
+        row.update(
+            {
+                "transport_valid_cell_count": 0.0,
+                "theta_prime_status": "missing" if theta_prime is None else "empty_region",
+                "product_mean_heat": np.nan,
+                "mean_product_heat": np.nan,
+                "covariance_heat": np.nan,
+                "product_mean_pv": np.nan,
+                "mean_product_pv": np.nan,
+                "covariance_pv": np.nan,
+            }
+        )
+        return row
+
+    valid_pv = mask & np.isfinite(v_rot) & np.isfinite(q_prime)
+    mean_v_pv = _weighted_mean(v_rot, valid_pv)
+    mean_q = _weighted_mean(q_prime, valid_pv)
+    product_pv = _weighted_mean(v_rot * q_prime, valid_pv)
+    row.update(
+        {
+            "transport_valid_cell_count": float(np.count_nonzero(valid_pv)),
+            "product_mean_pv": product_pv,
+            "mean_product_pv": mean_v_pv * mean_q,
+            "covariance_pv": product_pv - mean_v_pv * mean_q,
+        }
+    )
+
+    if theta_prime is None:
+        row.update(
+            {
+                "theta_prime_status": "missing",
+                "product_mean_heat": np.nan,
+                "mean_product_heat": np.nan,
+                "covariance_heat": np.nan,
+            }
+        )
+        return row
+
+    valid_heat = mask & np.isfinite(v_rot) & np.isfinite(theta_prime)
+    mean_v_heat = _weighted_mean(v_rot, valid_heat)
+    mean_theta = _weighted_mean(theta_prime, valid_heat)
+    product_heat = RHO0 * CP0 * _weighted_mean(v_rot * theta_prime, valid_heat)
+    mean_product_heat = RHO0 * CP0 * mean_v_heat * mean_theta
+    row.update(
+        {
+            "theta_prime_status": "available",
+            "heat_valid_cell_count": float(np.count_nonzero(valid_heat)),
+            "product_mean_heat": product_heat,
+            "mean_product_heat": mean_product_heat,
+            "covariance_heat": product_heat - mean_product_heat,
+        }
+    )
+    return row
+
+
+def _region_ep_tilt_stats(
+    *,
+    region: str,
+    mask: np.ndarray,
+    fz_ordinary: np.ndarray,
+    fz_tilted: np.ndarray,
+    fz_tilt_correction: np.ndarray,
+) -> dict[str, float | str]:
+    if not np.any(mask):
+        return {
+            "region": region,
+            "ep_valid_cell_count": 0.0,
+            "F_z_ordinary_region": np.nan,
+            "F_z_tilted_region": np.nan,
+            "F_z_tilt_correction_region": np.nan,
+            "abs_F_z_ordinary_region": np.nan,
+            "abs_F_z_tilt_correction_region": np.nan,
+            "tilt_correction_over_ordinary": np.nan,
+        }
+    valid = mask & np.isfinite(fz_ordinary) & np.isfinite(fz_tilted) & np.isfinite(fz_tilt_correction)
+    ordinary = _weighted_mean(fz_ordinary, valid)
+    tilted = _weighted_mean(fz_tilted, valid)
+    correction = _weighted_mean(fz_tilt_correction, valid)
+    abs_ordinary = _weighted_mean(np.abs(fz_ordinary), valid)
+    abs_correction = _weighted_mean(np.abs(fz_tilt_correction), valid)
+    return {
+        "region": region,
+        "ep_valid_cell_count": float(np.count_nonzero(valid)),
+        "F_z_ordinary_region": ordinary,
+        "F_z_tilted_region": tilted,
+        "F_z_tilt_correction_region": correction,
+        "abs_F_z_ordinary_region": abs_ordinary,
+        "abs_F_z_tilt_correction_region": abs_correction,
+        "tilt_correction_over_ordinary": abs_correction / (abs_ordinary + 1e-30),
+    }
+
+
+def _add_fraction_of_total_abs(
+    rows: list[dict[str, float | str]],
+    *,
+    value_column: str,
+    fraction_column: str,
+) -> None:
+    total = 0.0
+    for row in rows:
+        if row.get("region") in {"inner_core", "pv_shell"}:
+            value = float(row.get(value_column, np.nan))
+            if np.isfinite(value):
+                total += abs(value)
+    for row in rows:
+        value = float(row.get(value_column, np.nan))
+        row[fraction_column] = abs(value) / (total + 1e-30) if np.isfinite(value) else np.nan
+
+
+def _nanmedian_no_warning(values: np.ndarray) -> float:
+    data = np.asarray(values, dtype=float)
+    finite = data[np.isfinite(data)]
+    return float(np.median(finite)) if finite.size else np.nan
+
+
 def _budget_for_region(
     *,
     rep,
@@ -261,6 +388,7 @@ def _compute_core_shell_for_slice(
     q_proxy: np.ndarray,
     buoyancy: np.ndarray,
     inner_masks: np.ndarray,
+    ep_terms,
     request: CoreShellRequest,
 ) -> tuple["pd.DataFrame", dict[str, np.ndarray]]:
     x_km, y_km = rep.mesh_xy_km
@@ -315,6 +443,24 @@ def _compute_core_shell_for_slice(
                 buoyancy=buoyancy[iz],
             )
             stats.update(
+                _region_flux_partition_stats(
+                    region=region_name,
+                    mask=mask,
+                    v_rot=rep.v[iz],
+                    theta_prime=None if rep.theta_prime is None else rep.theta_prime[iz],
+                    q_prime=ep_terms.pv_prime[iz],
+                )
+            )
+            stats.update(
+                _region_ep_tilt_stats(
+                    region=region_name,
+                    mask=mask,
+                    fz_ordinary=ep_terms.F_z_ordinary[iz],
+                    fz_tilted=ep_terms.F_z_tilted[iz],
+                    fz_tilt_correction=ep_terms.F_z_tilt_correction[iz],
+                )
+            )
+            stats.update(
                 {
                     "depth_index": int(iz),
                     "depth_m": float(rep.depth_m[iz]),
@@ -331,6 +477,21 @@ def _compute_core_shell_for_slice(
                 }
             )
             region_rows.append(stats)
+        _add_fraction_of_total_abs(
+            region_rows,
+            value_column="F_z_tilt_correction_region",
+            fraction_column="region_fraction_of_total_abs_tilt_correction",
+        )
+        _add_fraction_of_total_abs(
+            region_rows,
+            value_column="covariance_pv",
+            fraction_column="region_fraction_of_total_abs_pv_covariance",
+        )
+        _add_fraction_of_total_abs(
+            region_rows,
+            value_column="covariance_heat",
+            fraction_column="region_fraction_of_total_abs_heat_covariance",
+        )
         interface = _interface_metrics(inner, shell, rep.u[iz], rep.v[iz], x_km, y_km)
         for stats in region_rows:
             stats.update(interface)
@@ -375,11 +536,76 @@ def _summary_table(profiles: "pd.DataFrame") -> "pd.DataFrame":
             "core_shell_interface_abs_un_ms",
             "pv_flux_magnitude_proxy",
             "buoyancy_flux_magnitude_proxy",
+            "product_mean_heat",
+            "mean_product_heat",
+            "covariance_heat",
+            "product_mean_pv",
+            "mean_product_pv",
+            "covariance_pv",
+            "F_z_ordinary_region",
+            "F_z_tilted_region",
+            "F_z_tilt_correction_region",
+            "abs_F_z_ordinary_region",
+            "abs_F_z_tilt_correction_region",
+            "tilt_correction_over_ordinary",
+            "region_fraction_of_total_abs_tilt_correction",
+            "region_fraction_of_total_abs_pv_covariance",
+            "region_fraction_of_total_abs_heat_covariance",
         ):
             if col in sub.columns:
-                row[f"{col}_median"] = float(np.nanmedian(sub[col].to_numpy(float)))
+                row[f"{col}_median"] = _nanmedian_no_warning(sub[col].to_numpy(float))
+        if "theta_prime_status" in sub.columns:
+            row["theta_prime_available_fraction"] = float(
+                (sub["theta_prime_status"].astype(str) == "available").mean()
+            )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _write_partition_tables(profiles: "pd.DataFrame", output_dir: Path) -> dict[str, Path]:
+    written: dict[str, Path] = {}
+    base_cols = [
+        "shape",
+        "axis_source",
+        "orientation",
+        "buoyancy_source",
+        "tau",
+        "polarity",
+        "depth_index",
+        "depth_m",
+        "region",
+    ]
+    transport_cols = base_cols + [
+        "theta_prime_status",
+        "product_mean_heat",
+        "mean_product_heat",
+        "covariance_heat",
+        "product_mean_pv",
+        "mean_product_pv",
+        "covariance_pv",
+        "region_fraction_of_total_abs_heat_covariance",
+        "region_fraction_of_total_abs_pv_covariance",
+    ]
+    ep_cols = base_cols + [
+        "F_z_ordinary_region",
+        "F_z_tilted_region",
+        "F_z_tilt_correction_region",
+        "abs_F_z_ordinary_region",
+        "abs_F_z_tilt_correction_region",
+        "tilt_correction_over_ordinary",
+        "region_fraction_of_total_abs_tilt_correction",
+    ]
+    available_transport = [col for col in transport_cols if col in profiles.columns]
+    available_ep = [col for col in ep_cols if col in profiles.columns]
+    if available_transport:
+        path = output_dir / "core_shell_transport_partition.csv"
+        _write_table(profiles[available_transport], path)
+        written["transport_partition"] = path
+    if available_ep:
+        path = output_dir / "core_shell_ep_tilt_partition.csv"
+        _write_table(profiles[available_ep], path)
+        written["ep_tilt_partition"] = path
+    return written
 
 
 def _plot_core_shell_figures(profiles: "pd.DataFrame", output_dir: Path) -> list[Path]:
@@ -395,13 +621,42 @@ def _plot_core_shell_figures(profiles: "pd.DataFrame", output_dir: Path) -> list
         return paths
 
     clean = profiles.copy()
+
+    def grouped_median_bar(column: str, ylabel: str, title: str, filename: str, *, absolute: bool = True) -> None:
+        if not {"region", "shape", column}.issubset(clean.columns):
+            return
+        labels = []
+        values = []
+        for (shape, region), sub in clean.groupby(["shape", "region"], sort=True):
+            data = sub[column].to_numpy(float)
+            if absolute:
+                data = np.abs(data)
+            value = _nanmedian_no_warning(data)
+            if not np.isfinite(value):
+                continue
+            labels.append(f"{shape}\n{region}")
+            values.append(value)
+        if not values:
+            return
+        fig, ax = plt.subplots(figsize=(8.0, 4.5))
+        ax.bar(np.arange(len(values)), values, color="#4c78a8")
+        ax.set_xticks(np.arange(len(labels)))
+        ax.set_xticklabels(labels, rotation=35, ha="right")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        fig.tight_layout()
+        path = fig_dir / filename
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        paths.append(path)
+
     if {"region", "pv_high_quantile_retention", "shape"}.issubset(clean.columns):
         fig, ax = plt.subplots(figsize=(8.0, 4.5))
         labels = []
         values = []
         for (shape, region), sub in clean.groupby(["shape", "region"], sort=True):
             labels.append(f"{shape}\n{region}")
-            values.append(float(np.nanmedian(sub["pv_high_quantile_retention"].to_numpy(float))))
+            values.append(_nanmedian_no_warning(sub["pv_high_quantile_retention"].to_numpy(float)))
         ax.bar(np.arange(len(values)), values, color="#4c78a8")
         ax.set_xticks(np.arange(len(labels)))
         ax.set_xticklabels(labels, rotation=35, ha="right")
@@ -414,13 +669,39 @@ def _plot_core_shell_figures(profiles: "pd.DataFrame", output_dir: Path) -> list
         plt.close(fig)
         paths.append(path)
 
+    grouped_median_bar(
+        "covariance_pv",
+        "median |covariance PV stirring proxy|",
+        "PV stirring covariance partition by core and shell",
+        "heat_pv_core_vs_shell_partition.png",
+    )
+    grouped_median_bar(
+        "F_z_tilt_correction_region",
+        "median |Fz tilt correction|",
+        "EP tilt correction partition by core and shell",
+        "ep_tilt_correction_core_vs_shell.png",
+    )
+    grouped_median_bar(
+        "region_fraction_of_total_abs_tilt_correction",
+        "median fraction of |core+shell tilt correction|",
+        "Coherent vs upright-like tilt-correction partition",
+        "coherent_vs_upright_like_partition.png",
+        absolute=False,
+    )
+    grouped_median_bar(
+        "total_abs_volume_flux_m3s_proxy",
+        "median total |volume flux| proxy (m3/s)",
+        "Core, shell, and exchange budget proxy",
+        "core_shell_exchange_budget.png",
+    )
+
     if {"region", "total_abs_volume_flux_m3s_proxy", "shape"}.issubset(clean.columns):
         fig, ax = plt.subplots(figsize=(8.0, 4.5))
         labels = []
         values = []
         for (shape, region), sub in clean.groupby(["shape", "region"], sort=True):
             labels.append(f"{shape}\n{region}")
-            values.append(float(np.nanmedian(sub["total_abs_volume_flux_m3s_proxy"].to_numpy(float))))
+            values.append(_nanmedian_no_warning(sub["total_abs_volume_flux_m3s_proxy"].to_numpy(float)))
         ax.bar(np.arange(len(values)), values, color="#f58518")
         ax.set_xticks(np.arange(len(labels)))
         ax.set_xticklabels(labels, rotation=35, ha="right")
@@ -451,10 +732,37 @@ def _plot_core_shell_figures(profiles: "pd.DataFrame", output_dir: Path) -> list
         fig.savefig(path, dpi=180)
         plt.close(fig)
         paths.append(path)
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    ax.axis("off")
+    boxes = [
+        (0.05, 0.55, "inner core\nHua/LAVD\nlow leakage\ntrapping"),
+        (0.38, 0.55, "PV-active shell\nPV anomaly\ncrescent speed band\nstirring"),
+        (0.70, 0.55, "exchange layer\nheat/PV/momentum\nboundary exchange"),
+        (0.28, 0.15, "T_total = T_core^trap + T_shell^stir + T_exchange"),
+    ]
+    for x0, y0, text in boxes:
+        ax.text(
+            x0,
+            y0,
+            text,
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+            bbox={"boxstyle": "round,pad=0.45", "facecolor": "#f6f8fa", "edgecolor": "#4c78a8"},
+        )
+    for start, end in [((0.18, 0.55), (0.30, 0.55)), ((0.51, 0.55), (0.62, 0.55))]:
+        ax.annotate("", xy=end, xytext=start, xycoords="axes fraction", arrowprops={"arrowstyle": "->", "lw": 1.5})
+    ax.set_title("Dual-zone eddy interpretation used by core-shell EP diagnostics")
+    path = fig_dir / "dual_zone_framework_summary.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    paths.append(path)
     return paths
 
 
-def _summary_markdown(request: CoreShellRequest, summary: "pd.DataFrame") -> str:
+def _summary_markdown_legacy_mojibake(request: CoreShellRequest, summary: "pd.DataFrame") -> str:
     lines = [
         "# Core-Shell EP Validation Summary",
         "",
@@ -486,6 +794,40 @@ def _summary_markdown(request: CoreShellRequest, summary: "pd.DataFrame") -> str
     return "\n".join(lines) + "\n"
 
 
+def _summary_markdown(request: CoreShellRequest, summary: "pd.DataFrame") -> str:
+    lines = [
+        "# Core-Shell EP Validation Summary",
+        "",
+        "## 核心口径",
+        "- 本诊断不再强迫一个边界同时承担 trapping 与 PV stirring。",
+        "- `inner_core` 表示低泄漏、弱速/LAVD 近同位的材料核。",
+        "- `pv_shell` 表示围绕内核的 PV-active 外壳，用来承载 PV、热和动量 stirring。",
+        "- `combined_volume` 表示内核与 PV 外壳合并后的总体控制体。",
+        "- 解释框架为 `T_total = T_core^trap + T_shell^stir + T_exchange`。",
+        "",
+        "## 参数",
+        f"- result root: `{request.result_root}`",
+        f"- shapes: `{','.join(request.shapes)}`",
+        f"- orientations: `{','.join(request.orientations)}`",
+        f"- axis sources: `{','.join(request.axis_sources)}`",
+        f"- buoyancy sources: `{','.join(request.buoyancy_sources)}`",
+        f"- inner boundary mode: `{request.inner_boundary_mode}`",
+        f"- PV shell quantile: `{request.pv_shell_quantile}`",
+        "",
+        "## 汇总表",
+        "```text",
+        summary.to_string(index=False) if not summary.empty else "(empty)",
+        "```",
+        "",
+        "## 判读",
+        "- 若 `inner_core` 低 leakage、高 weak/LAVD retention，但热/PV stirring 较弱，则它更像 trapping/material core。",
+        "- 若 `pv_shell` 的 PV 或热协方差贡献更强，则它更像 PV-active stirring shell。",
+        "- 若 shell 或 combined volume 的 boundary exchange 很大，不能把它解释成严格闭合材料体。",
+        "- 若 `theta_prime_available_fraction=0`，热通量分区尚不能从代表涡结构文件直接回答，需要补 theta moments 或 object-level aggregate-product。",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
     _validate_request(request)
     if request.dry_run:
@@ -502,6 +844,7 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
     _require_runtime()
     from .diagnostics import load_n2_profile, resolve_n2_profile_path
     from .fields import RepresentativeVortexDataset
+    from .flux import EPFluxCalculator
     from .geometry import AxisLine
 
     written: dict[str, Path] = {}
@@ -573,12 +916,20 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                                 buoyancy_source=buoyancy_source,
                                 request=base_request,
                             )
+                            ep_terms = EPFluxCalculator(
+                                rep,
+                                axis,
+                                f0=config.f0,
+                                n2=n2,
+                                buoyancy_source=buoyancy_source,
+                            ).compute_field_terms()
                             profiles, _ = _compute_core_shell_for_slice(
                                 rep=rep,
                                 axis=axis,
                                 q_proxy=debug["q_proxy"],
                                 buoyancy=debug["buoyancy"],
                                 inner_masks=debug["mask"],
+                                ep_terms=ep_terms,
                                 request=request,
                             )
                             profiles["shape"] = shape
@@ -594,6 +945,8 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                     summary = _summary_table(combo_all)
                     _write_table(combo_all, combo_dir / "core_shell_profiles.csv")
                     _write_table(summary, combo_dir / "core_shell_summary.csv")
+                    for key, path in _write_partition_tables(combo_all, combo_dir).items():
+                        written[f"{combo_dir}:{key}"] = path
                     (combo_dir / "core_shell_summary.json").write_text(
                         json.dumps(_json_ready(summary.to_dict(orient="records")), ensure_ascii=False, indent=2),
                         encoding="utf-8",
@@ -613,6 +966,8 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
         root_summary = pd.concat(all_summaries, ignore_index=True)
         _write_table(root_profiles, request.output_root / "core_shell_all_profiles.csv")
         _write_table(root_summary, request.output_root / "core_shell_all_summary.csv")
+        for key, path in _write_partition_tables(root_profiles, request.output_root).items():
+            written[f"root:{key}"] = path
         (request.output_root / "core_shell_all_summary.json").write_text(
             json.dumps(_json_ready(root_summary.to_dict(orient="records")), ensure_ascii=False, indent=2),
             encoding="utf-8",

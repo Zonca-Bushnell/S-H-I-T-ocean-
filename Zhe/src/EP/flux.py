@@ -12,13 +12,17 @@ from .metric import CurvedTubeMetric, jacobian_weighted_divergence
 
 
 def _azimuthal_anomaly(values: np.ndarray) -> np.ndarray:
-    mean = np.nanmean(values, axis=2, keepdims=True)
+    mean = _finite_mean(values, axis=2)[..., None]
     return values - mean
 
 
 def _finite_mean(values: np.ndarray, axis: int | tuple[int, ...]) -> np.ndarray:
-    with np.errstate(invalid="ignore"):
-        return np.nanmean(values, axis=axis)
+    data = np.asarray(values, dtype=float)
+    finite = np.isfinite(data)
+    count = np.sum(finite, axis=axis)
+    total = np.sum(np.where(finite, data, 0.0), axis=axis)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, total / count, np.nan)
 
 
 def _safe_gradient(values: np.ndarray, coord: np.ndarray, axis: int) -> np.ndarray:
@@ -48,6 +52,23 @@ class EPFluxResult:
     metrics: dict[str, float]
 
 
+@dataclass(frozen=True)
+class EPFluxFieldTerms:
+    """Grid-resolved EP terms before azimuthal averaging."""
+
+    ur_prime: np.ndarray
+    ut_prime: np.ndarray
+    buoyancy_tilted_prime: np.ndarray
+    buoyancy_ordinary_prime: np.ndarray
+    buoyancy_tilt_correction_prime: np.ndarray
+    pv_prime: np.ndarray
+    F_n_classic: np.ndarray
+    F_z_ordinary: np.ndarray
+    F_z_tilted: np.ndarray
+    F_z_tilt_correction: np.ndarray
+    pv_flux_product: np.ndarray
+
+
 class EPFluxCalculator:
     """Classic, tilted, and curved-tube EP diagnostics for one composite slice."""
 
@@ -73,6 +94,44 @@ class EPFluxCalculator:
         self.buoyancy_source = buoyancy_source
         self.curved_tube_mode = curved_tube_mode
         self.large_curvature_threshold = float(large_curvature_threshold)
+
+    def compute_field_terms(self) -> EPFluxFieldTerms:
+        """Return depth x radius x azimuth EP terms for mask-based diagnostics."""
+        rep = self.rep
+        radial = rep.radial_m
+        theta = rep.theta_rad
+        ur, ut = rep.polar_velocity()
+        psi = self._streamfunction_from_tangential(ut, radial)
+        if self.buoyancy_source == "thermal_wind":
+            b_tilted, b_ordinary, b_tilt_correction = self._thermal_wind_buoyancy_parts(
+                rep.u, rep.v, radial, theta
+            )
+        else:
+            b_tilted, b_ordinary, b_tilt_correction = self._streamfunction_buoyancy_parts(
+                psi, radial, theta
+            )
+
+        ur_p = _azimuthal_anomaly(ur)
+        ut_p = _azimuthal_anomaly(ut)
+        bt_p = _azimuthal_anomaly(b_tilted)
+        bo_p = _azimuthal_anomaly(b_ordinary)
+        bc_p = _azimuthal_anomaly(b_tilt_correction)
+        pv = self._qg_pv_field(psi, radial, theta, rep.depth_m)
+        pv_p = _azimuthal_anomaly(pv)
+
+        return EPFluxFieldTerms(
+            ur_prime=ur_p,
+            ut_prime=ut_p,
+            buoyancy_tilted_prime=bt_p,
+            buoyancy_ordinary_prime=bo_p,
+            buoyancy_tilt_correction_prime=bc_p,
+            pv_prime=pv_p,
+            F_n_classic=-RHO0 * ut_p * ur_p,
+            F_z_ordinary=RHO0 * self.f0 * ur_p * bo_p / self.n2[:, None, None],
+            F_z_tilted=RHO0 * self.f0 * ur_p * bt_p / self.n2[:, None, None],
+            F_z_tilt_correction=RHO0 * self.f0 * ur_p * bc_p / self.n2[:, None, None],
+            pv_flux_product=ur_p * pv_p,
+        )
 
     def compute(self) -> EPFluxResult:
         rep = self.rep
@@ -261,6 +320,15 @@ class EPFluxCalculator:
         strat = (self.f0**2 / self.n2)[:, None, None] * dpsi_dz
         pv = lap_r + lap_t + _safe_gradient(strat, depth, axis=0)
         return _finite_mean(ur_prime * _azimuthal_anomaly(pv), axis=2)
+
+    def _qg_pv_field(self, psi: np.ndarray, radial: np.ndarray, theta: np.ndarray, depth: np.ndarray) -> np.ndarray:
+        dpsi_dr = _safe_gradient(psi, radial, axis=1)
+        radial_positive = _positive_radial_coord(radial)
+        lap_r = _safe_gradient(radial_positive[None, :, None] * dpsi_dr, radial_positive, axis=1) / radial_positive[None, :, None]
+        lap_t = _periodic_gradient(_periodic_gradient(psi, theta), theta) / (radial_positive[None, :, None] ** 2)
+        dpsi_dz = _safe_gradient(psi, depth, axis=0)
+        strat = (self.f0**2 / self.n2)[:, None, None] * dpsi_dz
+        return lap_r + lap_t + _safe_gradient(strat, depth, axis=0)
 
     def _profiles_table(self, *arrays: np.ndarray) -> pd.DataFrame:
         names = [

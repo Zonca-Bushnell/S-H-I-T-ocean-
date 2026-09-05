@@ -72,6 +72,7 @@ class RepresentativeVortexDataset:
     count: np.ndarray | None
     n_objects: np.ndarray | None
     n_tracks: np.ndarray | None
+    theta_prime: np.ndarray | None
     radius_by_polarity_m: dict[str, float]
 
     @classmethod
@@ -85,6 +86,11 @@ class RepresentativeVortexDataset:
         count = data["count"] if "count" in data else None
         n_objects = data["n_objects"] if "n_objects" in data else None
         n_tracks = data["n_tracks"] if "n_tracks" in data else None
+        theta_prime = None
+        for theta_key in ("theta_prime", "theta_mean", "thetao_mean"):
+            if theta_key in data:
+                theta_prime = np.asarray(data[theta_key])
+                break
         tau_grid = _array_by_key(data, ("tau_grid", "tau"))
         depth = _array_by_key(data, ("depth", "depth_m", "z_m")).astype(float)
         radial = _array_by_key(data, ("radial", "radius", "r")).astype(float)
@@ -111,6 +117,7 @@ class RepresentativeVortexDataset:
             count=count,
             n_objects=n_objects,
             n_tracks=n_tracks,
+            theta_prime=theta_prime,
             radius_by_polarity_m=radius_by_polarity,
         )
 
@@ -130,6 +137,7 @@ class RepresentativeVortexDataset:
         if not np.isfinite(radius_m) or radius_m <= 0:
             radius_m = 100000.0
         count = None if self.count is None else self.count[p_idx, t_idx]
+        theta_prime = None if self.theta_prime is None else self.theta_prime[p_idx, t_idx]
         return RepresentativeSlice(
             polarity=polarity,
             tau=float(self.tau_grid[t_idx]),
@@ -141,6 +149,7 @@ class RepresentativeVortexDataset:
             v=self.v_mean[p_idx, t_idx],
             speed=self.speed_mean[p_idx, t_idx],
             count=count,
+            theta_prime=theta_prime,
         )
 
 
