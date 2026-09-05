@@ -76,6 +76,45 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_representative_axis_sources(args: argparse.Namespace) -> int:
+    result_root = Path(args.result_root)
+    me_root = Path(args.me_liutex_root) if args.me_liutex_root else default_me_liutex_root(
+        result_root=result_root,
+        shape_output_name=args.shape_output_name,
+        orientation=args.orientation,
+    )
+    radial_root = Path(args.radial_seed_root) if args.radial_seed_root else default_radial_seed_root(
+        result_root=result_root,
+        shape_output_name=args.shape_output_name,
+    )
+    if args.dry_run:
+        print("EP representative axis-source dry-run")
+        print(f"me_liutex_root: {me_root}")
+        print(f"radial_seed_root: {radial_root}")
+        print(f"orientation: {args.orientation}")
+        print(f"tau: {args.tau}")
+        print("outputs: radial_seed_axis, composite_hua_refined_axis, axis_source_comparison, manifest")
+        return 0
+    from .axis_sources import build_representative_axis_sources_for_root
+
+    outputs = build_representative_axis_sources_for_root(
+        me_liutex_root=me_root,
+        radial_seed_root=radial_root,
+        orientation=args.orientation,
+        tau=float(args.tau),
+        axis_bandwidth=float(args.axis_bandwidth),
+        grid_size=int(args.grid_size),
+        reference_lat=float(args.reference_lat),
+        composite_hua_search_rmax=float(args.composite_hua_search_rmax),
+        composite_hua_refine_factor=int(args.composite_hua_refine_factor),
+        composite_hua_refine_window_km=float(args.composite_hua_refine_window_km),
+    )
+    print("EP representative axis-source outputs:")
+    for path in outputs:
+        print(path)
+    return 0
+
+
 def cmd_explain_contract(_: argparse.Namespace) -> int:
     print(
         "\n".join(
@@ -108,7 +147,7 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
                 "  It is the large-curvature validation route; it does not require thin-tube metric validity.",
                 "",
                 "Boundaries:",
-                "  src.EP does not import src.utils.ep_flux as an implementation dependency.",
+                "  legacy ep_flux helpers are not used as implementation dependencies.",
                 "  src.EP does not overwrite representative vortex npz/catalog files.",
             ]
         )
@@ -496,6 +535,25 @@ def build_parser() -> argparse.ArgumentParser:
     compare = sub.add_parser("compare-classic-and-curved", help="Compare classic, tilted, and curved smoke outputs")
     compare.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_ROOT))
     compare.set_defaults(func=cmd_compare)
+
+    axis_sources = sub.add_parser(
+        "build-representative-axis-sources",
+        help="Build persisted representative axis sources using only src.EP internals",
+    )
+    axis_sources.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
+    axis_sources.add_argument("--shape-output-name", default=DEFAULT_SHAPE_OUTPUT_NAME)
+    axis_sources.add_argument("--me-liutex-root", default=None)
+    axis_sources.add_argument("--radial-seed-root", default=None)
+    axis_sources.add_argument("--orientation", choices=ORIENTATIONS, default="turned")
+    axis_sources.add_argument("--tau", type=float, default=0.5)
+    axis_sources.add_argument("--axis-bandwidth", type=float, default=0.075)
+    axis_sources.add_argument("--grid-size", type=int, default=121)
+    axis_sources.add_argument("--reference-lat", type=float, default=28.0)
+    axis_sources.add_argument("--composite-hua-search-rmax", type=float, default=1.5)
+    axis_sources.add_argument("--composite-hua-refine-factor", type=int, default=4)
+    axis_sources.add_argument("--composite-hua-refine-window-km", type=float, default=20.0)
+    axis_sources.add_argument("--dry-run", action="store_true")
+    axis_sources.set_defaults(func=cmd_build_representative_axis_sources)
 
     lifecycle = sub.add_parser("run-lifecycle-validation", help="Run full lifecycle EP diagnostics across tau and comparison dimensions")
     lifecycle.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))

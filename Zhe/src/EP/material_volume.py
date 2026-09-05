@@ -1004,7 +1004,7 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
                         if not axis_path.exists():
                             raise FileNotFoundError(
                                 f"Axis source does not exist: {axis_path}. "
-                                "Run src.post.cli build-representative-axis-sources first."
+                                "Run src.EP.cli build-representative-axis-sources first."
                             )
                         n2_path = resolve_n2_profile_path(config, request.n2_profile)
                         for polarity in dataset.polarities:

@@ -64,6 +64,39 @@ def axis_source_filename(axis_source: str, tau: float) -> str:
 
 
 @dataclass(frozen=True)
+class EPCase:
+    shape: str = "coherent"
+    axis_source: str = "radial_seed"
+    orientation: str = "turned"
+    buoyancy_source: str = "thermal_wind"
+
+    def validate_contract(self) -> None:
+        if self.axis_source not in AXIS_SOURCES:
+            raise ValueError(f"axis_source must be one of {AXIS_SOURCES}")
+        if self.orientation not in ORIENTATIONS:
+            raise ValueError(f"orientation must be one of {ORIENTATIONS}")
+        if self.buoyancy_source not in BUOYANCY_SOURCES:
+            raise ValueError(f"buoyancy_source must be one of {BUOYANCY_SOURCES}")
+
+    @property
+    def shape_output_name(self) -> str:
+        return shape_output_name(self.shape)
+
+    @property
+    def shape_label(self) -> str:
+        return f"{self.shape}-only"
+
+    def output_dir(self, root: Path) -> Path:
+        return Path(root) / self.shape / self.axis_source / self.orientation / self.buoyancy_source
+
+    def me_liutex_root(self, result_root: Path = DEFAULT_RESULT_ROOT) -> Path:
+        return default_me_liutex_root(Path(result_root), self.shape_output_name, self.orientation)
+
+    def radial_seed_root(self, result_root: Path = DEFAULT_RESULT_ROOT) -> Path:
+        return default_radial_seed_root(Path(result_root), self.shape_output_name)
+
+
+@dataclass(frozen=True)
 class EPFluxConfig:
     me_liutex_root: Path
     radial_seed_root: Path

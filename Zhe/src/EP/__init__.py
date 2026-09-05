@@ -5,6 +5,6 @@ This package is intentionally independent from the historical
 classic, tilted, and curved-tube EP diagnostics.
 """
 
-from .contracts import EPFluxConfig
+from .contracts import EPCase, EPFluxConfig
 
-__all__ = ["EPFluxConfig"]
+__all__ = ["EPCase", "EPFluxConfig"]

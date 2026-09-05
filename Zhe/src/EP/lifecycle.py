@@ -74,7 +74,7 @@ def _ensure_axis_source(
     path = me_root / "axis_sources" / f"{axis_source}_axis_tau{int(round(tau * 100)):03d}.csv"
     if path.exists():
         return
-    from src.post.representative_eddy_panels import build_representative_axis_sources_for_root
+    from .axis_sources import build_representative_axis_sources_for_root
 
     turned_root = default_me_liutex_root(result_root, output_name, "turned")
     unturned_root = default_me_liutex_root(result_root, output_name, "unturned")

@@ -4,10 +4,8 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache
 from pathlib import Path
 
-import netCDF4
 import numpy as np
 try:
     import pandas as pd
@@ -18,6 +16,7 @@ from .contracts import DEFAULT_RESULT_ROOT, RHO0, shape_output_name
 from .dynamic_boundary import BOUNDARY_MODES, neighbors4
 from .fields import RepresentativeSlice
 from .geometry import AxisLine
+from .io import read_filter_day
 from .material_volume import (
     BOUNDARY_BUDGETS,
     DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT,
@@ -27,11 +26,7 @@ from .material_volume import (
     _write_table,
 )
 
-try:
-    from src.utils.field_sampling import bilinear_sample, xy_to_lonlat
-except ModuleNotFoundError:  # pragma: no cover - import checked at run time.
-    bilinear_sample = None
-    xy_to_lonlat = None
+from .numerics import bilinear_sample, xy_to_lonlat
 
 
 DEFAULT_OBJECT_BOUNDARY_OUTPUT_ROOT = DEFAULT_DYNAMIC_BOUNDARY_V2_OUTPUT_ROOT.parent / "object_material_boundary_validation"
@@ -78,8 +73,6 @@ class ObjectBoundaryRequest:
 def _require_runtime() -> None:
     if pd is None:
         raise ModuleNotFoundError("pandas is required for object-level material-boundary validation")
-    if bilinear_sample is None or xy_to_lonlat is None:
-        raise ModuleNotFoundError("src.utils.field_sampling is required for object-level material-boundary validation")
 
 
 def _split_csv(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
@@ -88,43 +81,9 @@ def _split_csv(value: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(value).split(",") if part.strip())
 
 
-@lru_cache(maxsize=96)
-def _time_index(path_text: str) -> dict[date, int]:
-    with netCDF4.Dataset(path_text) as ds:
-        tvar = ds.variables["time"]
-        values = netCDF4.num2date(
-            tvar[:],
-            tvar.units,
-            getattr(tvar, "calendar", "standard"),
-            only_use_cftime_datetimes=False,
-            only_use_python_datetimes=True,
-        )
-    return {value.date(): int(i) for i, value in enumerate(values)}
-
-
-def _clean(values) -> np.ndarray:
-    arr = np.ma.filled(values, np.nan).astype("float64", copy=False)
-    arr[np.abs(arr) > 1.0e20] = np.nan
-    return arr
-
-
 def _read_filter_day(filter_root: Path, template: str, day: date) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    path = filter_root / template.format(year=day.year)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    day_index = _time_index(str(path)).get(day)
-    if day_index is None:
-        raise KeyError(f"{day} not found in {path}")
-    with netCDF4.Dataset(path) as ds:
-        for variable in ("uo_glor", "vo_glor", "thetao_glor"):
-            if variable not in ds.variables:
-                raise KeyError(f"{variable} not found in {path}")
-        lon = np.asarray(ds.variables["longitude"][:], dtype="float64")
-        lat = np.asarray(ds.variables["latitude"][:], dtype="float64")
-        u = _clean(ds.variables["uo_glor"][day_index])
-        v = _clean(ds.variables["vo_glor"][day_index])
-        theta = _clean(ds.variables["thetao_glor"][day_index])
-    return lon, lat, u, v, theta
+    lon, lat, _depth, fields = read_filter_day(filter_root, template, day, ("uo_glor", "vo_glor", "thetao_glor"))
+    return lon, lat, fields["uo_glor"], fields["vo_glor"], fields["thetao_glor"]
 
 
 def _polar_grid(rmax: float, radial_bins: int, azimuth_bins: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

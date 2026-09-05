@@ -36,6 +36,7 @@ options:
 | --- | --- |
 | `src/eddy_pipeline/` | Production detection, tracking, catalog, shape classification, and representative-vortex structure pipeline. |
 | `src/post/` | Formal post-processing after representative-vortex construction: aggregate-product stirring, structure plots, and double-core diagnostics. |
+| `src/EP/` | Self-contained object-oriented EP theory diagnostics. It owns its IO, numerics, representative axis-source handling, and transport-moment helpers. |
 | `src/utils/` | Shared numerical, geospatial, field-sampling, and representative-composite helpers used by production packages. |
 | `src/data_downloading/` | Data download and raw preprocessing utilities. Kept separate from the detection refactor. |
 | `src/Legacy/experiments/` | Temporary research experiments. Useful, but not production entry points. |
@@ -50,10 +51,14 @@ Production dependency direction is now:
 src.eddy_pipeline  ┐
                    ├──> src.utils
 src.post           ┘
+
+src.EP ──> src.EP.io / src.EP.numerics / src.EP.axis_sources / src.EP.transport_moments
 ```
 
 `src.Legacy/*` is a historical area. New production imports should not reach
 into Legacy directly; promote reusable helpers into `src.utils` instead.
+Formal EP diagnostics should also not import from `src.post` or the historical
+`src.utils` helper layer; copy or promote the needed logic into `src.EP` first.
 
 ## Production Entry Points
 
@@ -130,3 +135,4 @@ See the engineering notes for the migration history:
 - `docs/main_pipeline_contract.md`
 - `docs/ambiguous_method_registry.md`
 - `docs/redundancy_delete_candidates.md`
+- `../EP-FLUX/engineering/ep_package_refactor_notes.md`

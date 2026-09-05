@@ -80,7 +80,7 @@ def compute_ep_profiles(
     if not axis_path.exists():
         raise FileNotFoundError(
             f"Axis source does not exist: {axis_path}. "
-            "Run src.post.cli build-representative-axis-sources first."
+            "Run src.EP.cli build-representative-axis-sources first."
         )
 
     all_profiles: list[pd.DataFrame] = []

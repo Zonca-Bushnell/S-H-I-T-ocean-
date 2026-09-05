@@ -652,7 +652,7 @@ def _compute_object_aggregate_transport_partition(
     tau_grid: np.ndarray,
     masks_by_tau_polarity: dict[tuple[int, str], dict[str, np.ndarray]],
 ) -> "pd.DataFrame":
-    from src.post.transport import (
+    from .transport_moments import (
         _center_lines,
         _load_objects,
         _load_points,
@@ -662,8 +662,7 @@ def _compute_object_aggregate_transport_partition(
         _sample_rotated_fields,
         _tau_weights,
     )
-    from src.utils.axis_streamfunction import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
-    from src.utils.field_sampling import load_n2, sanitize_ocean_field
+    from .numerics import grid_spacing_m, load_n2, relative_vorticity, sanitize_ocean_field, streamfunction_from_zeta
 
     objects = _load_objects(
         radial_root,
@@ -1153,7 +1152,7 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                             if request.skip_missing:
                                 continue
                             raise FileNotFoundError(
-                                f"Missing axis source {axis_path}. Run src.post.cli build-representative-axis-sources first."
+                                f"Missing axis source {axis_path}. Run src.EP.cli build-representative-axis-sources first."
                             )
                         config = EPFluxConfig(
                             me_liutex_root=me_root,
