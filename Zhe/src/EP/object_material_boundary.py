@@ -13,6 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover - dependency-light dry-run suppo
     pd = None
 
 from .contracts import DEFAULT_RESULT_ROOT, RHO0, shape_output_name
+from .boundary_strategy import resolve_boundary_strategy
 from .dynamic_boundary import BOUNDARY_MODES, neighbors4
 from .fields import RepresentativeSlice
 from .geometry import AxisLine
@@ -563,6 +564,7 @@ def _write_summary_md(path: Path, summary: pd.DataFrame, request: ObjectBoundary
 def run_object_material_boundary_validation(request: ObjectBoundaryRequest) -> dict[str, Path]:
     if request.boundary_mode not in BOUNDARY_MODES:
         raise ValueError(f"boundary_mode must be one of {BOUNDARY_MODES}")
+    resolve_boundary_strategy(request.boundary_mode)
     if request.boundary_budget not in BOUNDARY_BUDGETS:
         raise ValueError(f"boundary_budget must be one of {BOUNDARY_BUDGETS}")
     if request.dry_run:

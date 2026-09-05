@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - checked at runtime.
     ndimage = None
 
 from .contracts import DEFAULT_RESULT_ROOT
+from .boundary_strategy import resolve_boundary_strategy
 from .dynamic_boundary import boundary_flux_metrics, connected_component, edge_mask, neighbors4
 
 
@@ -84,6 +85,8 @@ def _validate_request(request: MaterialGeodesicRequest) -> None:
     unknown = [mode for mode in request.boundary_modes if mode not in GEODESIC_BOUNDARY_MODES]
     if unknown:
         raise ValueError(f"boundary modes must be in {GEODESIC_BOUNDARY_MODES}: {unknown}")
+    for mode in request.boundary_modes:
+        resolve_boundary_strategy(mode)
     if request.boundary_budget not in BOUNDARY_BUDGETS:
         raise ValueError(f"boundary budget must be one of {BOUNDARY_BUDGETS}")
     if request.trajectory_window_days < 1:

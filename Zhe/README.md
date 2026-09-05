@@ -82,6 +82,19 @@ python -m src.post.cli analyze-double-core --shape coherent --orientation both
 
 The post package must not rerun detection, tracking, or shape classification.
 
+Formal EP theory diagnostics have one supported command surface:
+
+```powershell
+python -m src.EP.cli --help
+python -m src.EP.cli build-smoke --dry-run
+python -m src.EP.cli run-lifecycle-validation --dry-run
+python -m src.EP.cli run-core-shell-v2-validation --dry-run
+```
+
+Do not run EP calculations by importing `src.post`, `src.utils`, or archived
+scripts directly. Those paths are historical references or non-EP production
+helpers; EP-owned implementations live under `src/EP/`.
+
 ## Output Layout
 
 For the current Kuroshiou production result, keep structure and transport

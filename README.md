@@ -25,6 +25,9 @@ python -m src.post.cli --help
 python -m src.EP.cli --help
 ```
 
+Formal EP diagnostics must be launched through `python -m src.EP.cli ...`.
+Files under `EP-FLUX/archive/` are historical outputs, not active entry points.
+
 For the detailed code map, see:
 
 - `Zhe/README.md`

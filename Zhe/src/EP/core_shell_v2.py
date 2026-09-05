@@ -1,6 +1,6 @@
 """Core-shell V2 partition diagnostics.
 
-This module keeps the V1 numerical kernel in :mod:`src.EP.core_shell` and
+This module keeps the V1 numerical kernel in :mod:`src.EP.core_shell_runner` and
 changes only the partition contract and output bookkeeping.  V2 tightens the
 inner material core and lets the PV-active shell extend farther outward so the
 two-zone interpretation can be tested without overwriting V1 results.
@@ -13,8 +13,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .core_shell import CoreShellRequest, request_from_args as _v1_request_from_args
-from .core_shell import run_core_shell_ep_validation
+from .core_shell_runner import CoreShellRequest, request_from_args as _v1_request_from_args
+from .core_shell_runner import run_core_shell_ep_validation
 
 
 DEFAULT_CORE_SHELL_V2_OUTPUT_ROOT = Path(

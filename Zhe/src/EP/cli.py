@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -116,6 +116,18 @@ def cmd_build_representative_axis_sources(args: argparse.Namespace) -> int:
 
 
 def cmd_explain_contract(_: argparse.Namespace) -> int:
+    from .boundary_strategy import describe_boundary_modes
+
+    boundary_contract = describe_boundary_modes(
+        [
+            "threshold",
+            "levelset_v2",
+            "lagrangian_v1",
+            "lavd_material_v1",
+            "cauchy_green_geodesic_v1",
+            "pv_retention_hybrid_v1",
+        ]
+    )
     print(
         "\n".join(
             [
@@ -148,7 +160,14 @@ def cmd_explain_contract(_: argparse.Namespace) -> int:
                 "",
                 "Boundaries:",
                 "  legacy ep_flux helpers are not used as implementation dependencies.",
+                "  Boundary modes are registered through src.EP.boundary_strategy.",
                 "  src.EP does not overwrite representative vortex npz/catalog files.",
+                "",
+                "Registered boundary strategy families:",
+                *[
+                    f"  {item['boundary_mode']}: {item['boundary_family']}"
+                    for item in boundary_contract
+                ],
             ]
         )
     )
@@ -256,7 +275,7 @@ def cmd_run_object_material_geodesic_validation(args: argparse.Namespace) -> int
 
 
 def cmd_run_core_shell_ep_validation(args: argparse.Namespace) -> int:
-    from .core_shell import request_from_args, run_core_shell_ep_validation
+    from .core_shell_runner import request_from_args, run_core_shell_ep_validation
 
     request = request_from_args(args)
     outputs = run_core_shell_ep_validation(request)
@@ -448,7 +467,7 @@ def _add_material_geodesic_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_core_shell_arguments(parser: argparse.ArgumentParser) -> None:
-    from .core_shell import DEFAULT_CORE_SHELL_OUTPUT_ROOT
+    from .core_shell_runner import DEFAULT_CORE_SHELL_OUTPUT_ROOT
     from .dynamic_boundary import BOUNDARY_MODES
     from .material_volume import BOUNDARY_BUDGETS
 

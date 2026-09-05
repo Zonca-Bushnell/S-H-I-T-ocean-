@@ -1,66 +1,79 @@
-# EP 包自洽化重构记录
+# EP 包自洽化与对象边界重构记录
 
 生成时间：2026-09-05
 
-本文记录 `Zhe/src/EP` 的第一轮自洽化改造。目标是让 EP 理论诊断包可以独立维护，不再从 `src.post` 或历史 `src.utils` 中反向借工具。
+本文记录 `Zhe/src/EP` 的工程边界。目标是让 EP 理论诊断包可以独立维护，不再反向依赖 `src.post` 或历史 `src.utils`。
 
-## 目标边界
+## 正式边界
 
 `src.EP` 负责：
 
-- 经典 EP、倾斜坐标 EP、曲管尺度审计；
-- material-volume / core-shell / object-level EP 诊断；
+- classic / tilted / curved-tube EP 诊断；
+- material-volume、material-boundary、core-shell、object-level EP 验证；
 - 代表涡 axis source 的读取与必要持久化；
-- EP 诊断所需的 object-day aggregate-product moments；
-- EP 自己的 NetCDF、CSV、JSON、NPZ 读取写出和数值函数。
+- EP 所需的 object-day aggregate-product moments；
+- EP 自己的 IO、数值微分、采样、流函数反演和 N2 读取。
 
 `src.EP` 不负责：
 
 - Hua 识别、tracking、shape classification；
 - 代表涡结构合成；
-- panel family 图片审查；
-- `src.post` 中面向展示的图像逻辑。
+- 面向展示的 post panel family。
 
-## 新增内部基础层
+正式 EP 入口只允许从：
 
-| 模块 | 职责 | 替代关系 |
-| --- | --- | --- |
-| `src.EP.io` | Filter day 读取、变量清洗、JSON/CSV/parquet 写出 | 替代 EP 内散落的 NetCDF 读写 |
-| `src.EP.numerics` | 网格距离、相对涡度、流函数反演、双线性采样、N2 读取、径向/垂向/方位导数 | 替代 `src.utils.axis_streamfunction` 和 `src.utils.field_sampling` |
-| `src.EP.axis_sources` | `radial_seed_axis` 与 `composite_hua_refined_axis` 的持久化和读取 | 替代 `src.post.representative_eddy_panels` |
-| `src.EP.transport_moments` | object-day 旋转采样、QG-like `q_prime`、tau 加权和 aggregate-product moments 所需函数 | 替代 `src.post.transport` 的内部函数 |
-
-## 对象模型
-
-新增 `EPCase`，用于表达：
-
-```text
-shape + axis_source + orientation + buoyancy_source
+```bash
+python -m src.EP.cli ...
 ```
 
-后续全生命周期验证、core-shell 分区、材料边界验证都应优先传递 `EPCase` 或等价对象，而不是在大函数之间散传裸字符串。
+## 模块清单
 
-## 兼容性
+| 模块 | 职责 |
+| --- | --- |
+| `src.EP.io` | 代表涡、axis source、Filter day、CSV/JSON/parquet/NPZ 读写 |
+| `src.EP.numerics` | 网格距离、涡度、流函数反演、插值、导数、N2 等数值函数 |
+| `src.EP.axis_sources` | `radial_seed_axis` 与 `composite_hua_refined_axis` 的构建和读取 |
+| `src.EP.transport_moments` | EP 内部 object-day aggregate-product moments |
+| `src.EP.core_shell_runner` | core-shell 验证 runner 与兼容数值主流程 |
+| `src.EP.partition` | inner core / PV-active shell / exchange layer 分区接口 |
+| `src.EP.region_flux` | 分区 heat/PV/momentum aggregate-product 统计接口 |
+| `src.EP.region_ep` | 分区 EP flux 与 tilt-correction 统计接口 |
+| `src.EP.boundary_strategy` | 统一材料边界策略接口与模式注册表 |
 
-本次不改 CLI 名称：
+`src.EP.core_shell` 现在只保留兼容 facade。旧 notebook 或命令仍可 import 它，但新代码应直接使用 `core_shell_runner` 或上表中的分区模块。
 
-- `python -m src.EP.cli build-smoke`
-- `python -m src.EP.cli run-lifecycle-validation`
-- `python -m src.EP.cli run-core-shell-ep-validation`
-- `python -m src.EP.cli run-core-shell-v2-validation`
-- `python -m src.EP.cli run-material-volume-validation`
+## BoundaryStrategy
 
-已有命令仍保持原入口，只是内部工具来源切换到 `src.EP`。
+材料边界策略统一为：
 
-## 当前保留
+| 策略 | 物理含义 |
+| --- | --- |
+| `ThresholdBoundary` | 瞬时阈值连通核心 |
+| `LevelSetBoundary` | level-set / morphology 优化后的低 leakage 边界 |
+| `LagrangianBoundary` | track-wise 平流连续边界 |
+| `LAVDBoundary` | 旋转相干 LAVD 闭合边界 |
+| `GeodesicBoundary` | Cauchy-Green / geodesic 材料边界 |
+| `PVRetentionBoundary` | 优先保留 PV anomaly core 的 hybrid 边界 |
 
-- `src.utils.ep_flux` 暂时保留为历史参考，不删除。
-- `src.post.transport` 仍是正式后处理中的 aggregate-product stirring 入口，但 EP 不再 import 它。
-- `src.post.representative_eddy_panels` 仍负责代表涡 panel family，但 EP axis source 构建不再依赖它。
+后续新增边界算法时，应先注册到 `boundary_strategy.py`，再接入具体 runner，避免不同模块各自维护模式字符串。
 
-## 后续建议
+## 输出目录整理
 
-1. 继续把 `material_volume.py`、`material_geodesic.py`、`core_shell.py` 中的大函数拆成 `EPCase`、`RepresentativeField`、`RegionMaskSet`、`FluxBudget` 等对象方法。
-2. 为 `src.EP.numerics` 加 synthetic 单元测试，尤其是流函数反演、双线性插值和曲率尺度。
-3. 将各验证入口的输出 schema 固定到文档，避免 CSV 字段在实验迭代中漂移。
-4. 如果某个工具同时被 `post` 和 `EP` 需要，应先判断它是展示后处理工具还是理论诊断工具，避免再次互相 import。
+早期 smoke 和临时验证输出已经归档到：
+
+```text
+EP-FLUX/archive/legacy_smoke_and_temp_20260905/
+```
+
+仍作为当前理论和结果依据的目录保留在顶层，例如：
+
+- `core_shell_partition_v2/`
+- `core_shell_theory_report/`
+- `engineering/`
+
+## 后续工作
+
+1. 继续把 `core_shell_runner.py` 中的大函数物理迁移到 `partition.py`、`region_flux.py`、`region_ep.py`，当前调用面已经预留。
+2. 将 `material_volume.py`、`material_coherence.py`、`material_geodesic.py` 的具体 mask 构造逐步改成 `BoundaryStrategy` adapter。
+3. 为 `src.EP.numerics` 和 `src.EP.axis_sources` 增加 synthetic 单元测试。
+4. 固定 EP 输出 schema，避免 CSV 字段在验证迭代中漂移。

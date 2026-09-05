@@ -21,6 +21,7 @@ from .contracts import (
     default_radial_seed_root,
     shape_output_name,
 )
+from .boundary_strategy import resolve_boundary_strategy
 from .dynamic_boundary import BOUNDARY_MODES, DynamicBoundaryConfig, boundary_flux_metrics, edge_mask, normal_velocity, optimize_boundary
 
 DEFAULT_MATERIAL_OUTPUT_ROOT = DEFAULT_FULL_OUTPUT_ROOT.parent / "material_volume_validation"
@@ -925,6 +926,7 @@ def run_material_volume_validation(request: MaterialVolumeRequest) -> dict[str, 
         raise ValueError(f"Bad options: axis={bad_axis}, buoyancy={bad_buoy}")
     if request.boundary_mode not in BOUNDARY_MODES:
         raise ValueError(f"boundary_mode must be one of {BOUNDARY_MODES}")
+    resolve_boundary_strategy(request.boundary_mode)
     if request.boundary_budget not in BOUNDARY_BUDGETS:
         raise ValueError(f"boundary_budget must be one of {BOUNDARY_BUDGETS}")
     DynamicBoundaryConfig(
