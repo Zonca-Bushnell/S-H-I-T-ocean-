@@ -50,6 +50,8 @@ DEFAULT_CORE_SHELL_OUTPUT_ROOT = Path(
 class CoreShellRequest:
     result_root: Path = DEFAULT_RESULT_ROOT
     output_root: Path = DEFAULT_CORE_SHELL_OUTPUT_ROOT
+    filter_root: Path = Path("/root/autodl-fs/kuroshiou/Filter")
+    filter_template: str = "global_phy_{year}_bandpass_30_180d.nc"
     shapes: tuple[str, ...] = ("coherent", "upright_like")
     axis_sources: tuple[str, ...] = ("radial_seed",)
     orientations: tuple[str, ...] = ("turned",)
@@ -68,6 +70,9 @@ class CoreShellRequest:
     shell_dilation_cells: int = 2
     min_mask_fraction: float = 0.01
     min_core_retention: float = 0.75
+    object_aggregate_transport: bool = True
+    object_aggregate_max_days: int = 0
+    object_aggregate_max_objects: int = 0
     skip_missing: bool = False
     dry_run: bool = False
 
@@ -521,6 +526,246 @@ def _compute_core_shell_for_slice(
     return table, masks
 
 
+def _empty_object_region_accumulator(depth_count: int, regions: tuple[str, ...]) -> dict[str, dict[str, np.ndarray]]:
+    fields = ("sum_v", "sum_theta", "sum_q", "sum_vtheta", "sum_vq", "sum_v2", "sum_theta2", "sum_q2", "count")
+    return {
+        region: {name: np.zeros(depth_count, dtype="float64") for name in fields}
+        for region in regions
+    }
+
+
+def _add_object_region_terms(
+    accumulator: dict[str, dict[str, np.ndarray]],
+    *,
+    masks: dict[str, np.ndarray],
+    depth_indices: np.ndarray,
+    vrot: np.ndarray,
+    theta_prime: np.ndarray,
+    q_prime: np.ndarray,
+    weight: float,
+) -> None:
+    for local_iz, depth_index in enumerate(depth_indices.astype(int)):
+        for region, region_masks in masks.items():
+            if region == "outer_domain" or depth_index < 0 or depth_index >= region_masks.shape[0]:
+                continue
+            mask = region_masks[depth_index].astype(bool)
+            valid = mask & np.isfinite(vrot[local_iz]) & np.isfinite(theta_prime[local_iz]) & np.isfinite(q_prime[local_iz])
+            if not np.any(valid):
+                continue
+            v_values = vrot[local_iz][valid]
+            theta_values = theta_prime[local_iz][valid]
+            q_values = q_prime[local_iz][valid]
+            target = accumulator[region]
+            target["sum_v"][depth_index] += weight * float(np.sum(v_values))
+            target["sum_theta"][depth_index] += weight * float(np.sum(theta_values))
+            target["sum_q"][depth_index] += weight * float(np.sum(q_values))
+            target["sum_vtheta"][depth_index] += weight * float(np.sum(v_values * theta_values))
+            target["sum_vq"][depth_index] += weight * float(np.sum(v_values * q_values))
+            target["sum_v2"][depth_index] += weight * float(np.sum(v_values * v_values))
+            target["sum_theta2"][depth_index] += weight * float(np.sum(theta_values * theta_values))
+            target["sum_q2"][depth_index] += weight * float(np.sum(q_values * q_values))
+            target["count"][depth_index] += weight * float(v_values.size)
+
+
+def _finalize_object_region_accumulator(
+    accumulator: dict[str, dict[str, np.ndarray]],
+    *,
+    shape: str,
+    axis_source: str,
+    orientation: str,
+    buoyancy_source: str,
+    tau: float,
+    polarity: str,
+    depth_m: np.ndarray,
+) -> "pd.DataFrame":
+    rows = []
+    for region, data in accumulator.items():
+        count = data["count"]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_v = np.divide(data["sum_v"], count, out=np.full_like(count, np.nan), where=count > 0)
+            mean_theta = np.divide(data["sum_theta"], count, out=np.full_like(count, np.nan), where=count > 0)
+            mean_q = np.divide(data["sum_q"], count, out=np.full_like(count, np.nan), where=count > 0)
+            product_heat = RHO0 * CP0 * np.divide(data["sum_vtheta"], count, out=np.full_like(count, np.nan), where=count > 0)
+            mean_product_heat = RHO0 * CP0 * mean_v * mean_theta
+            product_pv = np.divide(data["sum_vq"], count, out=np.full_like(count, np.nan), where=count > 0)
+            mean_product_pv = mean_v * mean_q
+        for depth_index, depth_value in enumerate(depth_m):
+            if count[depth_index] <= 0:
+                continue
+            rows.append(
+                {
+                    "shape": shape,
+                    "axis_source": axis_source,
+                    "orientation": orientation,
+                    "buoyancy_source": buoyancy_source,
+                    "tau": float(tau),
+                    "polarity": polarity,
+                    "depth_index": int(depth_index),
+                    "depth_m": float(depth_value),
+                    "region": region,
+                    "object_aggregate_valid_cell_count": float(count[depth_index]),
+                    "object_aggregate_mean_v_rot": float(mean_v[depth_index]),
+                    "object_aggregate_mean_theta": float(mean_theta[depth_index]),
+                    "object_aggregate_mean_q": float(mean_q[depth_index]),
+                    "object_aggregate_product_mean_heat": float(product_heat[depth_index]),
+                    "object_aggregate_mean_product_heat": float(mean_product_heat[depth_index]),
+                    "object_aggregate_covariance_heat": float(product_heat[depth_index] - mean_product_heat[depth_index]),
+                    "object_aggregate_product_mean_pv": float(product_pv[depth_index]),
+                    "object_aggregate_mean_product_pv": float(mean_product_pv[depth_index]),
+                    "object_aggregate_covariance_pv": float(product_pv[depth_index] - mean_product_pv[depth_index]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _add_grouped_abs_fraction(
+    table: "pd.DataFrame",
+    *,
+    value_column: str,
+    fraction_column: str,
+) -> "pd.DataFrame":
+    if table.empty or value_column not in table.columns:
+        return table
+    keys = ["shape", "axis_source", "orientation", "buoyancy_source", "tau", "polarity", "depth_index"]
+    out = table.copy()
+    out[fraction_column] = np.nan
+    for _, index in out.groupby(keys, sort=False).groups.items():
+        idx = list(index)
+        sub = out.loc[idx]
+        core_shell = sub["region"].isin(["inner_core", "pv_shell"])
+        total = np.nansum(np.abs(sub.loc[core_shell, value_column].to_numpy(float)))
+        if np.isfinite(total) and total > 0:
+            values = np.abs(sub[value_column].to_numpy(float)) / total
+            out.loc[idx, fraction_column] = values
+    return out
+
+
+def _compute_object_aggregate_transport_partition(
+    *,
+    request: CoreShellRequest,
+    shape: str,
+    axis_source: str,
+    orientation: str,
+    buoyancy_source: str,
+    radial_root: Path,
+    dataset,
+    tau_grid: np.ndarray,
+    masks_by_tau_polarity: dict[tuple[int, str], dict[str, np.ndarray]],
+) -> "pd.DataFrame":
+    from src.post.transport import (
+        _center_lines,
+        _load_objects,
+        _load_points,
+        _q_prime_from_psi,
+        _read_filter_day,
+        _resolve_n2_profile,
+        _sample_rotated_fields,
+        _tau_weights,
+    )
+    from src.utils.axis_streamfunction import grid_spacing_m, relative_vorticity, streamfunction_from_zeta
+    from src.utils.field_sampling import load_n2, sanitize_ocean_field
+
+    objects = _load_objects(
+        radial_root,
+        start="",
+        end="",
+        max_days=request.object_aggregate_max_days,
+        max_objects=request.object_aggregate_max_objects,
+        shapes=(shape,),
+    )
+    if objects.empty:
+        return pd.DataFrame()
+    points = _load_points(radial_root, set(objects["eddy3d_object_id"].astype("int64")))
+    center_lines = _center_lines(points)
+    radial = np.asarray(dataset.radius_coord, dtype="float64")
+    theta_angles = np.asarray(dataset.theta_rad, dtype="float64")
+    radial_mesh, theta_mesh = np.meshgrid(radial, theta_angles, indexing="ij")
+    explicit_n2 = "" if request.n2_profile in (None, "", "auto") else str(request.n2_profile)
+    n2_profile = _resolve_n2_profile(radial_root, explicit_n2)
+
+    accumulators: dict[tuple[int, str], dict[str, dict[str, np.ndarray]]] = {}
+    for key, masks in masks_by_tau_polarity.items():
+        regions = tuple(region for region in masks if region != "outer_domain")
+        accumulators[key] = _empty_object_region_accumulator(len(dataset.depth_m), regions)
+
+    for date_text, day_objects in objects.groupby("date", sort=True):
+        day = pd.Timestamp(date_text).date()
+        lon, lat, depth, u, v, theta_field = _read_filter_day(request.filter_root, request.filter_template, day)
+        u = sanitize_ocean_field(u)
+        v = sanitize_ocean_field(v)
+        theta_field = sanitize_ocean_field(theta_field)
+        _, dy, dx = grid_spacing_m(lon, lat)
+        zeta = relative_vorticity(lon, lat, u, v)
+        psi = streamfunction_from_zeta(zeta, dx=dx, dy=dy)
+        n2_full = load_n2(n2_profile, depth)
+
+        for obj in day_objects.itertuples(index=False):
+            sampled = _sample_rotated_fields(
+                obj,
+                center_lines.get(int(obj.eddy3d_object_id)),
+                lon,
+                lat,
+                psi,
+                u,
+                v,
+                theta_field,
+                radial_mesh,
+                theta_mesh,
+            )
+            if sampled is None:
+                continue
+            depth_indices, depth_values, psi_s, vrot_s, theta_s = sampled
+            valid_depth = (depth_indices >= 0) & (depth_indices < len(n2_full))
+            if np.count_nonzero(valid_depth) < 3:
+                continue
+            depth_indices = depth_indices[valid_depth]
+            depth_values = depth_values[valid_depth]
+            psi_s = psi_s[valid_depth]
+            vrot_s = vrot_s[valid_depth]
+            theta_s = theta_s[valid_depth]
+            f0 = 2.0 * 7.2921159e-5 * np.sin(np.deg2rad(float(obj.surface_lat)))
+            q_prime = _q_prime_from_psi(
+                psi_s,
+                depth_values,
+                radial,
+                theta_angles,
+                float(obj.mean_radius_m),
+                n2_full[depth_indices],
+                f0,
+            )
+            polarity = str(obj.polarity)
+            for tau_index, weight in _tau_weights(float(obj.life_phase), tau_grid, 0.075, 1.0e-3):
+                key = (int(tau_index), polarity)
+                if key not in accumulators:
+                    continue
+                _add_object_region_terms(
+                    accumulators[key],
+                    masks=masks_by_tau_polarity[key],
+                    depth_indices=depth_indices,
+                    vrot=vrot_s,
+                    theta_prime=theta_s,
+                    q_prime=q_prime,
+                    weight=float(weight),
+                )
+
+    tables = []
+    for (tau_index, polarity), accumulator in accumulators.items():
+        tables.append(
+            _finalize_object_region_accumulator(
+                accumulator,
+                shape=shape,
+                axis_source=axis_source,
+                orientation=orientation,
+                buoyancy_source=buoyancy_source,
+                tau=float(tau_grid[tau_index]),
+                polarity=polarity,
+                depth_m=np.asarray(dataset.depth_m, dtype="float64"),
+            )
+        )
+    nonempty = [table for table in tables if not table.empty]
+    return pd.concat(nonempty, ignore_index=True) if nonempty else pd.DataFrame()
+
+
 def _summary_table(profiles: "pd.DataFrame") -> "pd.DataFrame":
     rows = []
     keys = ["shape", "axis_source", "orientation", "buoyancy_source", "polarity", "region"]
@@ -551,6 +796,14 @@ def _summary_table(profiles: "pd.DataFrame") -> "pd.DataFrame":
             "region_fraction_of_total_abs_tilt_correction",
             "region_fraction_of_total_abs_pv_covariance",
             "region_fraction_of_total_abs_heat_covariance",
+            "object_aggregate_product_mean_heat",
+            "object_aggregate_mean_product_heat",
+            "object_aggregate_covariance_heat",
+            "object_aggregate_product_mean_pv",
+            "object_aggregate_mean_product_pv",
+            "object_aggregate_covariance_pv",
+            "object_aggregate_region_fraction_of_total_abs_heat_covariance",
+            "object_aggregate_region_fraction_of_total_abs_pv_covariance",
         ):
             if col in sub.columns:
                 row[f"{col}_median"] = _nanmedian_no_warning(sub[col].to_numpy(float))
@@ -585,6 +838,18 @@ def _write_partition_tables(profiles: "pd.DataFrame", output_dir: Path) -> dict[
         "covariance_pv",
         "region_fraction_of_total_abs_heat_covariance",
         "region_fraction_of_total_abs_pv_covariance",
+        "object_aggregate_valid_cell_count",
+        "object_aggregate_mean_v_rot",
+        "object_aggregate_mean_theta",
+        "object_aggregate_mean_q",
+        "object_aggregate_product_mean_heat",
+        "object_aggregate_mean_product_heat",
+        "object_aggregate_covariance_heat",
+        "object_aggregate_product_mean_pv",
+        "object_aggregate_mean_product_pv",
+        "object_aggregate_covariance_pv",
+        "object_aggregate_region_fraction_of_total_abs_heat_covariance",
+        "object_aggregate_region_fraction_of_total_abs_pv_covariance",
     ]
     ep_cols = base_cols + [
         "F_z_ordinary_region",
@@ -674,6 +939,18 @@ def _plot_core_shell_figures(profiles: "pd.DataFrame", output_dir: Path) -> list
         "median |covariance PV stirring proxy|",
         "PV stirring covariance partition by core and shell",
         "heat_pv_core_vs_shell_partition.png",
+    )
+    grouped_median_bar(
+        "object_aggregate_covariance_heat",
+        "median |rho0 Cp <v' theta'> covariance|",
+        "Object aggregate-product heat stirring partition",
+        "object_aggregate_heat_core_vs_shell_partition.png",
+    )
+    grouped_median_bar(
+        "object_aggregate_covariance_pv",
+        "median |<v' q'> covariance|",
+        "Object aggregate-product PV stirring partition",
+        "object_aggregate_pv_core_vs_shell_partition.png",
     )
     grouped_median_bar(
         "F_z_tilt_correction_region",
@@ -774,12 +1051,14 @@ def _summary_markdown_legacy_mojibake(request: CoreShellRequest, summary: "pd.Da
         "",
         "## 参数",
         f"- result root: `{request.result_root}`",
+        f"- filter root: `{request.filter_root}`",
         f"- shapes: `{','.join(request.shapes)}`",
         f"- orientations: `{','.join(request.orientations)}`",
         f"- axis sources: `{','.join(request.axis_sources)}`",
         f"- buoyancy sources: `{','.join(request.buoyancy_sources)}`",
         f"- inner boundary mode: `{request.inner_boundary_mode}`",
         f"- PV shell quantile: `{request.pv_shell_quantile}`",
+        f"- object aggregate transport: `{request.object_aggregate_transport}`",
         "",
         "## 汇总表",
         "```text",
@@ -820,10 +1099,10 @@ def _summary_markdown(request: CoreShellRequest, summary: "pd.DataFrame") -> str
         "```",
         "",
         "## 判读",
-        "- 若 `inner_core` 低 leakage、高 weak/LAVD retention，但热/PV stirring 较弱，则它更像 trapping/material core。",
-        "- 若 `pv_shell` 的 PV 或热协方差贡献更强，则它更像 PV-active stirring shell。",
+        "- 若 `inner_core` 低 leakage、高 weak/LAVD retention，但 object aggregate heat/PV stirring 较弱，则它更像 trapping/material core。",
+        "- 若 `pv_shell` 的 object aggregate heat/PV covariance 或 EP tilt correction 贡献更强，则它更像 PV-active stirring shell。",
         "- 若 shell 或 combined volume 的 boundary exchange 很大，不能把它解释成严格闭合材料体。",
-        "- 若 `theta_prime_available_fraction=0`，热通量分区尚不能从代表涡结构文件直接回答，需要补 theta moments 或 object-level aggregate-product。",
+        "- 热通量分区优先读取 object-day `thetao_glor` 并累计 `v_rot * theta`，而不是用代表涡平均温度场相乘。",
     ]
     return "\n".join(lines) + "\n"
 
@@ -866,7 +1145,9 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                     combo_dir = _combo_output(request.output_root, shape, axis_source, orientation, buoyancy_source)
                     combo_dir.mkdir(parents=True, exist_ok=True)
                     combo_profiles = []
+                    combo_masks_by_tau_polarity: dict[tuple[int, str], dict[str, np.ndarray]] = {}
                     for tau in tau_grid:
+                        tau_index = int(np.nanargmin(np.abs(np.asarray(dataset.tau_grid, dtype=float) - float(tau))))
                         axis_path = me_root / "axis_sources" / axis_source_filename(axis_source, float(tau))
                         if not axis_path.exists():
                             if request.skip_missing:
@@ -923,7 +1204,7 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                                 n2=n2,
                                 buoyancy_source=buoyancy_source,
                             ).compute_field_terms()
-                            profiles, _ = _compute_core_shell_for_slice(
+                            profiles, masks = _compute_core_shell_for_slice(
                                 rep=rep,
                                 axis=axis,
                                 q_proxy=debug["q_proxy"],
@@ -938,10 +1219,46 @@ def run_core_shell_ep_validation(request: CoreShellRequest) -> dict[str, Path]:
                             profiles["buoyancy_source"] = buoyancy_source
                             profiles["tau"] = float(rep.tau)
                             profiles["polarity"] = polarity
+                            combo_masks_by_tau_polarity[(tau_index, polarity)] = masks
                             combo_profiles.append(profiles)
                     if not combo_profiles:
                         continue
                     combo_all = pd.concat(combo_profiles, ignore_index=True)
+                    if request.object_aggregate_transport:
+                        object_transport = _compute_object_aggregate_transport_partition(
+                            request=request,
+                            shape=shape,
+                            axis_source=axis_source,
+                            orientation=orientation,
+                            buoyancy_source=buoyancy_source,
+                            radial_root=radial_root,
+                            dataset=dataset,
+                            tau_grid=np.asarray(dataset.tau_grid, dtype=float),
+                            masks_by_tau_polarity=combo_masks_by_tau_polarity,
+                        )
+                        if not object_transport.empty:
+                            object_transport = _add_grouped_abs_fraction(
+                                object_transport,
+                                value_column="object_aggregate_covariance_heat",
+                                fraction_column="object_aggregate_region_fraction_of_total_abs_heat_covariance",
+                            )
+                            object_transport = _add_grouped_abs_fraction(
+                                object_transport,
+                                value_column="object_aggregate_covariance_pv",
+                                fraction_column="object_aggregate_region_fraction_of_total_abs_pv_covariance",
+                            )
+                            merge_keys = [
+                                "shape",
+                                "axis_source",
+                                "orientation",
+                                "buoyancy_source",
+                                "tau",
+                                "polarity",
+                                "depth_index",
+                                "depth_m",
+                                "region",
+                            ]
+                            combo_all = combo_all.merge(object_transport, on=merge_keys, how="left")
                     summary = _summary_table(combo_all)
                     _write_table(combo_all, combo_dir / "core_shell_profiles.csv")
                     _write_table(summary, combo_dir / "core_shell_summary.csv")
@@ -985,6 +1302,8 @@ def request_from_args(args) -> CoreShellRequest:
     return CoreShellRequest(
         result_root=Path(args.result_root),
         output_root=Path(args.output_root),
+        filter_root=Path(args.filter_root),
+        filter_template=args.filter_template,
         shapes=_split_csv(args.shapes),
         axis_sources=_split_csv(args.axis_sources),
         orientations=_split_csv(args.orientations),
@@ -1003,6 +1322,9 @@ def request_from_args(args) -> CoreShellRequest:
         shell_dilation_cells=int(args.shell_dilation_cells),
         min_mask_fraction=float(args.min_mask_fraction),
         min_core_retention=float(args.min_core_retention),
+        object_aggregate_transport=not bool(args.no_object_aggregate_transport),
+        object_aggregate_max_days=int(args.object_aggregate_max_days),
+        object_aggregate_max_objects=int(args.object_aggregate_max_objects),
         skip_missing=bool(args.skip_missing),
         dry_run=bool(args.dry_run),
     )

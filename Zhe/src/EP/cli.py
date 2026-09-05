@@ -402,6 +402,8 @@ def _add_core_shell_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--result-root", default=str(DEFAULT_RESULT_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_CORE_SHELL_OUTPUT_ROOT))
+    parser.add_argument("--filter-root", default="/root/autodl-fs/kuroshiou/Filter")
+    parser.add_argument("--filter-template", default="global_phy_{year}_bandpass_30_180d.nc")
     parser.add_argument("--shapes", default="coherent,upright_like")
     parser.add_argument("--axis-sources", default="radial_seed")
     parser.add_argument("--orientations", default="turned")
@@ -424,6 +426,9 @@ def _add_core_shell_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--shell-dilation-cells", type=int, default=2)
     parser.add_argument("--min-mask-fraction", type=float, default=0.01)
     parser.add_argument("--min-core-retention", type=float, default=0.75)
+    parser.add_argument("--no-object-aggregate-transport", action="store_true")
+    parser.add_argument("--object-aggregate-max-days", type=int, default=0)
+    parser.add_argument("--object-aggregate-max-objects", type=int, default=0)
     parser.add_argument("--skip-missing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
