@@ -1,10 +1,24 @@
-# Core-Shell V2 / PV-Active Shell 分区判据摘要
+# Core-Shell V2 / PV-Active Shell EP 验证结果报告
 
-本文档对应 `core_shell_partition_v2_report_zh.pdf`。
+对应 PDF：`core_shell_partition_v2_report_zh.pdf`
+
+## 已完成
+
+服务器 `core_shell_partition_v2` 全生命周期结果已经完成，包含 coherent 与 upright_like，默认口径为：
+
+`radial_seed axis + TURN + thermal_wind`
+
+结果已下载到：
+
+`G:\TEMP\kuroshiou_ep_core_shell_partition_v2`
+
+正式报告整理在：
+
+`G:\EDDY_detection\S-H-I-T-ocean-\EP-FLUX\core_shell_partition_v2`
 
 ## 核心结论
 
-V2 不再要求单一材料体同时解释 trapping、PV anomaly、heat/PV stirring 和 EP forcing。推荐分区为：
+当前证据支持双区结构，而不是单一材料涡体积：
 
 \[
 \mathcal{T}_{total}
@@ -16,39 +30,23 @@ V2 不再要求单一材料体同时解释 trapping、PV anomaly、heat/PV stirr
 \mathcal{T}_{exchange}
 \]
 
-## 三个区域
+- `inner_core`：Hua/LAVD 近同位的弱速旋转核，更接近 trapping/material coherence。
+- `pv_shell`：PV anomaly、强剪切、月牙状强速带和 heat/PV stirring 更活跃。
+- `exchange_layer`：解释 inner core 与 shell 之间的 heat/PV/momentum 边界交换。
 
-- `inner_material_core`：Hua/LAVD 近同位、低 leakage、高 retention、弱速核心连通，默认 `r/R <= 1.2`。
-- `pv_active_shell`：inner core 外侧，高 `|q'|`、高 `|grad q'|`、强剪切或月牙强速带，默认到 `r/R <= 2.5`。
-- `exchange_layer`：inner core 与 shell 接触带，用于 heat/PV/momentum boundary exchange。
+## 数值摘要
 
-## 和 v1 的区别
+| shape | region | heat covariance | PV covariance | EP tilt correction | tilt/ordinary |
+|---|---:|---:|---:|---:|---:|
+| coherent | inner core | 0.526 | 0.441 | 0.501 | 0.512 |
+| coherent | PV shell | 0.475 | 0.559 | 0.498 | 0.382 |
+| upright_like | inner core | 0.447 | 0.385 | 0.546 | 0.486 |
+| upright_like | PV shell | 0.553 | 0.615 | 0.453 | 0.344 |
 
-- v1 的 shell 仍偏内，默认 outer radius 是 `1.5R`。
-- v2 将 inner core 收紧到 `1.2R`，shell 放宽到 `2.5R`。
-- v2 把 exchange layer 作为独立物理解释层，而不是只看 combined volume 是否闭合。
+## 判定
 
-## 判读原则
+PV covariance 在两类 shape 中都更偏 shell；heat covariance 在 coherent 中接近 core/shell 分担，在 upright_like 中更偏 shell。EP 倾斜修正不是只发生在 inner core，也不是可忽略小项。
 
-- inner core 低 leakage 只说明 trapping/material coherence。
-- PV shell 协方差强说明 stirring 主要发生在 shell。
-- exchange 不小则说明闭合残差来自 core-shell 交换，不能简单说 EP 公式错误。
+因此，后续理论验证应把 `inner material core`、`PV-active stirring shell` 和 `exchange layer` 分开列账，特别是 heat/PV/momentum boundary exchange 不能混进内部 EP forcing。
 
-## 代码入口
-
-```bash
-python -m src.EP.cli run-core-shell-v2-validation \
-  --shapes coherent,upright_like \
-  --orientations turned \
-  --axis-sources radial_seed \
-  --buoyancy-sources thermal_wind \
-  --tau-values 0.50
-```
-
-默认 V2 参数已经设置为：
-
-- `--core-radius-over-R 1.2`
-- `--shell-outer-radius-over-R 2.5`
-- `--pv-shell-quantile 0.80`
-- `--inner-boundary-mode levelset_v2`
-- `--boundary-budget full_3d`
+完整 geodesic/LAVD object-level full 尚未完成，不能声称严格材料体 EP 闭合已经成立。
