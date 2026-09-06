@@ -300,6 +300,19 @@ def cmd_run_core_shell_v2_ep_validation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_dual_zone_ep_diagnostics(args: argparse.Namespace) -> int:
+    from .dual_zone import request_from_args, run_dual_zone_ep_diagnostics
+
+    request = request_from_args(args)
+    outputs = run_dual_zone_ep_diagnostics(request)
+    if args.dry_run:
+        return 0
+    print("Dual-zone EP diagnostic outputs:")
+    for key, path in outputs.items():
+        print(f"{key}: {path}")
+    return 0
+
+
 def _add_material_arguments(parser: argparse.ArgumentParser, *, output_root: str, boundary_mode: str) -> None:
     from .dynamic_boundary import BOUNDARY_MODES
     from .material_volume import BOUNDARY_BUDGETS
@@ -518,6 +531,36 @@ def _add_core_shell_v2_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dual_zone_arguments(parser: argparse.ArgumentParser) -> None:
+    from .dual_zone import DEFAULT_DUAL_ZONE_OUTPUT_ROOT
+
+    _add_core_shell_arguments(parser)
+    parser.set_defaults(
+        output_root=str(DEFAULT_DUAL_ZONE_OUTPUT_ROOT),
+        core_radius_over_R=1.2,
+        shell_outer_radius_over_R=2.5,
+        pv_shell_quantile=0.80,
+        inner_boundary_mode="levelset_v2",
+        boundary_budget="full_3d",
+    )
+    parser.add_argument(
+        "--object-boundary-audit",
+        choices=["none", "medium_8tracks", "full_coherent"],
+        default="medium_8tracks",
+        help="Attach an existing object-level material-boundary audit to the dual-zone report.",
+    )
+    parser.add_argument(
+        "--object-boundary-audit-root",
+        default="",
+        help="Existing audit root. Empty means auto-detect local/server medium_8tracks output.",
+    )
+    parser.add_argument(
+        "--no-compile-pdf",
+        action="store_true",
+        help="Write Markdown and LaTeX only; do not attempt xelatex PDF compilation.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Object-oriented EP flux diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -658,6 +701,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_core_shell_v2_arguments(core_shell_v2)
     core_shell_v2.set_defaults(func=cmd_run_core_shell_v2_ep_validation)
+
+    dual_zone = sub.add_parser(
+        "run-dual-zone-ep-diagnostics",
+        help="Run the formal dual-zone EP diagnostic contract",
+    )
+    _add_dual_zone_arguments(dual_zone)
+    dual_zone.set_defaults(func=cmd_run_dual_zone_ep_diagnostics)
 
     explain = sub.add_parser("explain-contract", help="Print the EP diagnostic contract")
     explain.set_defaults(func=cmd_explain_contract)
