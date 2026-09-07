@@ -1,57 +1,62 @@
-﻿[
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\core_shell_exchange_budget.png",
-        "copied_as":  "fig_boundary_exchange.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\ep_tilt_correction_core_vs_shell.png",
-        "copied_as":  "fig_ep_tilt_core_shell.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\assets\\figures\\fig5_coherent_tilt.png",
-        "copied_as":  "fig_tilt_correction_lifecycle.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\heat_pv_momentum_boundary_budget.png",
-        "copied_as":  "fig_heat_pv_momentum_budget.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\pv_retention_vs_boundary_exchange.png",
-        "copied_as":  "fig_pv_retention_vs_boundary_exchange.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\dual_zone_framework_summary.png",
-        "copied_as":  "fig_dual_zone_framework.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\object_aggregate_pv_core_vs_shell_partition.png",
-        "copied_as":  "fig_pv_core_shell.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\object_aggregate_heat_core_vs_shell_partition.png",
-        "copied_as":  "fig_heat_core_shell.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\pv_retention_vs_leakage.png",
-        "copied_as":  "fig_pv_retention_vs_leakage.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\hua_lavd_pv_core_separation.png",
-        "copied_as":  "fig_hua_lavd_pv_separation.png",
-        "status":  "copied"
-    },
-    {
-        "source":  "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\assets\\figures\\mv_ep_curvature_failure.png",
-        "copied_as":  "fig_curvature_failure.png",
-        "status":  "copied"
-    }
+[
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\core_shell_exchange_budget.png",
+    "copied_as": "fig_boundary_exchange.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\ep_tilt_correction_core_vs_shell.png",
+    "copied_as": "fig_ep_tilt_core_shell.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\assets\\figures\\fig5_coherent_tilt.png",
+    "copied_as": "fig_tilt_correction_lifecycle.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\heat_pv_momentum_boundary_budget.png",
+    "copied_as": "fig_heat_pv_momentum_budget.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\pv_retention_vs_boundary_exchange.png",
+    "copied_as": "fig_pv_retention_vs_boundary_exchange.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\dual_zone_framework_summary.png",
+    "copied_as": "fig_dual_zone_framework.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\object_aggregate_pv_core_vs_shell_partition.png",
+    "copied_as": "fig_pv_core_shell.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\core_shell_partition_v2\\figures\\object_aggregate_heat_core_vs_shell_partition.png",
+    "copied_as": "fig_heat_core_shell.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\pv_retention_vs_leakage.png",
+    "copied_as": "fig_pv_retention_vs_leakage.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\TEMP\\kuroshiou_ep_object_material_pv_retention_validation_medium_8tracks\\figures\\hua_lavd_pv_core_separation.png",
+    "copied_as": "fig_hua_lavd_pv_separation.png",
+    "status": "copied"
+  },
+  {
+    "source": "G:\\EDDY_detection\\S-H-I-T-ocean-\\EP-FLUX\\assets\\figures\\mv_ep_curvature_failure.png",
+    "copied_as": "fig_curvature_failure.png",
+    "status": "copied"
+  },
+  {
+    "name": "fig_dual_zone_partition_model_v2.png",
+    "source": "generated locally for this report",
+    "note": "Conceptual Dual-Zone partition model with Hua, LAVD, and PV anomaly core definitions."
+  }
 ]

@@ -20,7 +20,7 @@
 
 \title{EP-FLUX 发展脉络与 Dual-Zone EP 正式诊断口径}
 \author{Kuroshiou / S-H-I-T-ocean 项目内部报告}
-\date{2026 年 9 月 6 日}
+\date{2026 年 9 月 7 日}
 
 \begin{document}
 \maketitle
@@ -159,13 +159,47 @@ Material-volume 路线带来的第一个教训是：代表涡是平均结构，�
 
 \subsection{三类中心/核心不是同一个物理对象}
 
-object-level 审计迫使我们把“中心”拆开。当前至少有三类核心：
-\begin{itemize}
-  \item Hua 弱速中心：二维速度弱核并满足旋转几何约束，是我们的识别中心。
-  \item LAVD 旋转相干中心：有限时间涡度偏差积分定义的旋转相干材料核中心 \cite{HallerEtAl2016}。
-  \item PV anomaly core：PV 异常或 PV 梯度相关的动力核心，更直接对应动力约束和 PV stirring。
-\end{itemize}
-审计结果显示，Hua 与 LAVD 通常较接近，但 PV core 存在系统性偏离。这意味着速度旋转核和 PV 动力核不能被默认合并。
+object-level 审计迫使我们把“中心”拆开。当前至少有三类核心，它们的物理定义和数学定义并不相同。
+
+\paragraph{Hua 弱速中心。}
+Hua 弱速中心是我们识别链条中的运动学中心。对给定 object-day、深度 $z$ 和局地窗口 $\Omega_z$，先寻找速度模弱核
+\begin{equation}
+  \mathbf r_H(z)
+  =\arg\min_{\mathbf r\in\Omega_z}
+  |\mathbf u'_h(\mathbf r,z)|,
+  \qquad
+  |\mathbf u'_h|=\sqrt{u'^2+v'^2},
+\end{equation}
+然后要求该候选点周围满足 Hua/VG-like 的几何旋转约束，包括切向一致性、两侧速度反转、边界速度向量单调旋转等。因而 $\mathbf r_H$ 表示“速度弱核 + 旋转几何通过”的中心，不等同于压强极值，也不等同于 PV 极值。
+
+\paragraph{LAVD 旋转相干中心。}
+LAVD 中心来自有限时间旋转相干性 \cite{HallerEtAl2016}。给定粒子轨迹 $\mathbf x(t;t_0,\mathbf x_0)$，定义
+\begin{equation}
+  \mathrm{LAVD}_{t_0}^{t_1}(\mathbf x_0)
+  =\int_{t_0}^{t_1}
+  \left|\zeta\bigl(\mathbf x(t;t_0,\mathbf x_0),t\bigr)-\overline{\zeta}(t)\right|\,dt,
+\end{equation}
+其中 $\zeta=\partial_x v-\partial_y u$，$\overline{\zeta}(t)$ 为同一分析域内的面积平均涡度。LAVD 旋转相干中心可写为
+\begin{equation}
+  \mathbf r_L(z)=\arg\max_{\mathbf r\in\Omega_z}\mathrm{LAVD}(\mathbf r,z),
+\end{equation}
+对应有限时间内旋转最相干的材料核中心。它强调轨迹积分意义上的旋转相干，而不是瞬时速度最小。
+
+\paragraph{PV anomaly core。}
+PV anomaly core 是动力核心。第一版诊断中使用 QG/PV proxy，记为 $q'(\mathbf r,z)$，则 PV 异常核心定义为
+\begin{equation}
+  \mathbf r_Q(z)
+  =\arg\max_{\mathbf r\in\Omega_z}|q'(\mathbf r,z)|,
+\end{equation}
+并同时审计高 PV 分位区域的质心
+\begin{equation}
+  \mathbf r_{Q,c}(z)=
+  \frac{\int_{\Omega_z}\mathbf r\,|q'|\,\mathbb I(|q'|>Q_p)\,dA}
+       {\int_{\Omega_z}|q'|\,\mathbb I(|q'|>Q_p)\,dA}.
+\end{equation}
+这里 $Q_p$ 通常取高分位阈值，例如 $80\%$ 或 $90\%$。因此 PV core 更接近动力异常和 PV stirring 活跃中心。
+
+审计结果显示，Hua 与 LAVD 通常较接近，但 PV core 存在系统性偏离。这意味着速度旋转核和 PV 动力核不能被默认合并。换言之，$\mathbf r_H\approx \mathbf r_L$ 并不推出 $\mathbf r_Q\subset M_{LAVD}$，这正是后续 Dual-Zone 框架的关键动机。
 
 \begin{figure}[H]
   \centering
@@ -211,6 +245,13 @@ object-level 审计迫使我们把“中心”拆开。当前至少有三类核�
   +\mathcal{T}_{shell}^{stir}
   +\mathcal{T}_{exchange}.
 \end{equation}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{fig_dual_zone_partition_model_v2.png}
+  \caption{Dual-Zone 分区模型示意图。Hua 弱速中心和 LAVD 旋转相干中心主要定义 inner material core；PV anomaly core 可以系统性偏向外侧 PV-active shell；两者之间的 exchange layer 单独列账 heat/PV/momentum 边界交换。图内英文标签用于避免字体兼容问题，正文给出中文物理定义。}
+  \label{fig:dual_zone_partition_model_v2}
+\end{figure}
 其中：
 \begin{itemize}
   \item inner material core：Hua/LAVD 近同位、低 leakage、高 particle retention、弱速核心连通，解释 trapping/material coherence。

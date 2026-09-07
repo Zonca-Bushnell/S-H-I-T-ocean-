@@ -1,6 +1,6 @@
 # EP-FLUX 发展脉络与 Dual-Zone EP 正式诊断口径
 
-生成日期：2026-09-06  
+生成日期：2026-09-07  
 性质：项目内部理论与结果脉络报告。本文只整理已有结果，不重跑 EP 数值、不修改 `src.EP` 计算逻辑。
 
 ## 0. 总结
@@ -87,13 +87,40 @@ J=1-\kappa_\alpha x_\alpha
 
 ## 5. Object-Level 审计
 
-三类核心必须区分：
+三类核心必须区分，而且它们的数学定义不同：
 
-- Hua 弱速中心：速度弱核 + Hua/VG 几何约束。
-- LAVD 旋转相干中心：有限时间涡度偏差积分定义的旋转相干核。
-- PV anomaly core：动力/PV 异常核心。
+**Hua 弱速中心** 是运动学速度弱核，并要求 Hua/VG-like 旋转几何检验通过：
 
-结果显示 Hua 与 LAVD 通常较近，但 PV core 系统性偏离。
+\[
+\mathbf r_H(z)=\arg\min_{\mathbf r\in\Omega_z}|\mathbf u'_h(\mathbf r,z)|,
+\qquad |\mathbf u'_h|=\sqrt{u'^2+v'^2}.
+\]
+
+这里的中心不是单纯速度最小点，而是“速度弱核 + 切向一致性 + 两侧反转 + 边界速度向量单调旋转”共同通过后的中心。
+
+**LAVD 旋转相干中心** 是有限时间旋转相干核中心：
+
+\[
+\mathrm{LAVD}_{t_0}^{t_1}(\mathbf x_0)=\int_{t_0}^{t_1}|\zeta(\mathbf x(t;t_0,\mathbf x_0),t)-\overline{\zeta}(t)|dt,
+\]
+
+\[
+\mathbf r_L(z)=\arg\max_{\mathbf r\in\Omega_z}\mathrm{LAVD}(\mathbf r,z).
+\]
+
+**PV anomaly core** 是动力/PV 异常核心：
+
+\[
+\mathbf r_Q(z)=\arg\max_{\mathbf r\in\Omega_z}|q'(\mathbf r,z)|,
+\]
+
+同时可用高 PV 分位区域质心审计：
+
+\[
+\mathbf r_{Q,c}(z)=\frac{\int_{\Omega_z}\mathbf r|q'|\mathbb I(|q'|>Q_p)dA}{\int_{\Omega_z}|q'|\mathbb I(|q'|>Q_p)dA}.
+\]
+
+结果显示 Hua 与 LAVD 通常较近，但 PV core 系统性偏离。因此 \(\mathbf r_H\approx\mathbf r_L\) 并不意味着 \(PV\ core\subset M_{LAVD}\)。
 
 ![三类中心分离](figures/fig_hua_lavd_pv_separation.png)
 
@@ -116,6 +143,8 @@ PV\ core \subset M_{LAVD}
 \[
 \mathcal{T}_{total}=\mathcal{T}_{core}^{trap}+\mathcal{T}_{shell}^{stir}+\mathcal{T}_{exchange}
 \]
+
+![Dual-Zone 分区模型](figures/fig_dual_zone_partition_model_v2.png)
 
 ![Dual-Zone 框架](figures/fig_dual_zone_framework.png)
 
