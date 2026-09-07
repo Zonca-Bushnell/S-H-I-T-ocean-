@@ -12,7 +12,7 @@ from pathlib import Path
 DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
 DEFAULT_OUTPUT_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\TEMP_Argo1000m_Wpk_composite_55S50S"
+    r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\TEMP_Argo1000m_Wpk_crossing_10N_1R"
 )
 
 
@@ -28,6 +28,13 @@ def parse_bbox(value: str) -> tuple[float, float, float, float]:
 
 def matlab_quote(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "''")
+
+
+def latitude_crossing_label(target_lat: float, intersect_radius_r: float) -> str:
+    hemi = "N" if target_lat >= 0 else "S"
+    lat_text = f"{abs(target_lat):02.0f}{hemi}"
+    radius_text = f"{intersect_radius_r:g}".replace(".", "p")
+    return f"cross_{lat_text}_{radius_text}R"
 
 
 def npy_bytes_2d(values: list[list[float]]) -> bytes:
@@ -90,12 +97,16 @@ def run_matlab(args: argparse.Namespace) -> list[Path]:
 
 def matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     lon_min, lon_max, lat_min, lat_max = args.bbox
+    target_label = latitude_crossing_label(args.target_lat, args.intersect_radius_r)
     replacements = {
         "@ARGO_MAT@": matlab_quote(args.argo_mat),
         "@META_DIR@": matlab_quote(args.meta_dir),
         "@OUTPUT_ROOT@": matlab_quote(args.output_root),
         "@MANIFEST@": matlab_quote(manifest_path),
         "@BBOX@": f"{lon_min:.12g} {lon_max:.12g} {lat_min:.12g} {lat_max:.12g}",
+        "@TARGET_LAT@": f"{float(args.target_lat):.12g}",
+        "@INTERSECT_RADIUS_R@": f"{float(args.intersect_radius_r):.12g}",
+        "@TARGET_LABEL@": target_label.replace("'", "''"),
         "@GRID_N@": str(int(args.grid_n)),
         "@TIME_WINDOW_DAYS@": f"{float(args.time_window_days):.12g}",
         "@CORE_MIN_M@": f"{float(args.core_min_m):.12g}",
@@ -108,6 +119,9 @@ argo_mat = '@ARGO_MAT@';
 meta_dir = '@META_DIR@';
 output_root = '@OUTPUT_ROOT@';
 bbox = [@BBOX@];
+target_lat = @TARGET_LAT@;
+intersect_radius_r = @INTERSECT_RADIUS_R@;
+target_label = '@TARGET_LABEL@';
 grid_n = @GRID_N@;
 time_window_days = @TIME_WINDOW_DAYS@;
 core_min_m = @CORE_MIN_M@;
@@ -131,7 +145,7 @@ argo_park = double(A.I_ParkDepth);
 argo_pf = double(A.I_PF);
 argo_w = double(A.I_Wpk);
 
-argo_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3) & argo_lat < bbox(4) & ...
+argo_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & ...
     argo_park >= core_min_m & argo_park <= core_max_m & isfinite(argo_w);
 
 polarities = {'cyclonic','anticyclonic'};
@@ -148,17 +162,18 @@ for p = 1:numel(polarities)
     meta_time = double(M.final_time);
     meta_track = double(M.final_track);
     meta_radius = double(M.final_radius);
-    meta_idx = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & meta_lat >= bbox(3) & meta_lat < bbox(4) & ...
-        isfinite(meta_radius) & meta_radius > 0);
+    cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+    meta_idx = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & ...
+        isfinite(meta_radius) & meta_radius > 0 & cross_distance_m <= meta_radius * intersect_radius_r);
     argo_idx = find(argo_mask);
     matches = match_argo_to_meta(argo_idx, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_w, ...
         meta_idx, meta_lon, meta_lat, meta_time, meta_track, meta_radius, time_window_days, deg_m);
-    group_dir = fullfile(output_root, polarity, lat_band_label(bbox(3), bbox(4)));
+    group_dir = fullfile(output_root, polarity, target_label);
     if exist(group_dir, 'dir') ~= 7
         mkdir(group_dir);
     end
     grid = composite_wpk(matches, grid_n, cressman_radius_r, cressman_min_obs);
-    write_outputs(group_dir, matches, grid, polarity, lat_band_label(bbox(3), bbox(4)), cressman_radius_r, cressman_min_obs);
+    write_outputs(group_dir, matches, grid, polarity, target_label, target_lat, intersect_radius_r, cressman_radius_r, cressman_min_obs);
     grid_json_files{end+1} = fullfile(group_dir, 'wpk_composite_grid.json'); %#ok<SAGROW>
     w = grid.wpk(:);
     valid = isfinite(w);
@@ -170,7 +185,7 @@ for p = 1:numel(polarities)
         med_support = median(support(valid), 'omitnan');
     end
     rings = matches(:,15);
-    summary(end+1,:) = {polarity, lat_band_label(bbox(3), bbox(4)), size(matches,1), ...
+    summary(end+1,:) = {polarity, target_label, size(matches,1), ...
         sum(strcmp(rings,'0-1R')), sum(strcmp(rings,'1-2R')), sum(strcmp(rings,'2-4R')), ...
         sum(valid), max(support), med_support, q95}; %#ok<SAGROW>
 end
@@ -283,12 +298,13 @@ function [Z, support_count] = cressman_map(x, y, v, X, Y, radius_r, min_obs)
     support_count(hypot(X, Y) > 4) = 0;
 end
 
-function write_outputs(group_dir, matches, grid, polarity, band_label, radius_r, min_obs)
+function write_outputs(group_dir, matches, grid, polarity, band_label, target_lat, intersect_radius_r, radius_r, min_obs)
     header = {'argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','wpk_m_s', ...
         'eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','ring'};
     writecell([header; matches], fullfile(group_dir, 'matched_argo1000m_wpk.csv'));
     G = struct();
     G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'grid_mapping', 'cressman', ...
+        'target_lat', target_lat, 'intersect_radius_r', intersect_radius_r, ...
         'cressman_radius_r', radius_r, 'cressman_min_obs', min_obs, ...
         'match_count', size(matches,1), 'valid_grid_cells', sum(isfinite(grid.wpk(:))));
     G.x_over_R = grid.x;
@@ -360,7 +376,9 @@ def main() -> int:
     parser.add_argument("--argo-mat", type=Path, default=DEFAULT_ARGO_MAT)
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox("0,360,-55,-50"))
+    parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox("0,360,-90,90"))
+    parser.add_argument("--target-lat", type=float, default=10.0)
+    parser.add_argument("--intersect-radius-r", type=float, default=1.0)
     parser.add_argument("--time-window-days", type=float, default=1.0)
     parser.add_argument("--core-min-m", type=float, default=900.0)
     parser.add_argument("--core-max-m", type=float, default=1100.0)
