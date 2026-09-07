@@ -189,3 +189,27 @@ E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transp
 | combined | 98194 | 5025 | 0.0805 | 12.21 | 2.10 |
 
 结论：速度来源、样本覆盖、Cressman 支撑和基础 `z_rho` QC 已不再是一阶问题；同一批样本下 `I_Wpk` 仍显示中心附近东西偶极，而 `z_rho` 公式重建仍偏带状/斑块状。因此下一步不应继续扩大样本，而应重新审查 `w = c dz_rho/dx + u · grad(z_rho)` 是否能由单时刻 profile 的等密面深度异常闭合到 Argo parking vertical velocity。优先方向是：使用 Christensen/Freeland 类型的 parking-phase pressure/temperature W 算法，或将当前 `z_rho` 项定位为动力诊断项而非直接替代 `I_Wpk`。
+
+补充量化：标量远场背景扣除后，`z_rho_anom` 与 `y/R` 的空间相关很高：
+cyclonic `0.720`、anticyclonic `0.823`、combined `0.826`；而 `I_Wpk` 与
+`y/R` 的相关接近 0。说明 `z_rho` 的南北背景坡度没有被标量背景扣除清掉，
+`term1/term2` 会继承这个背景坡度。因此新增 `--z-mode anomaly_farfield_plane`，
+用 `2-4R` 远场样本拟合平面背景 `z_bg=a+b x/R+c y/R`，作为下一步判断
+“背景变量处理问题”与“公式本身问题”的分界测试。
+
+平面背景测试结果：
+
+| polarity | corr(z'_rho, y/R) | corr(rebuild_W, I_Wpk) | q95 rebuild | q95 I_Wpk |
+| --- | ---: | ---: | ---: | ---: |
+| cyclonic | 0.0249 | 0.0084 | 15.72 | 7.46 |
+| anticyclonic | 0.0103 | 0.0208 | 12.09 | 6.97 |
+| combined | 0.0227 | 0.0892 | 9.87 | 2.10 |
+
+解释：平面背景已经基本去掉了 `z_rho` 中的南北背景坡度，但 `rebuild_W` 与
+`I_Wpk` 仍不相关，且形态仍非中心东西偶极。因此当前证据支持“两层结论”：
+
+1. 背景场/中间变量问题确实存在：标量远场背景不够，必须至少用平面或更物理的
+   local climatology/BOA/ISAS 背景密度面。
+2. 即便改正这一层，`z_rho` 坡度项重建仍不能复现 direct parking `I_Wpk`。这说明
+   主要剩余问题在计算方式/观测量定义：单时刻 profile 的等密面深度异常与
+   Christensen/Freeland 类型的 parking-phase vertical velocity 不是同一个观测量。

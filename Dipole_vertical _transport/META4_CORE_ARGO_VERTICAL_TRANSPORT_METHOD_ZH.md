@@ -52,8 +52,9 @@ rebuild_W = -c_x_rel * dz'_rho/dx + (u_pk - c_x_raw, v_pk) · grad(z'_rho)
 - `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
   处 `I_sigma1` 的中位数，作为共同目标等密面。
 - `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
-- 默认 `--z-mode anomaly_farfield`：使用 `2-4R` 样本中位数估计背景，
-  对 `z'_rho = z_rho - median(z_rho in 2-4R)` 求梯度。
+- 默认 `--z-mode anomaly_farfield_plane`：使用 `2-4R` 远场样本拟合
+  `z_bg = a + b x/R + c y/R`，对 `z'_rho = z_rho - z_bg` 求梯度。
+  旧的 `anomaly_farfield` 只扣一个远场中位数，已证实会残留强南北背景坡度。
 - `z_rho` 反插值只允许显式 bracket crossing，不再 fallback 到全剖面
   `interp1(profile, depth)`；CSV 输出 `rho_crossing_count`、
   `rho_bracket_dz_m`、`local_drho_dz`。

@@ -472,14 +472,28 @@ function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, 
     end
     z_rho = cell2mat(rows(:,13));
     r_norm = cell2mat(rows(:,26));
-    if strcmp(z_mode, 'anomaly_farfield')
+    if strcmp(z_mode, 'anomaly_farfield') || strcmp(z_mode, 'anomaly_farfield_plane')
         farfield = z_rho(r_norm >= 2 & r_norm <= 4 & isfinite(z_rho));
-        if isempty(farfield)
+        if strcmp(z_mode, 'anomaly_farfield_plane')
+            x_norm = cell2mat(rows(:,24));
+            y_norm = cell2mat(rows(:,25));
+            far_ok = r_norm >= 2 & r_norm <= 4 & isfinite(z_rho) & isfinite(x_norm) & isfinite(y_norm);
+            if nnz(far_ok) >= 10
+                Xfit = [ones(nnz(far_ok), 1), x_norm(far_ok), y_norm(far_ok)];
+                coef = Xfit \\ z_rho(far_ok);
+                z_bg_all = [ones(size(z_rho)), x_norm(:), y_norm(:)] * coef;
+            elseif isempty(farfield)
+                z_bg_all = repmat(median(z_rho, 'omitnan'), size(rows, 1), 1);
+            else
+                z_bg_all = repmat(median(farfield, 'omitnan'), size(rows, 1), 1);
+            end
+        elseif isempty(farfield)
             z_bg = median(z_rho, 'omitnan');
+            z_bg_all = repmat(z_bg, size(rows, 1), 1);
         else
             z_bg = median(farfield, 'omitnan');
+            z_bg_all = repmat(z_bg, size(rows, 1), 1);
         end
-        z_bg_all = repmat(z_bg, size(rows, 1), 1);
         z_anom = z_rho - z_bg_all;
     else
         z_bg_all = nan(size(z_rho));
@@ -1203,9 +1217,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--z-mode",
-        choices=("anomaly_farfield", "absolute"),
-        default="anomaly_farfield",
-        help="Use far-field isopycnal displacement anomaly for gradients, or use absolute z_rho.",
+        choices=("anomaly_farfield_plane", "anomaly_farfield", "absolute"),
+        default="anomaly_farfield_plane",
+        help="Use far-field plane or scalar isopycnal displacement anomaly for gradients, or use absolute z_rho.",
     )
     parser.add_argument(
         "--velocity-source",
