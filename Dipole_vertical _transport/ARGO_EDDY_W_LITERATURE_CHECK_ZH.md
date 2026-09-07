@@ -8,21 +8,28 @@ PDF 目录：`D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\PDF\Dipole_vertic
 - `Hou_etal_2022_Frontiers_Eddy_beta_spiral.pdf`
 - `Wang_etal_2020_JGR_Eddy_Induced_Acceleration_of_Argo_Floats.pdf`
 - `CortesMorales_etal_2026_ESSD_Global_Thermocline_Vertical_Velocities.pdf`
+- `Roemmich_etal_2020_Frontiers_Argo_Data_1999_2019.pdf`
+- `Gaube_etal_2019_Frontiers_Mesoscale_Eddy_Impacts_Review.pdf`
+- `Liu_etal_2013_JOUC_Eddies_Argo_STMW.pdf`
 
 ## 已找到但未计入本地依据
 
 以下论文很相关，但当前自动下载只拿到了 Cloudflare/站点拦截 HTML，不是有效 PDF，
 因此不作为“已下载论文”引用。后续若手动保存到上述目录并通过 PDF 解析，再纳入依据。
 
-- Christensen et al. (2024), *Global Estimates of Mesoscale Vertical Velocity Near 1,000 m From Argo Observations*, JGR Oceans, DOI: `10.1029/2023JC020003`。
+- Christensen et al. (2024), *Global Estimates of Mesoscale Vertical Velocity Near 1,000 m From Argo Observations*, JGR Oceans, DOI: `10.1029/2023JC020003`。网页全文可读并已核对方法，但本地 PDF 下载仍失败。
 - Chaigneau et al. (2011), *Vertical structure of mesoscale eddies in the eastern South Pacific Ocean: A composite analysis from altimetry and Argo profiling floats*, DOI: `10.1029/2011JC007134`。
 - Lin et al. (2019), *Thermohaline Structures and Heat/Freshwater Transports of Mesoscale Eddies in the Bay of Bengal Observed by Argo and Satellite Data*, DOI: `10.3390/rs11242989`。
 - Mason et al. (2017), *Subregional characterization of mesoscale eddies across the Brazil-Malvinas Confluence*, DOI: `10.1002/2016JC012611`。
 - Qu et al. (2022), *Spatial Structure of Vertical Motions and Associated Heat Flux Induced by Mesoscale Eddies in the Upper Kuroshio-Oyashio Extension*, DOI: `10.1029/2022JC018781`。
+- Freeland (2013), *Vertical velocity estimates in the North Pacific using Argo floats*, DOI: `10.1016/j.dsr2.2012.07.019`。
+- Colin de Verdiere and Ollitrault (2016), JPO Argo displacement / circulation method, DOI: `10.1175/JPO-D-15-0046.1`。
+- Colin de Verdiere et al. (2019), JGR Oceans Argo-derived geostrophic/LVB vertical velocity method, DOI: `10.1029/2018JC014565`。
 
 ## 对我们当前异常图像的判断
 
-当前结果不像偶极子，主要不是 Argo 年份覆盖太短，而是三个方法问题叠加：
+当前结果不像偶极子，主要不是 Argo 年份覆盖太短，而是正式 `z_rho` 重建 W 链条还没有和
+Argo 垂直速度文献的观测量口径对齐。已确认的风险包括：
 
 1. 匹配记录错误：早期代码在同一条 Argo 有多个候选涡旋时，把候选涡旋的 `dx/dy`
    向量写进了记录，而不是只写最佳候选 `dx(best_pos)/dy(best_pos)`。这会污染
@@ -30,7 +37,13 @@ PDF 目录：`D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\PDF\Dipole_vertic
 2. `rho0` 口径错误风险：若每条 profile 用自身 parking-depth density 当目标密度，
    反插值出的 `z_rho` 会退化到自身 parking depth 附近，`dz_rho/dx` 会被压得接近
    0，不可能形成稳定偶极子。
-3. 网格化方式不稳：单纯 bin median 会只显示离散采样格点；无约束 scattered 插值
+3. 速度来源风险：当前正式脚本用相邻 profile 位置差估计 `u_Argo/v_Argo`，这不是严格
+   parking-depth displacement velocity，会影响 `u_bg`、`c_x_rel` 和 `term2`。
+4. `z_rho` 应优先转为等密面位移异常后再求梯度；当前对绝对 `z_rho` 求梯度会混入背景
+   水团/纬向密度坡度。
+5. 移动坐标符号和速度参考系没有被 `I_Wpk` 或文献公式锁定，`+c dzdx`、`-c dzdx`、
+   `u_abs`、`u_rel` 都需要敏感性测试。
+6. 网格化方式不稳：单纯 bin median 会只显示离散采样格点；无约束 scattered 插值
    又可能在样本很稀疏处补出假连续结构。文献里更常见的是在统一网格上做有半径和
    权重约束的 objective mapping / composite。
 
@@ -55,10 +68,16 @@ omega_i = (R^2 - r_i^2) / (R^2 + r_i^2)
 
 ## 推荐修改方向
 
-- 保持每个纬度带、每个极性独立求 `rho0` 和 `c_x_rel`，不要把全球混成一个背景。
-- 默认 `rho0-mode = band_median`：用同纬度带/同极性 Core Argo 在 parking depth
-  的密度中位数作为共同等密面。
-- 保留 `z_rho = 900-1100 m` 窗口，避免共同等密面跳到浅层或深层交点导致异常大梯度。
+- 不再把 `rho0-mode = band_median` 当作最终推荐口径；它只能作为临时稳定共同密度面的
+  smoke-test 方案。下一步应建立 `z_rho_anomaly = z_rho - z_rho_bg`，再对异常场求梯度。
+- 优先把 `Argo1000m_UVW_TSDen_199601_202306.mat` 的 `I_Upk/I_Vpk/I_Wpk` 与 TEOS-10
+  密度剖面匹配：`I_Wpk` 用作观测 W sanity check，`I_Upk/I_Vpk` 用作真实 parking drift
+  的第一候选。
+- 重写 `z_rho` 反插值质量控制：只使用明确 bracket crossing，记录 crossing 个数、bracket
+  厚度和局地层结，剔除多重异常 crossing 与弱层结样本。
+- 对 `term1` 保留符号敏感性测试，用 `I_Wpk` 偶极方向校验 `+c dzdx` 还是 `-c dzdx`。
+- 对 `term2` 保留速度参考系敏感性测试：`u_abs`、`u_abs-c`、`u_anom` 分开输出，不默认
+  直接合成为最终 W。
 - 默认 `grid-mapping = cressman`，并输出 `sample_count` 和 `mapped_support`。
   `sample_count` 是原始 bin 中样本数，`mapped_support` 是 Cressman 半径内参与映射的
   样本数；正式 W 图只显示 `mapped_support >= cressman_min_obs` 的格点。

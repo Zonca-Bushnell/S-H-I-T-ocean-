@@ -107,6 +107,8 @@ def matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         "@TARGET_LAT@": f"{float(args.target_lat):.12g}",
         "@INTERSECT_RADIUS_R@": f"{float(args.intersect_radius_r):.12g}",
         "@TARGET_LABEL@": target_label.replace("'", "''"),
+        "@SELECTION_MODE@": str(args.selection_mode).replace("'", "''"),
+        "@MATCH_MODE@": str(args.match_mode).replace("'", "''"),
         "@GRID_N@": str(int(args.grid_n)),
         "@TIME_WINDOW_DAYS@": f"{float(args.time_window_days):.12g}",
         "@CORE_MIN_M@": f"{float(args.core_min_m):.12g}",
@@ -122,6 +124,8 @@ bbox = [@BBOX@];
 target_lat = @TARGET_LAT@;
 intersect_radius_r = @INTERSECT_RADIUS_R@;
 target_label = '@TARGET_LABEL@';
+selection_mode = '@SELECTION_MODE@';
+match_mode = '@MATCH_MODE@';
 grid_n = @GRID_N@;
 time_window_days = @TIME_WINDOW_DAYS@;
 core_min_m = @CORE_MIN_M@;
@@ -147,10 +151,13 @@ argo_w = double(A.I_Wpk);
 
 argo_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & ...
     argo_park >= core_min_m & argo_park <= core_max_m & isfinite(argo_w);
+if strcmp(selection_mode, 'lat_band')
+    argo_mask = argo_mask & argo_lat >= bbox(3) & argo_lat < bbox(4);
+end
 
 polarities = {'cyclonic','anticyclonic'};
 grid_json_files = {};
-summary = {'polarity','lat_band','match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','max_support','median_support_valid','q95_abs_w_1e6_m_s'};
+summary = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','max_support','median_support_valid','q95_abs_w_1e6_m_s'};
 for p = 1:numel(polarities)
     polarity = polarities{p};
     meta_file = find_meta_file(meta_dir, polarity);
@@ -162,18 +169,25 @@ for p = 1:numel(polarities)
     meta_time = double(M.final_time);
     meta_track = double(M.final_track);
     meta_radius = double(M.final_radius);
-    cross_distance_m = abs(meta_lat - target_lat) * deg_m;
-    meta_idx = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & ...
-        isfinite(meta_radius) & meta_radius > 0 & cross_distance_m <= meta_radius * intersect_radius_r);
+    if strcmp(selection_mode, 'crossing_lat')
+        group_label = target_label;
+        cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+        meta_idx = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & ...
+            isfinite(meta_radius) & meta_radius > 0 & cross_distance_m <= meta_radius * intersect_radius_r);
+    else
+        group_label = lat_band_label(bbox(3), bbox(4));
+        meta_idx = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & meta_lat >= bbox(3) & meta_lat < bbox(4) & ...
+            isfinite(meta_radius) & meta_radius > 0);
+    end
     argo_idx = find(argo_mask);
     matches = match_argo_to_meta(argo_idx, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_w, ...
-        meta_idx, meta_lon, meta_lat, meta_time, meta_track, meta_radius, time_window_days, deg_m);
-    group_dir = fullfile(output_root, polarity, target_label);
+        meta_idx, meta_lon, meta_lat, meta_time, meta_track, meta_radius, time_window_days, match_mode, deg_m);
+    group_dir = fullfile(output_root, polarity, group_label);
     if exist(group_dir, 'dir') ~= 7
         mkdir(group_dir);
     end
     grid = composite_wpk(matches, grid_n, cressman_radius_r, cressman_min_obs);
-    write_outputs(group_dir, matches, grid, polarity, target_label, target_lat, intersect_radius_r, cressman_radius_r, cressman_min_obs);
+    write_outputs(group_dir, matches, grid, polarity, group_label, selection_mode, match_mode, target_lat, intersect_radius_r, cressman_radius_r, cressman_min_obs);
     grid_json_files{end+1} = fullfile(group_dir, 'wpk_composite_grid.json'); %#ok<SAGROW>
     w = grid.wpk(:);
     valid = isfinite(w);
@@ -184,8 +198,14 @@ for p = 1:numel(polarities)
         q95 = prctile(abs(w(valid))*1e6, 95);
         med_support = median(support(valid), 'omitnan');
     end
-    rings = matches(:,15);
-    summary(end+1,:) = {polarity, target_label, size(matches,1), ...
+    unique_argo_count = 0;
+    if isempty(matches)
+        rings = {};
+    else
+        rings = matches(:,15);
+        unique_argo_count = numel(unique(cell2mat(matches(:,1))));
+    end
+    summary(end+1,:) = {polarity, group_label, size(matches,1), unique_argo_count, size(matches,1) - unique_argo_count, ...
         sum(strcmp(rings,'0-1R')), sum(strcmp(rings,'1-2R')), sum(strcmp(rings,'2-4R')), ...
         sum(valid), max(support), med_support, q95}; %#ok<SAGROW>
 end
@@ -213,7 +233,7 @@ function file = find_meta_file(meta_dir, polarity)
 end
 
 function rows = match_argo_to_meta(argo_idx, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_w, ...
-    meta_idx, meta_lon, meta_lat, meta_time, meta_track, meta_radius, time_window_days, deg_m)
+    meta_idx, meta_lon, meta_lat, meta_time, meta_track, meta_radius, time_window_days, match_mode, deg_m)
     rows = {};
     meta_time_band = meta_time(meta_idx);
     for a = 1:numel(argo_idx)
@@ -226,16 +246,23 @@ function rows = match_argo_to_meta(argo_idx, argo_lon, argo_lat, argo_time, argo
         dx = local_dx_m(argo_lon(ii), meta_lon(candidates), argo_lat(ii), deg_m);
         dy = (argo_lat(ii) - meta_lat(candidates)) * deg_m;
         r_norm = hypot(dx, dy) ./ meta_radius(candidates);
-        [best_r, best_pos] = min(r_norm);
-        if ~isfinite(best_r) || best_r > 4
-            continue
+        if strcmp(match_mode, 'all')
+            use_pos = find(isfinite(r_norm) & r_norm <= 4);
+        else
+            [best_r, best_pos] = min(r_norm);
+            if isfinite(best_r) && best_r <= 4
+                use_pos = best_pos;
+            else
+                use_pos = [];
+            end
         end
-        jj = candidates(best_pos);
-        best_dx = dx(best_pos);
-        best_dy = dy(best_pos);
-        rows(end+1,:) = {ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), argo_park(ii), argo_w(ii), ...
-            meta_track(jj), meta_time(jj), meta_lon(jj), meta_lat(jj), meta_radius(jj), ...
-            best_dx / meta_radius(jj), best_dy / meta_radius(jj), ring_label(best_r)}; %#ok<AGROW>
+        for pp = 1:numel(use_pos)
+            pos = use_pos(pp);
+            jj = candidates(pos);
+            rows(end+1,:) = {ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), argo_park(ii), argo_w(ii), ...
+                meta_track(jj), meta_time(jj), meta_lon(jj), meta_lat(jj), meta_radius(jj), ...
+                dx(pos) / meta_radius(jj), dy(pos) / meta_radius(jj), ring_label(r_norm(pos))}; %#ok<AGROW>
+        end
     end
 end
 
@@ -298,15 +325,21 @@ function [Z, support_count] = cressman_map(x, y, v, X, Y, radius_r, min_obs)
     support_count(hypot(X, Y) > 4) = 0;
 end
 
-function write_outputs(group_dir, matches, grid, polarity, band_label, target_lat, intersect_radius_r, radius_r, min_obs)
+function write_outputs(group_dir, matches, grid, polarity, band_label, selection_mode, match_mode, target_lat, intersect_radius_r, radius_r, min_obs)
     header = {'argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','wpk_m_s', ...
         'eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','ring'};
     writecell([header; matches], fullfile(group_dir, 'matched_argo1000m_wpk.csv'));
+    unique_argo_count = 0;
+    if ~isempty(matches)
+        unique_argo_count = numel(unique(cell2mat(matches(:,1))));
+    end
     G = struct();
     G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'grid_mapping', 'cressman', ...
-        'target_lat', target_lat, 'intersect_radius_r', intersect_radius_r, ...
+        'selection_mode', selection_mode, 'match_mode', match_mode, 'target_lat', target_lat, 'intersect_radius_r', intersect_radius_r, ...
         'cressman_radius_r', radius_r, 'cressman_min_obs', min_obs, ...
-        'match_count', size(matches,1), 'valid_grid_cells', sum(isfinite(grid.wpk(:))));
+        'match_count', size(matches,1), 'unique_argo_count', unique_argo_count, ...
+        'duplicate_match_count', size(matches,1) - unique_argo_count, ...
+        'valid_grid_cells', sum(isfinite(grid.wpk(:))));
     G.x_over_R = grid.x;
     G.y_over_R = grid.y;
     G.wpk_m_s = grid.wpk;
@@ -377,6 +410,7 @@ def main() -> int:
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox("0,360,-90,90"))
+    parser.add_argument("--selection-mode", choices=("lat_band", "crossing_lat"), default="crossing_lat")
     parser.add_argument("--target-lat", type=float, default=10.0)
     parser.add_argument("--intersect-radius-r", type=float, default=1.0)
     parser.add_argument("--time-window-days", type=float, default=1.0)
@@ -385,6 +419,7 @@ def main() -> int:
     parser.add_argument("--grid-n", type=int, default=81)
     parser.add_argument("--cressman-radius-r", type=float, default=0.5)
     parser.add_argument("--cressman-min-obs", type=int, default=3)
+    parser.add_argument("--match-mode", choices=("nearest", "all"), default="nearest")
     args = parser.parse_args()
     for path in run_matlab(args):
         print(path)

@@ -150,6 +150,7 @@ smooth_passes = @SMOOTH_PASSES@;
 cressman_radius_r = @CRESSMAN_RADIUS_R@;
 cressman_min_obs = @CRESSMAN_MIN_OBS@;
 rho0_mode = '@RHO0_MODE@';
+match_mode = '@MATCH_MODE@';
 max_matches_per_group = @MAX_MATCHES@;
 core_min_m = @CORE_MIN_M@;
 core_max_m = @CORE_MAX_M@;
@@ -164,7 +165,7 @@ if exist(output_root, 'dir') ~= 7
 end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
-write_method_doc(method_md, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, time_window_days, core_min_m, core_max_m, density_variable);
+write_method_doc(method_md, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, time_window_days, core_min_m, core_max_m, density_variable);
 
 fprintf('Loading Argo vectors from %s\\n', argo_mat);
 A = load(argo_mat, 'I_Time', 'I_Lon', 'I_Lat', 'I_ParkDepth', 'I_PF', density_variable, 'Depth');
@@ -202,7 +203,7 @@ argo_base_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3)
 polarities = {'cyclonic','anticyclonic'};
 grid_json_files = {};
 summary_rows = {};
-summary_header = {'polarity','lat_band','match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','output_dir'};
+summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','output_dir'};
 if strcmp(selection_mode, 'crossing_lat')
     group_count = 1;
 else
@@ -253,7 +254,7 @@ for p = 1:numel(polarities)
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
             time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
-            z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m);
+            z_rho_min_m, z_rho_max_m, match_mode, max_matches_per_group, deg_m);
         write_group_outputs(group_dir, matches, grid, polarity, band_label);
         grid_json_files{end+1} = fullfile(group_dir, 'composite_grid.json'); %#ok<SAGROW>
         summary_rows(end+1,:) = summary_from_matches(matches, grid, polarity, band_label, group_dir); %#ok<SAGROW>
@@ -261,7 +262,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n);
+combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -313,7 +314,7 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
     time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
-    z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m)
+    z_rho_min_m, z_rho_max_m, match_mode, max_matches_per_group, deg_m)
 
     rows = {};
     row_count = 0;
@@ -328,22 +329,35 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
         dx = local_dx_m(argo_lon(ii), meta_lon(candidates), argo_lat(ii), deg_m);
         dy = (argo_lat(ii) - meta_lat(candidates)) * deg_m;
         r_norm = hypot(dx, dy) ./ meta_radius(candidates);
-        [best_r, best_pos] = min(r_norm);
-        if ~isfinite(best_r) || best_r > 4
-            continue
-        end
-        jj = candidates(best_pos);
         rho0 = interp1(depth, double(rho(ii,:)), argo_park(ii), 'linear', NaN);
         if ~isfinite(rho0)
             continue
         end
-        best_dx = dx(best_pos);
-        best_dy = dy(best_pos);
-        row_count = row_count + 1;
-        ring = ring_label(best_r);
-        rows(row_count,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
-            argo_park(ii), argo_u(ii), argo_v(ii), rho0, NaN, meta_track(jj), meta_time(jj), meta_lon(jj), ...
-            meta_lat(jj), meta_radius(jj), best_dx / meta_radius(jj), best_dy / meta_radius(jj), best_r, ring, meta_cx(jj)}; %#ok<AGROW>
+        if strcmp(match_mode, 'all')
+            use_pos = find(isfinite(r_norm) & r_norm <= 4);
+        else
+            [best_r, best_pos] = min(r_norm);
+            if isfinite(best_r) && best_r <= 4
+                use_pos = best_pos;
+            else
+                use_pos = [];
+            end
+        end
+        for pp = 1:numel(use_pos)
+            pos = use_pos(pp);
+            jj = candidates(pos);
+            best_dx = dx(pos);
+            best_dy = dy(pos);
+            this_r = r_norm(pos);
+            row_count = row_count + 1;
+            ring = ring_label(this_r);
+            rows(row_count,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
+                argo_park(ii), argo_u(ii), argo_v(ii), rho0, NaN, meta_track(jj), meta_time(jj), meta_lon(jj), ...
+                meta_lat(jj), meta_radius(jj), best_dx / meta_radius(jj), best_dy / meta_radius(jj), this_r, ring, meta_cx(jj)}; %#ok<AGROW>
+            if max_matches_per_group > 0 && row_count >= max_matches_per_group
+                break
+            end
+        end
         if max_matches_per_group > 0 && row_count >= max_matches_per_group
             break
         end
@@ -351,6 +365,7 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
     rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_rho_min_m, z_rho_max_m);
     matches = rows;
     grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
+    grid.match_mode = match_mode;
     grid.rho0_mode = rho0_mode;
     grid.z_rho_min_m = z_rho_min_m;
     grid.z_rho_max_m = z_rho_max_m;
@@ -608,6 +623,13 @@ function out = fillmissing2(A)
 end
 
 function write_group_outputs(group_dir, matches, grid, polarity, band_label)
+    grid.match_count = size(matches, 1);
+    if isempty(matches)
+        grid.unique_argo_count = 0;
+    else
+        grid.unique_argo_count = numel(unique(cell2mat(matches(:,3))));
+    end
+    grid.duplicate_match_count = grid.match_count - grid.unique_argo_count;
     header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','rho0','z_rho_m','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s'};
     writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo.csv'));
     write_grid_json(fullfile(group_dir, 'composite_grid.json'), grid, polarity, band_label);
@@ -630,17 +652,20 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
     if isempty(matches)
         rings = {};
         n = 0;
+        unique_argo_count = 0;
     else
         rings = matches(:,21);
         n = size(matches, 1);
+        unique_argo_count = numel(unique(cell2mat(matches(:,3))));
     end
+    duplicate_match_count = n - unique_argo_count;
     valid_cells = sum(isfinite(grid.rebuild_w(:)));
     valid_fraction = valid_cells / numel(grid.count);
-    row = {polarity, band_label, n, sum(strcmp(rings,'0-1R')), sum(strcmp(rings,'1-2R')), sum(strcmp(rings,'2-4R')), ...
+    row = {polarity, band_label, n, unique_argo_count, duplicate_match_count, sum(strcmp(rings,'0-1R')), sum(strcmp(rings,'1-2R')), sum(strcmp(rings,'2-4R')), ...
         valid_cells, valid_fraction, grid.mean_cx_raw, grid.mean_u_bg, grid.cx_rel, grid.mean_radius_m / 1000, group_dir};
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n)
+function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n)
     combined_rows = {};
     for b = 1:numel(combined_matches)
         if strcmp(selection_mode, 'crossing_lat')
@@ -654,6 +679,7 @@ function combined_rows = write_combined_outputs(output_root, lat_bands, combined
         end
         all_matches = combined_matches{b};
         grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
+        grid.match_mode = match_mode;
         write_group_outputs(combined_dir, all_matches, grid, 'combined', band_label);
         combined_rows(end+1,:) = summary_from_matches(all_matches, grid, 'combined', band_label, combined_dir); %#ok<AGROW>
     end
@@ -664,7 +690,8 @@ function write_grid_json(path, grid, polarity, band_label)
     G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'mean_cx_raw_m_s', grid.mean_cx_raw, ...
         'mean_u_bg_m_s', grid.mean_u_bg, 'cx_rel_m_s', grid.cx_rel, 'mean_radius_m', grid.mean_radius_m, ...
         'grid_mapping', grid.grid_mapping, 'cressman_radius_r', grid.cressman_radius_r, 'cressman_min_obs', grid.cressman_min_obs, ...
-        'rho0_mode', grid.rho0_mode, 'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, ...
+        'match_mode', grid.match_mode, 'rho0_mode', grid.rho0_mode, 'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, ...
+        'match_count', grid.match_count, 'unique_argo_count', grid.unique_argo_count, 'duplicate_match_count', grid.duplicate_match_count, ...
         'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count));
     G.x_over_R = grid.x;
     G.y_over_R = grid.y;
@@ -750,7 +777,7 @@ function cmap = redblue_colormap()
     cmap = [r(:), g(:), b(:)];
 end
 
-function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, time_window_days, core_min_m, core_max_m, density_variable)
+function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, time_window_days, core_min_m, core_max_m, density_variable)
     fid = fopen(path, 'w');
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建方法与假定\\n\\n');
     fprintf(fid, '- Argo 主数据源：`%s`\\n', argo_mat);
@@ -765,7 +792,7 @@ function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands
     end
     fprintf(fid, '\\n- Core Argo 限定：`%.0f-%.0f m` parking depth。\\n', core_min_m, core_max_m);
     fprintf(fid, '- 时间匹配：Argo profile 与 META 轨迹点相差不超过 `%.1f day`。\\n', time_window_days);
-    fprintf(fid, '- 多候选归属：每条 Argo profile 会搜索同纬度带、时间窗内所有 META 涡旋；若同时落入多个 `4R` 半径，只归属给 `r/R` 最小的涡旋，避免同一 profile 被重复计数。\\n');
+    fprintf(fid, '- 匹配模式：`%s`。`nearest` 表示每条 Argo 只归属最近的 `r/R` 涡旋；`all` 表示一条 Argo 可在所有满足时间窗和 `0-4R` 的涡旋坐标系中重复使用。\\n', match_mode);
     fprintf(fid, '- 空间分区：保存 `0-1R`、`1-2R`、`2-4R`，图像网格为 `x/R, y/R = -4..4`。\\n');
     fprintf(fid, '- 密度变量：`%s`。默认 `rho0` 为每个纬度带/极性在实际 parking depth 处密度的中位数；可用 `--rho0-mode profile` 做旧口径对照。\\n', density_variable);
     fprintf(fid, '- `z_rho` 有效深度窗口：默认 `900-1100 m`，避免共同密度面跳到浅层或深层交点后放大梯度。\\n');
@@ -798,10 +825,10 @@ function write_summary_doc(path, summary_rows, output_root)
     fprintf(fid, '- 主图变量：`term1 = c_x_rel dz_rho/dx`，`term2 = u_Argo · grad(z_rho)`，`rebuild_W = term1 + term2`。\\n');
     fprintf(fid, '- 单位：JSON/NPZ 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\\n');
     fprintf(fid, '- 若使用 `--max-matches-per-group` 做 smoke run，覆盖率会很低；正式结果应使用默认 `0` 读取全部匹配。\\n\\n');
-    fprintf(fid, '| polarity | lat_band | matches | 0-1R | 1-2R | 2-4R | valid grid %% | c_x_rel m/s |\\n');
-    fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\\n');
+    fprintf(fid, '| polarity | lat_band | matches | unique Argo | duplicated | 0-1R | 1-2R | 2-4R | valid grid %% | c_x_rel m/s |\\n');
+    fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\\n');
     for i=1:size(summary_rows,1)
-        fprintf(fid, '| %s | %s | %d | %d | %d | %d | %.2f | %.6g |\\n', summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,8} * 100, summary_rows{i,11});
+        fprintf(fid, '| %s | %s | %d | %d | %d | %d | %d | %d | %.2f | %.6g |\\n', summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,7}, summary_rows{i,8}, summary_rows{i,10} * 100, summary_rows{i,13});
     end
     fclose(fid);
 end
@@ -825,6 +852,7 @@ end
         .replace("@CRESSMAN_RADIUS_R@", f"{float(args.cressman_radius_r):.12g}")
         .replace("@CRESSMAN_MIN_OBS@", str(int(args.cressman_min_obs)))
         .replace("@RHO0_MODE@", str(args.rho0_mode).replace("'", "''"))
+        .replace("@MATCH_MODE@", str(args.match_mode).replace("'", "''"))
         .replace("@MAX_MATCHES@", str(max_matches))
         .replace("@CORE_MIN_M@", f"{float(args.core_min_m):.12g}")
         .replace("@CORE_MAX_M@", f"{float(args.core_max_m):.12g}")
@@ -892,6 +920,12 @@ def main() -> int:
         choices=("band_median", "profile"),
         default="band_median",
         help="Choose the target isopycnal. band_median uses one shared rho0 per latitude/polarity group; profile keeps the old per-profile parking-density target.",
+    )
+    parser.add_argument(
+        "--match-mode",
+        choices=("nearest", "all"),
+        default="nearest",
+        help="nearest assigns each Argo profile to the closest normalized eddy; all repeats it for every eddy within 4R and the time window.",
     )
     parser.add_argument(
         "--max-matches-per-group",

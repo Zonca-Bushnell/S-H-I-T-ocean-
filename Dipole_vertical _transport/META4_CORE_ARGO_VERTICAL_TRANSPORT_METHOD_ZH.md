@@ -20,6 +20,9 @@ check，不作为正式密度口径。
 - 可选 crossing 模式：`--selection-mode crossing_lat --target-lat 20 --intersect-radius-r 1`
   会选择涡旋本体 `1R` 跨过目标纬线的 META 涡旋；此时 Argo 不按纬度带预筛，
   只由 bbox、Core parking depth、时间窗和 `0-4R` 空间匹配决定。
+- 可选重复匹配：`--match-mode all` 会让同一条 Argo profile 在所有满足时间窗和
+  `0-4R` 的涡旋坐标系中重复投影；默认 `--match-mode nearest` 仍只归属最近
+  `r/R` 涡旋，避免重复计数。
 - Argo 类型：只取 Core Argo，第一版定义为 `I_ParkDepth` 在 `900-1100 m`。
 - 时间匹配：Argo profile 与 META 轨迹点相差不超过 `1 day`。
 - 空间匹配：以 META 涡心为原点，以 `final_radius` 为 `R`，保留 `0-4R`
@@ -41,6 +44,10 @@ rebuild_W = c_x_rel * dz_rho/dx + u_Argo · grad(z_rho)
 - `c_x_raw`：从 META track 相邻轨迹点中央差分得到的局地东西向传播速度。
 - `u_bg`：同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值。
 - `c_x_rel = mean(c_x_raw) - mean(u_bg)`。
+- 诊断提醒：当前脚本的 `u_Argo/v_Argo` 是由相邻 profile 位置差近似得到，
+  尚未等同于严格的 parking-phase displacement velocity。这个速度近似、
+  `rho0/z_rho` 定义、以及移动坐标系下的符号/背景扣除，是当前 W 形态异常的
+  首要复核对象；详见 `ARGO_W_REBUILD_DIAGNOSIS_ZH.md`。
 - `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
   处 `I_sigma1` 的中位数，作为共同目标等密面。
 - `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
@@ -126,6 +133,15 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   --bbox 0,360,-60,60 `
   --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_20N_1R"
 ```
+
+若需要测试一条 Argo 重复参与多个涡旋 composite，可加：
+
+```powershell
+--match-mode all
+```
+
+重复匹配结果的 `SUMMARY.csv` 会额外记录 `unique_argo_count` 和
+`duplicate_match_count`。
 
 ## 参考依据
 
