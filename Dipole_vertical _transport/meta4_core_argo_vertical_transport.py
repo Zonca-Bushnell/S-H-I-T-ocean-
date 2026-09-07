@@ -13,9 +13,16 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
-DEFAULT_OUTPUT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport")
-DEFAULT_BBOX = "120,145,20,35"
-DEFAULT_LAT_BANDS = "20:25,25:30,30:35"
+DEFAULT_OUTPUT_ROOT = Path(
+    r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg"
+)
+DEFAULT_BBOX = "0,360,-60,60"
+DEFAULT_LAT_BANDS = (
+    "-60:-55,-55:-50,-50:-45,-45:-40,-40:-35,-35:-30,"
+    "-30:-25,-25:-20,-20:-15,-15:-10,-10:-5,-5:0,"
+    "0:5,5:10,10:15,15:20,20:25,25:30,"
+    "30:35,35:40,40:45,45:50,50:55,55:60"
+)
 
 
 def parse_bbox(value: str) -> tuple[float, float, float, float]:
@@ -69,6 +76,7 @@ def write_npz_from_grid_json(json_path: Path, npz_path: Path) -> None:
         "u_argo_m_s": grid["u_argo_m_s"],
         "v_argo_m_s": grid["v_argo_m_s"],
         "sample_count": grid["sample_count"],
+        "mapped_support": grid["mapped_support"],
         "term1_m_s": grid["term1_m_s"],
         "term2_m_s": grid["term2_m_s"],
         "rebuild_w_m_s": grid["rebuild_w_m_s"],
@@ -125,9 +133,14 @@ time_window_days = @TIME_WINDOW_DAYS@;
 grid_n = @GRID_N@;
 min_bin_count = @MIN_BIN_COUNT@;
 plot_filled_gradient = @PLOT_FILLED_GRADIENT@;
+grid_mapping = '@GRID_MAPPING@';
+smooth_passes = @SMOOTH_PASSES@;
+rho0_mode = '@RHO0_MODE@';
 max_matches_per_group = @MAX_MATCHES@;
 core_min_m = @CORE_MIN_M@;
 core_max_m = @CORE_MAX_M@;
+z_rho_min_m = @Z_RHO_MIN_M@;
+z_rho_max_m = @Z_RHO_MAX_M@;
 earth_radius_m = 6371000;
 deg_m = earth_radius_m * pi / 180;
 density_variable = '@DENSITY_VARIABLE@';
@@ -197,7 +210,7 @@ for p = 1:numel(polarities)
     for b = 1:size(lat_bands, 1)
         lat_min = lat_bands(b,1);
         lat_max = lat_bands(b,2);
-        band_label = sprintf('%02.0f_%02.0fN', lat_min, lat_max);
+        band_label = lat_band_label(lat_min, lat_max);
         argo_band = find(argo_base_mask & argo_lat >= lat_min & argo_lat < lat_max);
         meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & meta_lat >= lat_min & meta_lat < lat_max & isfinite(meta_radius) & meta_radius > 0);
         group_dir = fullfile(output_root, polarity, band_label);
@@ -207,7 +220,8 @@ for p = 1:numel(polarities)
         [matches, grid] = build_group(argo_band, meta_band, polarity, band_label, ...
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-            time_window_days, grid_n, min_bin_count, plot_filled_gradient, max_matches_per_group, deg_m);
+            time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, rho0_mode, ...
+            z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m);
         write_group_outputs(group_dir, matches, grid, polarity, band_label);
         grid_json_files{end+1} = fullfile(group_dir, 'composite_grid.json'); %#ok<SAGROW>
         summary_rows(end+1,:) = summary_from_matches(matches, grid, polarity, band_label, group_dir); %#ok<SAGROW>
@@ -215,7 +229,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient);
+combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -266,7 +280,8 @@ end
 function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label, ...
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-    time_window_days, grid_n, min_bin_count, plot_filled_gradient, max_matches_per_group, deg_m)
+    time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, rho0_mode, ...
+    z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m)
 
     rows = {};
     row_count = 0;
@@ -287,21 +302,50 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
         end
         jj = candidates(best_pos);
         rho0 = interp1(depth, double(rho(ii,:)), argo_park(ii), 'linear', NaN);
-        z_rho = isopycnal_depth(depth, double(rho(ii,:)), rho0);
-        if ~isfinite(z_rho)
+        if ~isfinite(rho0)
             continue
         end
+        best_dx = dx(best_pos);
+        best_dy = dy(best_pos);
         row_count = row_count + 1;
         ring = ring_label(best_r);
         rows(row_count,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
-            argo_park(ii), argo_u(ii), argo_v(ii), rho0, z_rho, meta_track(jj), meta_time(jj), meta_lon(jj), ...
-            meta_lat(jj), meta_radius(jj), dx / meta_radius(jj), dy / meta_radius(jj), best_r, ring, meta_cx(jj)}; %#ok<AGROW>
+            argo_park(ii), argo_u(ii), argo_v(ii), rho0, NaN, meta_track(jj), meta_time(jj), meta_lon(jj), ...
+            meta_lat(jj), meta_radius(jj), best_dx / meta_radius(jj), best_dy / meta_radius(jj), best_r, ring, meta_cx(jj)}; %#ok<AGROW>
         if max_matches_per_group > 0 && row_count >= max_matches_per_group
             break
         end
     end
+    rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_rho_min_m, z_rho_max_m);
     matches = rows;
-    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient);
+    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
+    grid.rho0_mode = rho0_mode;
+    grid.z_rho_min_m = z_rho_min_m;
+    grid.z_rho_max_m = z_rho_max_m;
+end
+
+function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_rho_min_m, z_rho_max_m)
+    if isempty(rows)
+        return
+    end
+    profile_rho0 = cell2mat(rows(:,11));
+    if strcmp(rho0_mode, 'band_median')
+        target_rho0 = median(profile_rho0, 'omitnan');
+        target_rho0 = repmat(target_rho0, size(rows, 1), 1);
+    else
+        target_rho0 = profile_rho0;
+    end
+    keep = false(size(rows, 1), 1);
+    for rr = 1:size(rows, 1)
+        ii = rows{rr,3};
+        z_rho = isopycnal_depth(depth, double(rho(ii,:)), target_rho0(rr), argo_park(ii));
+        if isfinite(z_rho) && z_rho >= z_rho_min_m && z_rho <= z_rho_max_m
+            rows{rr,11} = target_rho0(rr);
+            rows{rr,12} = z_rho;
+            keep(rr) = true;
+        end
+    end
+    rows = rows(keep,:);
 end
 
 function dx = local_dx_m(lon_a, lon_b, lat_ref, deg_m)
@@ -311,14 +355,33 @@ function dx = local_dx_m(lon_a, lon_b, lat_ref, deg_m)
     dx = dlon .* deg_m .* cosd(lat_ref);
 end
 
-function z = isopycnal_depth(depth, profile, rho0)
+function z = isopycnal_depth(depth, profile, rho0, target_depth)
     z = NaN;
     depth = depth(:);
     profile = profile(:);
     good = isfinite(depth) & isfinite(profile);
     depth = depth(good);
     profile = profile(good);
-    if numel(depth) < 3 || ~isfinite(rho0)
+    if numel(depth) < 3 || ~isfinite(rho0) || ~isfinite(target_depth)
+        return
+    end
+    hits = [];
+    exact = find(profile == rho0);
+    if ~isempty(exact)
+        hits = depth(exact);
+    end
+    for k = 1:numel(depth)-1
+        r1 = profile(k) - rho0;
+        r2 = profile(k+1) - rho0;
+        if r1 == 0 || r2 == 0 || r1 * r2 > 0 || profile(k) == profile(k+1)
+            continue
+        end
+        frac = (rho0 - profile(k)) / (profile(k+1) - profile(k));
+        hits(end+1,1) = depth(k) + frac * (depth(k+1) - depth(k)); %#ok<AGROW>
+    end
+    if ~isempty(hits)
+        [~, idx] = min(abs(hits - target_depth));
+        z = hits(idx);
         return
     end
     [profile_unique, ia] = unique(profile, 'stable');
@@ -339,15 +402,17 @@ function label = ring_label(r_norm)
     end
 end
 
-function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient)
+function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes)
     x_vec = linspace(-4, 4, grid_n);
     y_vec = linspace(-4, 4, grid_n);
     [X, Y] = meshgrid(x_vec, y_vec);
     nan_grid = nan(size(X));
     count_grid = zeros(size(X));
     grid = struct('x', X, 'y', Y, 'z', nan_grid, 'u', nan_grid, 'v', nan_grid, ...
+        'mapped_support', count_grid, ...
         'count', count_grid, 'term1', nan_grid, 'term2', nan_grid, 'rebuild_w', nan_grid, ...
-        'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, 'mean_radius_m', NaN);
+        'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, 'mean_radius_m', NaN, ...
+        'rho0_mode', '', 'z_rho_min_m', NaN, 'z_rho_max_m', NaN);
     if isempty(matches)
         return
     end
@@ -373,11 +438,27 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     grid.z = accumarray(subs, z(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.u = accumarray(subs, u(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.v = accumarray(subs, v(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+    if strcmp(grid_mapping, 'scattered')
+        grid.z = scattered_map(x, y, z, X, Y);
+        grid.u = scattered_map(x, y, u, X, Y);
+        grid.v = scattered_map(x, y, v, X, Y);
+    end
+    grid.mapped_support = double(isfinite(grid.z) & isfinite(grid.u) & isfinite(grid.v) & hypot(X, Y) <= 4);
+    if smooth_passes > 0
+        support = grid.mapped_support > 0;
+        grid.z = smooth2_supported(grid.z, support, smooth_passes);
+        grid.u = smooth2_supported(grid.u, support, smooth_passes);
+        grid.v = smooth2_supported(grid.v, support, smooth_passes);
+    end
     dx_m = mean(diff(x_vec)) * grid.mean_radius_m;
     dy_m = mean(diff(y_vec)) * grid.mean_radius_m;
     if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
         [dzdy, dzdx] = gradient(fillmissing2(grid.z), dy_m, dx_m);
-        support = grid.count >= min_bin_count;
+        if strcmp(grid_mapping, 'scattered')
+            support = grid.mapped_support > 0;
+        else
+            support = grid.count >= min_bin_count;
+        end
         if plot_filled_gradient
             grid.term1 = grid.cx_rel .* dzdx;
         else
@@ -386,6 +467,44 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         grid.term2 = mask_to_support(grid.u .* dzdx + grid.v .* dzdy, support);
         grid.rebuild_w = mask_to_support(grid.term1 + grid.term2, support);
     end
+end
+
+function out = smooth2_supported(A, support, passes)
+    out = A;
+    for n = 1:passes
+        B = out;
+        for i = 1:size(out,1)
+            for j = 1:size(out,2)
+                if support(i,j)
+                    i0 = max(1, i-1); i1 = min(size(out,1), i+1);
+                    j0 = max(1, j-1); j1 = min(size(out,2), j+1);
+                    vals = out(i0:i1, j0:j1);
+                    ok = isfinite(vals);
+                    if any(ok, 'all')
+                        B(i,j) = mean(vals(ok), 'omitnan');
+                    end
+                end
+            end
+        end
+        out = B;
+        out(~support) = NaN;
+    end
+end
+
+function Z = scattered_map(x, y, v, X, Y)
+    Z = NaN(size(X));
+    good = isfinite(x) & isfinite(y) & isfinite(v) & hypot(x, y) <= 4;
+    if nnz(good) < 3
+        return
+    end
+    try
+        F = scatteredInterpolant(x(good), y(good), v(good), 'natural', 'none');
+        Z = F(X, Y);
+    catch
+        F = scatteredInterpolant(x(good), y(good), v(good), 'linear', 'none');
+        Z = F(X, Y);
+    end
+    Z(hypot(X, Y) > 4) = NaN;
 end
 
 function out = mask_to_support(A, support)
@@ -446,16 +565,16 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
         valid_cells, valid_fraction, grid.mean_cx_raw, grid.mean_u_bg, grid.cx_rel, grid.mean_radius_m / 1000, group_dir};
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient)
+function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes)
     combined_rows = {};
     for b = 1:size(lat_bands, 1)
-        band_label = sprintf('%02.0f_%02.0fN', lat_bands(b,1), lat_bands(b,2));
+        band_label = lat_band_label(lat_bands(b,1), lat_bands(b,2));
         combined_dir = fullfile(output_root, 'combined', band_label);
         if exist(combined_dir, 'dir') ~= 7
             mkdir(combined_dir);
         end
         all_matches = combined_matches{b};
-        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient);
+        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
         write_group_outputs(combined_dir, all_matches, grid, 'combined', band_label);
         combined_rows(end+1,:) = summary_from_matches(all_matches, grid, 'combined', band_label, combined_dir); %#ok<AGROW>
     end
@@ -465,6 +584,7 @@ function write_grid_json(path, grid, polarity, band_label)
     G = struct();
     G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'mean_cx_raw_m_s', grid.mean_cx_raw, ...
         'mean_u_bg_m_s', grid.mean_u_bg, 'cx_rel_m_s', grid.cx_rel, 'mean_radius_m', grid.mean_radius_m, ...
+        'rho0_mode', grid.rho0_mode, 'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, ...
         'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count));
     G.x_over_R = grid.x;
     G.y_over_R = grid.y;
@@ -472,12 +592,26 @@ function write_grid_json(path, grid, polarity, band_label)
     G.u_argo_m_s = grid.u;
     G.v_argo_m_s = grid.v;
     G.sample_count = grid.count;
+    G.mapped_support = grid.mapped_support;
     G.term1_m_s = grid.term1;
     G.term2_m_s = grid.term2;
     G.rebuild_w_m_s = grid.rebuild_w;
     fid = fopen(path, 'w');
     fwrite(fid, jsonencode(G), 'char');
     fclose(fid);
+end
+
+function label = lat_band_label(lat_min, lat_max)
+    label = [lat_token(lat_min) '_' lat_token(lat_max)];
+end
+
+function token = lat_token(lat)
+    if lat < 0
+        hemi = 'S';
+    else
+        hemi = 'N';
+    end
+    token = sprintf('%02.0f%s', abs(lat), hemi);
 end
 
 function plot_three_panel(path, grid, title_prefix)
@@ -548,7 +682,8 @@ function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands
     fprintf(fid, '\\n- Core Argo 限定：`%.0f-%.0f m` parking depth。\\n', core_min_m, core_max_m);
     fprintf(fid, '- 时间匹配：Argo profile 与 META 轨迹点相差不超过 `%.1f day`。\\n', time_window_days);
     fprintf(fid, '- 空间分区：保存 `0-1R`、`1-2R`、`2-4R`，图像网格为 `x/R, y/R = -4..4`。\\n');
-    fprintf(fid, '- 密度变量：`%s`。`rho0` 为每条 Core Argo 在实际 parking depth 处的密度。\\n', density_variable);
+    fprintf(fid, '- 密度变量：`%s`。默认 `rho0` 为每个纬度带/极性在实际 parking depth 处密度的中位数；可用 `--rho0-mode profile` 做旧口径对照。\\n', density_variable);
+    fprintf(fid, '- `z_rho` 有效深度窗口：默认 `900-1100 m`，避免共同密度面跳到浅层或深层交点后放大梯度。\\n');
     fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。\\n');
     fprintf(fid, '- BOA_Argo 只作为 gridded 温盐/密度背景可行性假设记录，不在第一版中直接推导背景速度。\\n\\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\\n');
@@ -595,9 +730,14 @@ end
         .replace("@GRID_N@", str(int(args.grid_n)))
         .replace("@MIN_BIN_COUNT@", str(int(args.min_bin_count)))
         .replace("@PLOT_FILLED_GRADIENT@", "true" if args.plot_filled_gradient else "false")
+        .replace("@GRID_MAPPING@", str(args.grid_mapping).replace("'", "''"))
+        .replace("@SMOOTH_PASSES@", str(int(args.smooth_passes)))
+        .replace("@RHO0_MODE@", str(args.rho0_mode).replace("'", "''"))
         .replace("@MAX_MATCHES@", str(max_matches))
         .replace("@CORE_MIN_M@", f"{float(args.core_min_m):.12g}")
         .replace("@CORE_MAX_M@", f"{float(args.core_max_m):.12g}")
+        .replace("@Z_RHO_MIN_M@", f"{float(args.z_rho_min_m):.12g}")
+        .replace("@Z_RHO_MAX_M@", f"{float(args.z_rho_max_m):.12g}")
         .replace("@DENSITY_VARIABLE@", str(args.density_variable).replace("'", "''"))
         .replace("@MANIFEST@", manifest)
     )
@@ -613,6 +753,8 @@ def main() -> int:
     parser.add_argument("--time-window-days", type=float, default=1.0)
     parser.add_argument("--core-min-m", type=float, default=900.0)
     parser.add_argument("--core-max-m", type=float, default=1100.0)
+    parser.add_argument("--z-rho-min-m", type=float, default=900.0)
+    parser.add_argument("--z-rho-max-m", type=float, default=1100.0)
     parser.add_argument("--density-variable", default="I_sigma1")
     parser.add_argument("--grid-n", type=int, default=81)
     parser.add_argument(
@@ -625,6 +767,19 @@ def main() -> int:
         "--plot-filled-gradient",
         action="store_true",
         help="Keep the filled-gradient term1 field for diagnostics. By default W terms are masked to sampled cells.",
+    )
+    parser.add_argument(
+        "--grid-mapping",
+        choices=("scattered", "bin"),
+        default="scattered",
+        help="Map profiles to the composite grid. Use scattered for continuous Argo-eddy composite maps; bin keeps sampled cells only.",
+    )
+    parser.add_argument("--smooth-passes", type=int, default=2)
+    parser.add_argument(
+        "--rho0-mode",
+        choices=("band_median", "profile"),
+        default="band_median",
+        help="Choose the target isopycnal. band_median uses one shared rho0 per latitude/polarity group; profile keeps the old per-profile parking-density target.",
     )
     parser.add_argument(
         "--max-matches-per-group",

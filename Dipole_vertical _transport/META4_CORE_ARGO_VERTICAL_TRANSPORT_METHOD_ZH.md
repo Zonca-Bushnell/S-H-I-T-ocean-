@@ -7,7 +7,7 @@
 
 - Argo 主数据源：`F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat`
 - META4.0 涡旋源：`F:\Eddy\Eddy\META4.0_DT_allsat`
-- 结果根目录：`E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport`
+- 结果根目录：`E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg`
 
 Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。旧
 `Argo1000m_UVW_TSDen_199601_202306.mat` 仅作为历史结果和数量级 sanity
@@ -15,13 +15,15 @@ check，不作为正式密度口径。
 
 ## 样本选择
 
-- 区域：黑潮 `120E-145E, 20N-35N`。
-- 纬度带：`20-25N`、`25-30N`、`30-35N`。
+- 区域：全球 Argo 常规有效覆盖带 `0E-360E, 60S-60N`。
+- 纬度带：默认按 5 度分带，从 `60S-55S` 到 `55N-60N`。
 - Argo 类型：只取 Core Argo，第一版定义为 `I_ParkDepth` 在 `900-1100 m`。
 - 时间匹配：Argo profile 与 META 轨迹点相差不超过 `1 day`。
 - 空间匹配：以 META 涡心为原点，以 `final_radius` 为 `R`，保留 `0-4R`
   内 profile，并标记 `0-1R`、`1-2R`、`2-4R`。
 - 极性：cyclonic 和 anticyclonic 分开计算，并输出 combined 汇总。
+- 目录标签：纬度带使用 `60S_55S`、`05S_00N`、`00N_05N`、`55N_60N`
+  这类半球显式标签，避免南半球被误标为 `N`。
 
 ## 速度与垂直速度分解
 
@@ -36,24 +38,28 @@ rebuild_W = c_x_rel * dz_rho/dx + u_Argo · grad(z_rho)
 - `c_x_raw`：从 META track 相邻轨迹点中央差分得到的局地东西向传播速度。
 - `u_bg`：同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值。
 - `c_x_rel = mean(c_x_raw) - mean(u_bg)`。
-- `rho0`：每条 Core Argo 在实际 parking depth 处的 `I_sigma1`。
-- `z_rho`：该 profile 上 `rho0` 对应的等密面深度。
+- `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
+  处 `I_sigma1` 的中位数，作为共同目标等密面。
+- `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
+- `z_rho` 有效窗口：默认只保留 `900-1100 m`，避免共同密度面在个别
+  profile 中跳到浅层或深层交点，造成不合理的大梯度和 W 量级。
 
-注意：第一版使用每条 profile 自身 parking-depth density 定义 `rho0`，所以
-`z_rho` 在观测点会接近该 profile 的实际 parking depth。这个口径保留了用户
-示意图与历史脚本的可追溯性；若后续需要更强的等密面 heave 解释，应扩展为
-固定 `sigma1` 面或 BOA 背景 `z_rho` 面。
+注意：旧的逐 profile parking-density 口径会使 `z_rho` 几乎退化为每条
+profile 自身的 parking depth，导致 `dz_rho/dx` 和重建 W 接近 0。脚本保留
+`--rho0-mode profile` 作为历史对照，但正式 composite 默认使用共同
+`rho0`，更符合“同一等密面深度起伏”的物理定义。
 
 ## 网格覆盖与空白区
 
-复合图中的白色格点表示该 `x/R, y/R` 网格没有 Argo 样本支撑。脚本会在
-`composite_grid.json/.npz` 中写出 `sample_count`，并在运行摘要里记录每组
-有效网格覆盖率。
+复合图默认先把 profile 投影到涡心归一化坐标，再用 MATLAB
+`scatteredInterpolant` 生成连续 `z_rho/u/v` composite 场。脚本同时在
+`composite_grid.json/.npz` 中写出原始 bin 计数 `sample_count` 和插值支撑
+`mapped_support`。
 
-`dz_rho/dx` 的数值梯度需要先对稀疏 `z_rho` 网格做局部补洞，但默认输出会再
-按 `sample_count >= --min-bin-count` 掩膜，只显示有观测支撑的 `term1`、
-`term2` 和 `rebuild_W`。如果使用 `--max-matches-per-group 200` 做 smoke
-run，图上大面积空白是预期现象；正式结果应使用默认 `0` 读取全部匹配样本。
+`dz_rho/dx` 的数值梯度在连续 composite 场上计算；白色表示当前插值方式没有
+空间支撑。若需要查看完全不插值的原始散点格点结果，可加
+`--grid-mapping bin`。如果使用 `--max-matches-per-group 200` 做 smoke run，
+覆盖和插值支撑都会偏低；正式结果应使用默认 `0` 读取全部匹配样本。
 
 ## BOA_Argo 假定
 
@@ -68,11 +74,13 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py"
 ```
 
-调试或 smoke run 可限制每组匹配数：
+默认入口即全球 `60S-60N`、5 度分带、全样本。调试或 smoke run 可限制每组
+匹配数，并建议输出到单独 smoke 目录：
 
 ```powershell
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
+  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg_smoke" `
   --max-matches-per-group 200
 ```
 
@@ -82,6 +90,22 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --min-bin-count 3
+```
+
+若需要复现原始散点格点图，可使用：
+
+```powershell
+D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+  "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
+  --grid-mapping bin
+```
+
+若需要复现旧的逐 profile `rho0` 口径，可使用：
+
+```powershell
+D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+  "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
+  --rho0-mode profile
 ```
 
 ## 参考依据
