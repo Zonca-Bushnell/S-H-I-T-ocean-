@@ -17,6 +17,9 @@ check，不作为正式密度口径。
 
 - 区域：全球 Argo 常规有效覆盖带 `0E-360E, 60S-60N`。
 - 纬度带：默认按 5 度分带，从 `60S-55S` 到 `55N-60N`。
+- 可选 crossing 模式：`--selection-mode crossing_lat --target-lat 20 --intersect-radius-r 1`
+  会选择涡旋本体 `1R` 跨过目标纬线的 META 涡旋；此时 Argo 不按纬度带预筛，
+  只由 bbox、Core parking depth、时间窗和 `0-4R` 空间匹配决定。
 - Argo 类型：只取 Core Argo，第一版定义为 `I_ParkDepth` 在 `900-1100 m`。
 - 时间匹配：Argo profile 与 META 轨迹点相差不超过 `1 day`。
 - 空间匹配：以 META 涡心为原点，以 `final_radius` 为 `R`，保留 `0-4R`
@@ -110,6 +113,18 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --rho0-mode profile
+```
+
+若需要按“涡旋本体跨过某条纬线”而不是涡心纬度带选样本，可使用：
+
+```powershell
+D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+  "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
+  --selection-mode crossing_lat `
+  --target-lat 20 `
+  --intersect-radius-r 1 `
+  --bbox 0,360,-60,60 `
+  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_20N_1R"
 ```
 
 ## 参考依据

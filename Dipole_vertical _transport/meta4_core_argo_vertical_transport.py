@@ -50,6 +50,13 @@ def matlab_quote(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "''")
 
 
+def latitude_crossing_label(target_lat: float, intersect_radius_r: float) -> str:
+    hemi = "N" if target_lat >= 0 else "S"
+    lat_text = f"{abs(target_lat):02.0f}{hemi}"
+    radius_text = f"{intersect_radius_r:g}".replace(".", "p")
+    return f"cross_{lat_text}_{radius_text}R"
+
+
 def npy_bytes_2d(values: list[list[float]]) -> bytes:
     rows = len(values)
     cols = len(values[0]) if rows else 0
@@ -118,6 +125,7 @@ def run_matlab_pipeline(args: argparse.Namespace) -> list[Path]:
 def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     bbox = " ".join(f"{item:.12g}" for item in args.bbox)
     lat_bands = "; ".join(f"{lo:.12g} {hi:.12g}" for lo, hi in args.lat_bands)
+    target_label = latitude_crossing_label(args.target_lat, args.intersect_radius_r)
     argo_mat = matlab_quote(args.argo_mat)
     meta_dir = matlab_quote(args.meta_dir)
     output_root = matlab_quote(args.output_root)
@@ -129,6 +137,10 @@ meta_dir = '@META_DIR@';
 output_root = '@OUTPUT_ROOT@';
 bbox = [@BBOX@];
 lat_bands = [@LAT_BANDS@];
+selection_mode = '@SELECTION_MODE@';
+target_lat = @TARGET_LAT@;
+intersect_radius_r = @INTERSECT_RADIUS_R@;
+target_label = '@TARGET_LABEL@';
 time_window_days = @TIME_WINDOW_DAYS@;
 grid_n = @GRID_N@;
 min_bin_count = @MIN_BIN_COUNT@;
@@ -152,7 +164,7 @@ if exist(output_root, 'dir') ~= 7
 end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
-write_method_doc(method_md, argo_mat, meta_dir, output_root, bbox, lat_bands, time_window_days, core_min_m, core_max_m, density_variable);
+write_method_doc(method_md, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, time_window_days, core_min_m, core_max_m, density_variable);
 
 fprintf('Loading Argo vectors from %s\\n', argo_mat);
 A = load(argo_mat, 'I_Time', 'I_Lon', 'I_Lat', 'I_ParkDepth', 'I_PF', density_variable, 'Depth');
@@ -191,8 +203,13 @@ polarities = {'cyclonic','anticyclonic'};
 grid_json_files = {};
 summary_rows = {};
 summary_header = {'polarity','lat_band','match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','output_dir'};
-combined_matches = cell(size(lat_bands, 1), 1);
-for b = 1:size(lat_bands, 1)
+if strcmp(selection_mode, 'crossing_lat')
+    group_count = 1;
+else
+    group_count = size(lat_bands, 1);
+end
+combined_matches = cell(group_count, 1);
+for b = 1:group_count
     combined_matches{b} = cell(0, 22);
 end
 
@@ -209,12 +226,25 @@ for p = 1:numel(polarities)
     meta_radius = double(M.final_radius);
     meta_cx = track_cx(meta_lon, meta_lat, meta_time, meta_track, deg_m);
 
-    for b = 1:size(lat_bands, 1)
-        lat_min = lat_bands(b,1);
-        lat_max = lat_bands(b,2);
-        band_label = lat_band_label(lat_min, lat_max);
-        argo_band = find(argo_base_mask & argo_lat >= lat_min & argo_lat < lat_max);
-        meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & meta_lat >= lat_min & meta_lat < lat_max & isfinite(meta_radius) & meta_radius > 0);
+    for b = 1:group_count
+        if strcmp(selection_mode, 'crossing_lat')
+            band_label = target_label;
+            cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+            meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & isfinite(meta_radius) & meta_radius > 0 & ...
+                cross_distance_m <= meta_radius * intersect_radius_r);
+            if isempty(meta_band)
+                argo_band = [];
+            else
+                argo_lat_window_m = (intersect_radius_r + 4) * max(meta_radius(meta_band));
+                argo_band = find(argo_base_mask & abs(argo_lat - target_lat) * deg_m <= argo_lat_window_m);
+            end
+        else
+            lat_min = lat_bands(b,1);
+            lat_max = lat_bands(b,2);
+            band_label = lat_band_label(lat_min, lat_max);
+            argo_band = find(argo_base_mask & argo_lat >= lat_min & argo_lat < lat_max);
+            meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & meta_lat >= lat_min & meta_lat < lat_max & isfinite(meta_radius) & meta_radius > 0);
+        end
         group_dir = fullfile(output_root, polarity, band_label);
         if exist(group_dir, 'dir') ~= 7
             mkdir(group_dir);
@@ -231,7 +261,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
+combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -610,10 +640,14 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
         valid_cells, valid_fraction, grid.mean_cx_raw, grid.mean_u_bg, grid.cx_rel, grid.mean_radius_m / 1000, group_dir};
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs)
+function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n)
     combined_rows = {};
-    for b = 1:size(lat_bands, 1)
-        band_label = lat_band_label(lat_bands(b,1), lat_bands(b,2));
+    for b = 1:numel(combined_matches)
+        if strcmp(selection_mode, 'crossing_lat')
+            band_label = target_label;
+        else
+            band_label = lat_band_label(lat_bands(b,1), lat_bands(b,2));
+        end
         combined_dir = fullfile(output_root, 'combined', band_label);
         if exist(combined_dir, 'dir') ~= 7
             mkdir(combined_dir);
@@ -716,15 +750,19 @@ function cmap = redblue_colormap()
     cmap = [r(:), g(:), b(:)];
 end
 
-function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands, time_window_days, core_min_m, core_max_m, density_variable)
+function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, time_window_days, core_min_m, core_max_m, density_variable)
     fid = fopen(path, 'w');
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建方法与假定\\n\\n');
     fprintf(fid, '- Argo 主数据源：`%s`\\n', argo_mat);
     fprintf(fid, '- META4.0 涡旋源：`%s`\\n', meta_dir);
     fprintf(fid, '- 输出根目录：`%s`\\n', output_root);
     fprintf(fid, '- 运行范围：`%.1fE-%.1fE, %.1f-%.1f latitude`\\n', bbox(1), bbox(2), bbox(3), bbox(4));
-    fprintf(fid, '- 纬度带：');
-    for i=1:size(lat_bands,1), fprintf(fid, '`%s` ', lat_band_label(lat_bands(i,1), lat_bands(i,2))); end
+    if strcmp(selection_mode, 'crossing_lat')
+        fprintf(fid, '- 样本选择：涡旋本体 `%.3gR` 跨过 `%.3g latitude`，输出标签 `%s`。Argo profile 不再按纬度带预筛，只由 bbox、parking depth、时间窗和 `0-4R` 空间匹配决定。\\n', intersect_radius_r, target_lat, target_label);
+    else
+        fprintf(fid, '- 纬度带：');
+        for i=1:size(lat_bands,1), fprintf(fid, '`%s` ', lat_band_label(lat_bands(i,1), lat_bands(i,2))); end
+    end
     fprintf(fid, '\\n- Core Argo 限定：`%.0f-%.0f m` parking depth。\\n', core_min_m, core_max_m);
     fprintf(fid, '- 时间匹配：Argo profile 与 META 轨迹点相差不超过 `%.1f day`。\\n', time_window_days);
     fprintf(fid, '- 多候选归属：每条 Argo profile 会搜索同纬度带、时间窗内所有 META 涡旋；若同时落入多个 `4R` 半径，只归属给 `r/R` 最小的涡旋，避免同一 profile 被重复计数。\\n');
@@ -774,6 +812,10 @@ end
         .replace("@OUTPUT_ROOT@", output_root)
         .replace("@BBOX@", bbox)
         .replace("@LAT_BANDS@", lat_bands)
+        .replace("@SELECTION_MODE@", str(args.selection_mode).replace("'", "''"))
+        .replace("@TARGET_LAT@", f"{float(args.target_lat):.12g}")
+        .replace("@INTERSECT_RADIUS_R@", f"{float(args.intersect_radius_r):.12g}")
+        .replace("@TARGET_LABEL@", target_label.replace("'", "''"))
         .replace("@TIME_WINDOW_DAYS@", f"{float(args.time_window_days):.12g}")
         .replace("@GRID_N@", str(int(args.grid_n)))
         .replace("@MIN_BIN_COUNT@", str(int(args.min_bin_count)))
@@ -800,6 +842,14 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
     parser.add_argument("--lat-bands", type=parse_lat_bands, default=parse_lat_bands(DEFAULT_LAT_BANDS))
+    parser.add_argument(
+        "--selection-mode",
+        choices=("lat_band", "crossing_lat"),
+        default="lat_band",
+        help="Choose standard latitude-band sampling or eddies whose radius crosses a target latitude.",
+    )
+    parser.add_argument("--target-lat", type=float, default=20.0)
+    parser.add_argument("--intersect-radius-r", type=float, default=1.0)
     parser.add_argument("--time-window-days", type=float, default=1.0)
     parser.add_argument("--core-min-m", type=float, default=900.0)
     parser.add_argument("--core-max-m", type=float, default=1100.0)
