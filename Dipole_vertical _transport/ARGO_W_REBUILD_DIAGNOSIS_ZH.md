@@ -164,3 +164,28 @@ omega = (R^2 - r^2) / (R^2 + r^2)
 5. 每一步输出 `SUMMARY` 中的 `match_count/unique_argo_count/duplicate_match_count`、有效格点、`q95_abs_w`，并保存对照图。
 
 如果第一步速度替换后仍无偶极，则优先怀疑 `rho0/z_rho_anomaly/term1 sign`；如果速度替换后形态明显接近 `I_Wpk`，则说明主要问题是当前 `u/v` 代理和 `c_x_rel/u_bg` 背景扣除。
+
+## 2026-09-08 20N crossing 修正验证
+
+已按 20N crossing、`nearest` 匹配和全样本重新运行正式程序，输出目录：
+
+```text
+E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_fixed_crossing_20N_1R
+```
+
+本次修正内容：
+
+- `u/v` 改用 `Argo1000m_UVW_TSDen_199601_202306.mat` 的 `I_Upk/I_Vpk`，并保存 `I_Wpk` 作为观测对照。
+- `z_rho` 改为严格 bracket crossing，保存 crossing 个数、bracket 厚度和局地 `drho/dz`。
+- 主图改用 `z_rho_anom = z_rho - median(z_rho in 2-4R)` 后求梯度。
+- 同时保存 `term1_plus/minus`、`term2_abs/rel` 和 `wpk_validation.png`。
+
+结果摘要：
+
+| polarity | matches | valid grid cells | corr(rebuild_W, I_Wpk) | q95 rebuild | q95 I_Wpk |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cyclonic | 50460 | 5025 | 0.0024 | 16.59 | 7.46 |
+| anticyclonic | 47734 | 5025 | 0.0233 | 13.94 | 6.97 |
+| combined | 98194 | 5025 | 0.0805 | 12.21 | 2.10 |
+
+结论：速度来源、样本覆盖、Cressman 支撑和基础 `z_rho` QC 已不再是一阶问题；同一批样本下 `I_Wpk` 仍显示中心附近东西偶极，而 `z_rho` 公式重建仍偏带状/斑块状。因此下一步不应继续扩大样本，而应重新审查 `w = c dz_rho/dx + u · grad(z_rho)` 是否能由单时刻 profile 的等密面深度异常闭合到 Argo parking vertical velocity。优先方向是：使用 Christensen/Freeland 类型的 parking-phase pressure/temperature W 算法，或将当前 `z_rho` 项定位为动力诊断项而非直接替代 `I_Wpk`。

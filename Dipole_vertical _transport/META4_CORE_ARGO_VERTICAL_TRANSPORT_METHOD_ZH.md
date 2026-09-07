@@ -1,17 +1,19 @@
 # META4.0 + Core Argo 垂直速度重建方法
 
 本文档记录 `Dipole_vertical _transport/meta4_core_argo_vertical_transport.py`
-的第一版科学口径和工程假定。
+的当前科学口径和工程假定。
 
 ## 数据源
 
 - Argo 主数据源：`F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat`
+- 历史速度/观测 W 校准源：`F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat`
 - META4.0 涡旋源：`F:\Eddy\Eddy\META4.0_DT_allsat`
 - 结果根目录：`E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg`
 
-Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。旧
-`Argo1000m_UVW_TSDen_199601_202306.mat` 仅作为历史结果和数量级 sanity
-check，不作为正式密度口径。
+Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。历史
+`Argo1000m_UVW_TSDen_199601_202306.mat` 不作为正式密度口径，但修正版默认
+匹配其中的 `I_Upk/I_Vpk/I_Wpk`：`I_Upk/I_Vpk` 作为 parking drift，`I_Wpk`
+作为观测 W sanity check。
 
 ## 样本选择
 
@@ -33,10 +35,10 @@ check，不作为正式密度口径。
 
 ## 速度与垂直速度分解
 
-第一版重建：
+修正版默认重建：
 
 ```text
-rebuild_W = c_x_rel * dz_rho/dx + u_Argo · grad(z_rho)
+rebuild_W = -c_x_rel * dz'_rho/dx + (u_pk - c_x_raw, v_pk) · grad(z'_rho)
 ```
 
 其中：
@@ -44,15 +46,19 @@ rebuild_W = c_x_rel * dz_rho/dx + u_Argo · grad(z_rho)
 - `c_x_raw`：从 META track 相邻轨迹点中央差分得到的局地东西向传播速度。
 - `u_bg`：同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值。
 - `c_x_rel = mean(c_x_raw) - mean(u_bg)`。
-- 诊断提醒：当前脚本的 `u_Argo/v_Argo` 是由相邻 profile 位置差近似得到，
-  尚未等同于严格的 parking-phase displacement velocity。这个速度近似、
-  `rho0/z_rho` 定义、以及移动坐标系下的符号/背景扣除，是当前 W 形态异常的
-  首要复核对象；详见 `ARGO_W_REBUILD_DIAGNOSIS_ZH.md`。
+- 默认 `--velocity-source argo1000m_match`：使用历史文件的 `I_Upk/I_Vpk`
+  作为 parking drift；旧的相邻 profile 位置差近似仅保留为
+  `--velocity-source profile_diff` 对照。
 - `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
   处 `I_sigma1` 的中位数，作为共同目标等密面。
 - `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
-- `z_rho` 有效窗口：默认只保留 `900-1100 m`，避免共同密度面在个别
-  profile 中跳到浅层或深层交点，造成不合理的大梯度和 W 量级。
+- 默认 `--z-mode anomaly_farfield`：使用 `2-4R` 样本中位数估计背景，
+  对 `z'_rho = z_rho - median(z_rho in 2-4R)` 求梯度。
+- `z_rho` 反插值只允许显式 bracket crossing，不再 fallback 到全剖面
+  `interp1(profile, depth)`；CSV 输出 `rho_crossing_count`、
+  `rho_bracket_dz_m`、`local_drho_dz`。
+- `z_rho` 有效窗口：默认只保留 `900-1100 m`，且要求
+  `abs(local_drho_dz) >= 1e-5`、bracket 厚度 `<=150 m`。
 
 注意：旧的逐 profile parking-density 口径会使 `z_rho` 几乎退化为每条
 profile 自身的 parking depth，导致 `dz_rho/dx` 和重建 W 接近 0。脚本保留
@@ -142,6 +148,22 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 
 重复匹配结果的 `SUMMARY.csv` 会额外记录 `unique_argo_count` 和
 `duplicate_match_count`。
+
+20N crossing 修正版验证命令：
+
+```powershell
+D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+  "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
+  --selection-mode crossing_lat `
+  --target-lat 20 `
+  --intersect-radius-r 1 `
+  --match-mode nearest `
+  --bbox 0,360,-60,60 `
+  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_fixed_crossing_20N_1R"
+```
+
+该目录额外输出 `wpk_validation.png` 和 `velocity_sign_sensitivity.png`，用于
+比较正式重建 W、历史观测 `I_Wpk` 和速度/符号敏感性。
 
 ## 参考依据
 
