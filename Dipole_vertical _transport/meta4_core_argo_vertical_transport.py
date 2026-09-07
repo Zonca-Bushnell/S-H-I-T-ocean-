@@ -135,6 +135,8 @@ min_bin_count = @MIN_BIN_COUNT@;
 plot_filled_gradient = @PLOT_FILLED_GRADIENT@;
 grid_mapping = '@GRID_MAPPING@';
 smooth_passes = @SMOOTH_PASSES@;
+cressman_radius_r = @CRESSMAN_RADIUS_R@;
+cressman_min_obs = @CRESSMAN_MIN_OBS@;
 rho0_mode = '@RHO0_MODE@';
 max_matches_per_group = @MAX_MATCHES@;
 core_min_m = @CORE_MIN_M@;
@@ -220,7 +222,7 @@ for p = 1:numel(polarities)
         [matches, grid] = build_group(argo_band, meta_band, polarity, band_label, ...
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-            time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, rho0_mode, ...
+            time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
             z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m);
         write_group_outputs(group_dir, matches, grid, polarity, band_label);
         grid_json_files{end+1} = fullfile(group_dir, 'composite_grid.json'); %#ok<SAGROW>
@@ -229,7 +231,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
+combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -280,7 +282,7 @@ end
 function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label, ...
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-    time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, rho0_mode, ...
+    time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
     z_rho_min_m, z_rho_max_m, max_matches_per_group, deg_m)
 
     rows = {};
@@ -318,7 +320,7 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
     end
     rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_rho_min_m, z_rho_max_m);
     matches = rows;
-    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
+    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
     grid.rho0_mode = rho0_mode;
     grid.z_rho_min_m = z_rho_min_m;
     grid.z_rho_max_m = z_rho_max_m;
@@ -402,7 +404,7 @@ function label = ring_label(r_norm)
     end
 end
 
-function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes)
+function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs)
     x_vec = linspace(-4, 4, grid_n);
     y_vec = linspace(-4, 4, grid_n);
     [X, Y] = meshgrid(x_vec, y_vec);
@@ -412,6 +414,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         'mapped_support', count_grid, ...
         'count', count_grid, 'term1', nan_grid, 'term2', nan_grid, 'rebuild_w', nan_grid, ...
         'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, 'mean_radius_m', NaN, ...
+        'grid_mapping', grid_mapping, 'cressman_radius_r', cressman_radius_r, 'cressman_min_obs', cressman_min_obs, ...
         'rho0_mode', '', 'z_rho_min_m', NaN, 'z_rho_max_m', NaN);
     if isempty(matches)
         return
@@ -438,14 +441,21 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     grid.z = accumarray(subs, z(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.u = accumarray(subs, u(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.v = accumarray(subs, v(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
-    if strcmp(grid_mapping, 'scattered')
+    if strcmp(grid_mapping, 'cressman')
+        [grid.z, support_z] = cressman_map(x, y, z, X, Y, cressman_radius_r, cressman_min_obs);
+        [grid.u, support_u] = cressman_map(x, y, u, X, Y, cressman_radius_r, cressman_min_obs);
+        [grid.v, support_v] = cressman_map(x, y, v, X, Y, cressman_radius_r, cressman_min_obs);
+        grid.mapped_support = min(cat(3, support_z, support_u, support_v), [], 3);
+    elseif strcmp(grid_mapping, 'scattered')
         grid.z = scattered_map(x, y, z, X, Y);
         grid.u = scattered_map(x, y, u, X, Y);
         grid.v = scattered_map(x, y, v, X, Y);
+        grid.mapped_support = double(isfinite(grid.z) & isfinite(grid.u) & isfinite(grid.v) & hypot(X, Y) <= 4);
+    else
+        grid.mapped_support = grid.count;
     end
-    grid.mapped_support = double(isfinite(grid.z) & isfinite(grid.u) & isfinite(grid.v) & hypot(X, Y) <= 4);
     if smooth_passes > 0
-        support = grid.mapped_support > 0;
+        support = mapping_support_mask(grid_mapping, grid.mapped_support, grid.count, min_bin_count, cressman_min_obs);
         grid.z = smooth2_supported(grid.z, support, smooth_passes);
         grid.u = smooth2_supported(grid.u, support, smooth_passes);
         grid.v = smooth2_supported(grid.v, support, smooth_passes);
@@ -454,11 +464,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     dy_m = mean(diff(y_vec)) * grid.mean_radius_m;
     if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
         [dzdy, dzdx] = gradient(fillmissing2(grid.z), dy_m, dx_m);
-        if strcmp(grid_mapping, 'scattered')
-            support = grid.mapped_support > 0;
-        else
-            support = grid.count >= min_bin_count;
-        end
+        support = mapping_support_mask(grid_mapping, grid.mapped_support, grid.count, min_bin_count, cressman_min_obs);
         if plot_filled_gradient
             grid.term1 = grid.cx_rel .* dzdx;
         else
@@ -467,6 +473,45 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         grid.term2 = mask_to_support(grid.u .* dzdx + grid.v .* dzdy, support);
         grid.rebuild_w = mask_to_support(grid.term1 + grid.term2, support);
     end
+end
+
+function support = mapping_support_mask(grid_mapping, mapped_support, count_grid, min_bin_count, cressman_min_obs)
+    if strcmp(grid_mapping, 'cressman')
+        support = mapped_support >= cressman_min_obs;
+    elseif strcmp(grid_mapping, 'scattered')
+        support = mapped_support > 0;
+    else
+        support = count_grid >= min_bin_count;
+    end
+end
+
+function [Z, support_count] = cressman_map(x, y, v, X, Y, radius_r, min_obs)
+    Z = NaN(size(X));
+    support_count = zeros(size(X));
+    good = isfinite(x) & isfinite(y) & isfinite(v) & hypot(x, y) <= 4;
+    x = x(good); y = y(good); v = v(good);
+    if isempty(x) || ~isfinite(radius_r) || radius_r <= 0
+        return
+    end
+    r2_limit = radius_r ^ 2;
+    for ii = 1:numel(X)
+        d2 = (x - X(ii)).^2 + (y - Y(ii)).^2;
+        inside = d2 < r2_limit;
+        n_inside = nnz(inside);
+        support_count(ii) = n_inside;
+        if n_inside >= min_obs
+            w = (r2_limit - d2(inside)) ./ (r2_limit + d2(inside));
+            ok = isfinite(w) & w > 0;
+            if any(ok)
+                vals = v(inside);
+                vals = vals(ok);
+                w = w(ok);
+                Z(ii) = sum(w .* vals) ./ sum(w);
+            end
+        end
+    end
+    Z(hypot(X, Y) > 4) = NaN;
+    support_count(hypot(X, Y) > 4) = 0;
 end
 
 function out = smooth2_supported(A, support, passes)
@@ -565,7 +610,7 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
         valid_cells, valid_fraction, grid.mean_cx_raw, grid.mean_u_bg, grid.cx_rel, grid.mean_radius_m / 1000, group_dir};
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes)
+function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs)
     combined_rows = {};
     for b = 1:size(lat_bands, 1)
         band_label = lat_band_label(lat_bands(b,1), lat_bands(b,2));
@@ -574,7 +619,7 @@ function combined_rows = write_combined_outputs(output_root, lat_bands, combined
             mkdir(combined_dir);
         end
         all_matches = combined_matches{b};
-        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes);
+        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
         write_group_outputs(combined_dir, all_matches, grid, 'combined', band_label);
         combined_rows(end+1,:) = summary_from_matches(all_matches, grid, 'combined', band_label, combined_dir); %#ok<AGROW>
     end
@@ -584,6 +629,7 @@ function write_grid_json(path, grid, polarity, band_label)
     G = struct();
     G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'mean_cx_raw_m_s', grid.mean_cx_raw, ...
         'mean_u_bg_m_s', grid.mean_u_bg, 'cx_rel_m_s', grid.cx_rel, 'mean_radius_m', grid.mean_radius_m, ...
+        'grid_mapping', grid.grid_mapping, 'cressman_radius_r', grid.cressman_radius_r, 'cressman_min_obs', grid.cressman_min_obs, ...
         'rho0_mode', grid.rho0_mode, 'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, ...
         'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count));
     G.x_over_R = grid.x;
@@ -676,14 +722,16 @@ function write_method_doc(path, argo_mat, meta_dir, output_root, bbox, lat_bands
     fprintf(fid, '- Argo 主数据源：`%s`\\n', argo_mat);
     fprintf(fid, '- META4.0 涡旋源：`%s`\\n', meta_dir);
     fprintf(fid, '- 输出根目录：`%s`\\n', output_root);
-    fprintf(fid, '- 黑潮区域：`%.1fE-%.1fE, %.1fN-%.1fN`\\n', bbox(1), bbox(2), bbox(3), bbox(4));
+    fprintf(fid, '- 运行范围：`%.1fE-%.1fE, %.1f-%.1f latitude`\\n', bbox(1), bbox(2), bbox(3), bbox(4));
     fprintf(fid, '- 纬度带：');
-    for i=1:size(lat_bands,1), fprintf(fid, '`%.0f-%.0fN` ', lat_bands(i,1), lat_bands(i,2)); end
+    for i=1:size(lat_bands,1), fprintf(fid, '`%s` ', lat_band_label(lat_bands(i,1), lat_bands(i,2))); end
     fprintf(fid, '\\n- Core Argo 限定：`%.0f-%.0f m` parking depth。\\n', core_min_m, core_max_m);
     fprintf(fid, '- 时间匹配：Argo profile 与 META 轨迹点相差不超过 `%.1f day`。\\n', time_window_days);
+    fprintf(fid, '- 多候选归属：每条 Argo profile 会搜索同纬度带、时间窗内所有 META 涡旋；若同时落入多个 `4R` 半径，只归属给 `r/R` 最小的涡旋，避免同一 profile 被重复计数。\\n');
     fprintf(fid, '- 空间分区：保存 `0-1R`、`1-2R`、`2-4R`，图像网格为 `x/R, y/R = -4..4`。\\n');
     fprintf(fid, '- 密度变量：`%s`。默认 `rho0` 为每个纬度带/极性在实际 parking depth 处密度的中位数；可用 `--rho0-mode profile` 做旧口径对照。\\n', density_variable);
     fprintf(fid, '- `z_rho` 有效深度窗口：默认 `900-1100 m`，避免共同密度面跳到浅层或深层交点后放大梯度。\\n');
+    fprintf(fid, '- 默认网格化：Cressman objective mapping。权重 `w=(R_c^2-r^2)/(R_c^2+r^2)`，仅使用 `R_c` 内样本；默认 `R_c=0.5R`、每格至少 `3` 个样本。`sample_count` 是原始 bin 覆盖，`mapped_support` 是 Cressman 支撑样本数。\\n');
     fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。\\n');
     fprintf(fid, '- BOA_Argo 只作为 gridded 温盐/密度背景可行性假设记录，不在第一版中直接推导背景速度。\\n\\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\\n');
@@ -732,6 +780,8 @@ end
         .replace("@PLOT_FILLED_GRADIENT@", "true" if args.plot_filled_gradient else "false")
         .replace("@GRID_MAPPING@", str(args.grid_mapping).replace("'", "''"))
         .replace("@SMOOTH_PASSES@", str(int(args.smooth_passes)))
+        .replace("@CRESSMAN_RADIUS_R@", f"{float(args.cressman_radius_r):.12g}")
+        .replace("@CRESSMAN_MIN_OBS@", str(int(args.cressman_min_obs)))
         .replace("@RHO0_MODE@", str(args.rho0_mode).replace("'", "''"))
         .replace("@MAX_MATCHES@", str(max_matches))
         .replace("@CORE_MIN_M@", f"{float(args.core_min_m):.12g}")
@@ -770,11 +820,23 @@ def main() -> int:
     )
     parser.add_argument(
         "--grid-mapping",
-        choices=("scattered", "bin"),
-        default="scattered",
-        help="Map profiles to the composite grid. Use scattered for continuous Argo-eddy composite maps; bin keeps sampled cells only.",
+        choices=("cressman", "scattered", "bin"),
+        default="cressman",
+        help="Map profiles to the composite grid. Cressman is the default objective mapping; scattered is a diagnostic interpolation; bin keeps sampled cells only.",
     )
     parser.add_argument("--smooth-passes", type=int, default=2)
+    parser.add_argument(
+        "--cressman-radius-r",
+        type=float,
+        default=0.5,
+        help="Cressman influence radius in eddy-radius units for --grid-mapping cressman.",
+    )
+    parser.add_argument(
+        "--cressman-min-obs",
+        type=int,
+        default=3,
+        help="Minimum profiles within the Cressman influence radius required to map a grid point.",
+    )
     parser.add_argument(
         "--rho0-mode",
         choices=("band_median", "profile"),

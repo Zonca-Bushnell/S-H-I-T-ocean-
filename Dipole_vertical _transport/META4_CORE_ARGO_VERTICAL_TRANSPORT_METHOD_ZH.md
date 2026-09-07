@@ -51,14 +51,17 @@ profile 自身的 parking depth，导致 `dz_rho/dx` 和重建 W 接近 0。脚�
 
 ## 网格覆盖与空白区
 
-复合图默认先把 profile 投影到涡心归一化坐标，再用 MATLAB
-`scatteredInterpolant` 生成连续 `z_rho/u/v` composite 场。脚本同时在
-`composite_grid.json/.npz` 中写出原始 bin 计数 `sample_count` 和插值支撑
-`mapped_support`。
+复合图默认先把 profile 投影到涡心归一化坐标，再用 Cressman objective
+mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
+`w=(R_c^2-r^2)/(R_c^2+r^2)`，只使用映射半径 `R_c` 内样本；脚本默认
+`--cressman-radius-r 0.5`、`--cressman-min-obs 3`。脚本同时在
+`composite_grid.json/.npz` 中写出原始 bin 计数 `sample_count` 和 Cressman
+支撑样本数 `mapped_support`。
 
-`dz_rho/dx` 的数值梯度在连续 composite 场上计算；白色表示当前插值方式没有
-空间支撑。若需要查看完全不插值的原始散点格点结果，可加
-`--grid-mapping bin`。如果使用 `--max-matches-per-group 200` 做 smoke run，
+`dz_rho/dx` 的数值梯度在连续 composite 场上计算；白色表示当前格点没有达到
+最小样本支撑。若需要查看完全不插值的原始散点格点结果，可加
+`--grid-mapping bin`；若需要诊断无约束凸包插值，可加
+`--grid-mapping scattered`。如果使用 `--max-matches-per-group 200` 做 smoke run，
 覆盖和插值支撑都会偏低；正式结果应使用默认 `0` 读取全部匹配样本。
 
 ## BOA_Argo 假定
@@ -84,12 +87,13 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   --max-matches-per-group 200
 ```
 
-若希望提高单格可靠性，可增加最小格点样本数，例如：
+若希望调整 Cressman 客观分析半径或最小样本数，可使用：
 
 ```powershell
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
-  --min-bin-count 3
+  --cressman-radius-r 0.5 `
+  --cressman-min-obs 3
 ```
 
 若需要复现原始散点格点图，可使用：
@@ -110,8 +114,6 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 
 ## 参考依据
 
-- NOAA AOML Argo overview: https://www.aoml.noaa.gov/two-decades-argo-program/
-- NOAA Argo best practices PDF: https://repository.library.noaa.gov/view/noaa/70164/noaa_70164_DS1.pdf
-- Lin et al. 2019 Remote Sensing: https://www.mdpi.com/2072-4292/11/24/2989
-- Zhou et al. 2023 JGR Oceans: https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2022JC019386
-- JAMSTEC Argo gridded products: https://www.jamstec.go.jp/PARC/product
+本地 PDF 依据见 `ARGO_EDDY_W_LITERATURE_CHECK_ZH.md` 和
+`D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\PDF\Dipole_vertical _transport`。
+未能下载为有效 PDF 的论文只作为待补充条目，不计入本地依据。
