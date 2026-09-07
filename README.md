@@ -2,6 +2,9 @@
 
 This repository currently stores the working code under `Zhe/`.
 
+For a full handoff to another computer, account, or Codex thread, start with
+`PROJECT_HANDOFF_ZH.md`.
+
 The active branch for day-to-day development is `Zonca`. EP theory experiments
 and diagnostics are developed on `ZONCA-EP-FLUX-TESTZ` until they are promoted.
 
