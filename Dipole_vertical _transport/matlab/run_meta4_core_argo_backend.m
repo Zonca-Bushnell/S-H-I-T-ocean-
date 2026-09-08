@@ -26,6 +26,10 @@ fast_sensitivity_2d = @FAST_SENSITIVITY_2D@;
 sensitivity_workers = @SENSITIVITY_WORKERS@;
 sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
+write_matched_csv_flag = @WRITE_MATCHED_CSV@;
+write_grid_json_flag = @WRITE_GRID_JSON@;
+write_grid_nc_flag = @WRITE_GRID_NC@;
+write_summary_csv_flag = @WRITE_SUMMARY_CSV@;
 depth_levels = [@DEPTH_LEVELS@];
 section_axis = '@SECTION_AXIS@';
 section_half_width_r = @SECTION_HALF_WIDTH_R@;
@@ -46,6 +50,11 @@ global USE_GPU_CRESSMAN;
 USE_GPU_CRESSMAN = should_use_gpu(compute_device);
 global QC_WORKERS;
 QC_WORKERS = sensitivity_workers;
+global WRITE_MATCHED_CSV WRITE_GRID_JSON WRITE_GRID_NC WRITE_SUMMARY_CSV;
+WRITE_MATCHED_CSV = write_matched_csv_flag;
+WRITE_GRID_JSON = write_grid_json_flag;
+WRITE_GRID_NC = write_grid_nc_flag;
+WRITE_SUMMARY_CSV = write_summary_csv_flag;
 
 if exist(output_root, 'dir') ~= 7
     mkdir(output_root);
@@ -103,12 +112,12 @@ argo_base_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3)
     argo_park >= core_min_m & argo_park <= core_max_m & isfinite(argo_u) & isfinite(argo_v);
 
 if fast_sensitivity_2d
-    grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
+    grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
         argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
         time_window_days, min_bin_count, plot_filled_gradient, grid_mapping, sample_gradient_max_profiles, rho0_mode, z_mode, boa_clim, ...
         z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers, sensitivity_config_names);
     manifest = struct();
-    manifest.grid_json_files = grid_json_files;
+    manifest.grid_files = grid_files;
     manifest.output_root = output_root;
     text = jsonencode(manifest);
     fid = fopen('@MANIFEST@', 'w');
@@ -118,7 +127,7 @@ if fast_sensitivity_2d
 end
 
 polarities = {'cyclonic','anticyclonic'};
-grid_json_files = {};
+grid_files = {};
 summary_rows = {};
 if strcmp(vertical_mode, 'isopycnal_depth_stack')
     summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','depth_count','valid_voxels','valid_voxel_fraction','mean_valid_cells_per_depth','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','mean_boa_bg_valid_fraction','mean_profile_valid_fraction','q95_abs_w_1e6_m_s','output_dir'};
@@ -173,8 +182,8 @@ for p = 1:numel(polarities)
                 meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
                 time_window_days, grid_n, min_bin_count, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, ...
                 z_mode, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, section_axis, section_half_width_r);
-            write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label);
-            grid_json_files{end+1} = fullfile(group_dir, 'w_3d_grid.json'); %#ok<SAGROW>
+            grid_file = write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label);
+            grid_files{end+1} = grid_file; %#ok<SAGROW>
             summary_rows(end+1,:) = summary_from_matches_3d(matches, grid3d, polarity, band_label, group_dir); %#ok<SAGROW>
         else
             [matches, grid] = build_group(argo_band, meta_band, polarity, band_label, ...
@@ -182,19 +191,23 @@ for p = 1:numel(polarities)
                 meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
                 time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, rho0_mode, ...
                 z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
-            write_group_outputs(group_dir, matches, grid, polarity, band_label);
-            grid_json_files{end+1} = fullfile(group_dir, 'composite_grid.json'); %#ok<SAGROW>
+            grid_file = write_group_outputs(group_dir, matches, grid, polarity, band_label, true);
+            grid_files{end+1} = grid_file; %#ok<SAGROW>
             summary_rows(end+1,:) = summary_from_matches(matches, grid, polarity, band_label, group_dir); %#ok<SAGROW>
         end
     end
 end
 
 if strcmp(vertical_mode, 'isopycnal_depth_stack')
-    summary_path = fullfile(output_root, 'SUMMARY_3D_W.csv');
+    summary_path = fullfile(output_root, 'SUMMARY_3D_W');
 else
-    summary_path = fullfile(output_root, 'SUMMARY.csv');
+    summary_path = fullfile(output_root, 'SUMMARY');
 end
-writecell([summary_header; summary_rows], summary_path);
+write_summary_table_mat([summary_path '.mat'], summary_header, summary_rows);
+global WRITE_SUMMARY_CSV;
+if WRITE_SUMMARY_CSV
+    writecell([summary_header; summary_rows], [summary_path '.csv']);
+end
 if strcmp(vertical_mode, 'isopycnal_depth_stack')
     write_summary_doc_3d(fullfile(output_root, 'RUN_SUMMARY_ZH.md'), summary_rows, output_root, depth_levels, section_axis, section_half_width_r);
 else
@@ -202,7 +215,7 @@ else
 end
 
 manifest = struct();
-manifest.grid_json_files = grid_json_files;
+manifest.grid_files = grid_files;
 manifest.output_root = output_root;
 text = jsonencode(manifest);
 fid = fopen('@MANIFEST@', 'w');
@@ -248,7 +261,7 @@ function use_gpu = should_use_gpu(compute_device)
     end
 end
 
-function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
+function grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
     argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
     time_window_days, min_bin_count, plot_filled_gradient, grid_mapping, sample_gradient_max_profiles, rho0_mode, z_mode, boa_clim, ...
     z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers, sensitivity_config_names)
@@ -262,7 +275,7 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
     configs = select_sensitivity_configs(sensitivity_configs(), sensitivity_config_names);
     polarities = {'cyclonic','anticyclonic'};
     summary_rows = {};
-    grid_json_files = {};
+    grid_files = {};
     summary_header = {'polarity','config','grid_n','cressman_radius_r','cressman_min_obs','smooth_passes','match_count','unique_argo_count','duplicate_match_count','valid_grid_fraction','mapped_support_median','mapped_support_p10','corr_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','roughness_score','dipole_score','output_dir'};
     for p = 1:numel(polarities)
         polarity = polarities{p};
@@ -298,7 +311,11 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
             mkdir(cache_dir);
         end
         header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched','boa_rho_crossing_count','boa_rho_bracket_dz_m','boa_local_drho_dz','boa_bg_valid'};
-        writecell(clean_write_cells([header; matches]), fullfile(cache_dir, 'matched_core_argo_cache.csv'));
+        write_matched_table_mat(fullfile(cache_dir, 'matched_core_argo_cache.mat'), header, matches);
+        global WRITE_MATCHED_CSV;
+        if WRITE_MATCHED_CSV
+            writecell(clean_write_cells([header; matches]), fullfile(cache_dir, 'matched_core_argo_cache.csv'));
+        end
         grids = cell(numel(configs), 1);
         global USE_GPU_CRESSMAN;
         use_parallel = ~USE_GPU_CRESSMAN && maybe_start_parallel_pool(sensitivity_workers);
@@ -329,14 +346,18 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
             if exist(cfg_dir, 'dir') ~= 7
                 mkdir(cfg_dir);
             end
-            write_group_outputs(cfg_dir, matches, grid, polarity, [band_label ' ' cfg.name]);
-            grid_json_files{end+1} = fullfile(cfg_dir, 'composite_grid.json'); %#ok<AGROW>
+            grid_file = write_group_outputs(cfg_dir, matches, grid, polarity, [band_label ' ' cfg.name], false);
+            grid_files{end+1} = grid_file; %#ok<AGROW>
             summary_rows(end+1,:) = sensitivity_summary_row(matches, grid, polarity, cfg, cfg_dir); %#ok<AGROW>
         end
         plot_sensitivity_montage(fullfile(output_root, [polarity '_sensitivity_montage.png']), grids, configs, polarity, band_label);
         log_step(sprintf('%s %s fast sensitivity finished in %.1f s', polarity, band_label, toc(stage_timer)));
     end
-    writecell([summary_header; summary_rows], fullfile(output_root, 'SENSITIVITY_SUMMARY.csv'));
+    write_summary_table_mat(fullfile(output_root, 'SENSITIVITY_SUMMARY.mat'), summary_header, summary_rows);
+    global WRITE_SUMMARY_CSV;
+    if WRITE_SUMMARY_CSV
+        writecell([summary_header; summary_rows], fullfile(output_root, 'SENSITIVITY_SUMMARY.csv'));
+    end
     write_best_sensitivity_doc(fullfile(output_root, 'BEST_PARAMETER_RECOMMENDATION_ZH.md'), summary_rows);
 end
 
@@ -1649,7 +1670,10 @@ function out = fillmissing2(A)
     end
 end
 
-function write_group_outputs(group_dir, matches, grid, polarity, band_label)
+function grid_file = write_group_outputs(group_dir, matches, grid, polarity, band_label, write_matches)
+    if nargin < 6
+        write_matches = true;
+    end
     grid.match_count = size(matches, 1);
     if isempty(matches)
         grid.unique_argo_count = 0;
@@ -1664,8 +1688,21 @@ function write_group_outputs(group_dir, matches, grid, polarity, band_label)
     end
     grid.duplicate_match_count = grid.match_count - grid.unique_argo_count;
     header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched','boa_rho_crossing_count','boa_rho_bracket_dz_m','boa_local_drho_dz','boa_bg_valid'};
-    writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo.csv'));
-    write_grid_json(fullfile(group_dir, 'composite_grid.json'), grid, polarity, band_label);
+    global WRITE_MATCHED_CSV WRITE_GRID_JSON WRITE_GRID_NC;
+    if write_matches
+        write_matched_table_mat(fullfile(group_dir, 'matched_core_argo.mat'), header, matches);
+        if WRITE_MATCHED_CSV
+            writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo.csv'));
+        end
+    end
+    grid_file = fullfile(group_dir, 'composite_grid.mat');
+    write_grid_mat(grid_file, grid, polarity, band_label);
+    if WRITE_GRID_NC
+        write_grid_nc_file(fullfile(group_dir, 'composite_grid.nc'), grid, polarity, band_label);
+    end
+    if WRITE_GRID_JSON
+        write_grid_json(fullfile(group_dir, 'composite_grid.json'), grid, polarity, band_label);
+    end
     plot_three_panel(fullfile(group_dir, 'vertical_transport_terms.png'), grid, [polarity ' ' band_label]);
     plot_sensitivity(fullfile(group_dir, 'velocity_sign_sensitivity.png'), grid, [polarity ' ' band_label]);
     plot_wpk_validation(fullfile(group_dir, 'wpk_validation.png'), grid, [polarity ' ' band_label]);
@@ -1673,7 +1710,7 @@ function write_group_outputs(group_dir, matches, grid, polarity, band_label)
     write_group_doc(fullfile(group_dir, 'METHOD_ASSUMPTIONS_ZH.md'), matches, grid, polarity, band_label);
 end
 
-function write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label)
+function grid_file = write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label)
     grid3d.match_count = size(matches, 1);
     if isempty(matches)
         grid3d.unique_argo_count = 0;
@@ -1682,8 +1719,19 @@ function write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label
     end
     grid3d.duplicate_match_count = grid3d.match_count - grid3d.unique_argo_count;
     header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0_parking','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched','boa_rho_crossing_count','boa_rho_bracket_dz_m','boa_local_drho_dz','boa_bg_valid'};
-    writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo_3d.csv'));
-    write_grid_json_3d(fullfile(group_dir, 'w_3d_grid.json'), grid3d, polarity, band_label);
+    global WRITE_MATCHED_CSV WRITE_GRID_JSON WRITE_GRID_NC;
+    write_matched_table_mat(fullfile(group_dir, 'matched_core_argo_3d.mat'), header, matches);
+    if WRITE_MATCHED_CSV
+        writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo_3d.csv'));
+    end
+    grid_file = fullfile(group_dir, 'w_3d_grid.mat');
+    write_grid_3d_mat(grid_file, grid3d, polarity, band_label);
+    if WRITE_GRID_NC
+        write_grid_3d_nc_file(fullfile(group_dir, 'w_3d_grid.nc'), grid3d, polarity, band_label);
+    end
+    if WRITE_GRID_JSON
+        write_grid_json_3d(fullfile(group_dir, 'w_3d_grid.json'), grid3d, polarity, band_label);
+    end
     plot_3d_section(fullfile(group_dir, ['w_3d_section_' grid3d.section_axis '.png']), grid3d, [polarity ' ' band_label]);
     plot_3d_depth_slices(fullfile(group_dir, 'w_3d_depth_slices.png'), grid3d, [polarity ' ' band_label]);
     write_group_doc_3d(fullfile(group_dir, 'METHOD_3D_W_ZH.md'), matches, grid3d, polarity, band_label);
@@ -1698,6 +1746,157 @@ function C = clean_write_cells(C)
         catch
         end
     end
+end
+
+function write_matched_table_mat(path, header, matches)
+    matched = struct();
+    matched.header = header;
+    matched.row_count = size(matches, 1);
+    matched.note = 'Large matched tables are stored as MAT by default; use --write-matched-csv to opt in to CSV.';
+    field_names = matlab.lang.makeValidName(header);
+    for c = 1:numel(header)
+        if isempty(matches)
+            matched.(field_names{c}) = [];
+            continue
+        end
+        col = matches(:, c);
+        numeric_col = true;
+        for r = 1:numel(col)
+            if ~(isnumeric(col{r}) || islogical(col{r})) || ~isscalar(col{r})
+                numeric_col = false;
+                break
+            end
+        end
+        if numeric_col
+            matched.(field_names{c}) = cell2mat(col);
+        else
+            matched.(field_names{c}) = col;
+        end
+    end
+    save(path, 'matched');
+end
+
+function write_summary_table_mat(path, header, rows)
+    summary = struct();
+    summary.header = header;
+    summary.row_count = size(rows, 1);
+    field_names = matlab.lang.makeValidName(header);
+    for c = 1:numel(header)
+        if isempty(rows)
+            summary.(field_names{c}) = [];
+            continue
+        end
+        col = rows(:, c);
+        numeric_col = true;
+        for r = 1:numel(col)
+            if ~(isnumeric(col{r}) || islogical(col{r})) || ~isscalar(col{r})
+                numeric_col = false;
+                break
+            end
+        end
+        if numeric_col
+            summary.(field_names{c}) = cell2mat(col);
+        else
+            summary.(field_names{c}) = col;
+        end
+    end
+    save(path, 'summary');
+end
+
+function write_grid_mat(path, grid, polarity, band_label)
+    metadata = grid_metadata(grid, polarity, band_label);
+    save(path, 'grid', 'metadata');
+end
+
+function write_grid_3d_mat(path, grid3d, polarity, band_label)
+    metadata = grid3d_metadata(grid3d, polarity, band_label);
+    save(path, 'grid3d', 'metadata', '-v7.3');
+end
+
+function write_grid_nc_file(path, grid, polarity, band_label)
+    if exist(path, 'file') == 2
+        delete(path);
+    end
+    [ny, nx] = size(grid.x);
+    write_nc_2d(path, 'x_over_R', grid.x);
+    write_nc_2d(path, 'y_over_R', grid.y);
+    vars = {'z','z_raw','z_anom','u','v','wpk','count','mapped_support','wpk_mapped_support', ...
+        'term1','term2','rebuild_w','term1_depth_positive','term2_depth_positive','rebuild_w_raw_depth_positive', ...
+        'term1_plus','term1_minus','term2_abs','term2_rel','rebuild_plus_abs','rebuild_minus_rel', ...
+        'sample_term1','sample_term2','sample_rebuild_w'};
+    names = {'z_rho_m','z_rho_raw_m','z_rho_anom_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','sample_count','mapped_support','wpk_mapped_support', ...
+        'term1_m_s','term2_m_s','rebuild_w_m_s','term1_depth_positive_m_s','term2_depth_positive_m_s','rebuild_w_raw_depth_positive_m_s', ...
+        'term1_plus_m_s','term1_minus_m_s','term2_abs_m_s','term2_rel_m_s','rebuild_plus_abs_m_s','rebuild_minus_rel_m_s', ...
+        'sample_term1_m_s','sample_term2_m_s','sample_rebuild_w_m_s'};
+    for i = 1:numel(vars)
+        if isfield(grid, vars{i})
+            write_nc_2d(path, names{i}, grid.(vars{i}));
+        end
+    end
+    ncwriteatt(path, '/', 'polarity', polarity);
+    ncwriteatt(path, '/', 'lat_band', band_label);
+    ncwriteatt(path, '/', 'w_positive_direction', 'upward');
+    ncwriteatt(path, '/', 'depth_positive_direction', 'downward');
+    ncwriteatt(path, '/', 'nx', nx);
+    ncwriteatt(path, '/', 'ny', ny);
+end
+
+function write_nc_2d(path, name, value)
+    [ny, nx] = size(value);
+    nccreate(path, name, 'Dimensions', {'y', ny, 'x', nx}, 'Datatype', 'double', 'DeflateLevel', 4);
+    ncwrite(path, name, double(value));
+end
+
+function write_grid_3d_nc_file(path, grid3d, polarity, band_label)
+    if exist(path, 'file') == 2
+        delete(path);
+    end
+    [ny, nx, nz] = size(grid3d.w);
+    nccreate(path, 'depth_m', 'Dimensions', {'depth', nz}, 'Datatype', 'double', 'DeflateLevel', 4);
+    ncwrite(path, 'depth_m', double(grid3d.depth_levels(:)));
+    write_nc_2d(path, 'x_over_R', grid3d.x);
+    write_nc_2d(path, 'y_over_R', grid3d.y);
+    write_nc_3d(path, 'w_3d_m_s', grid3d.w);
+    write_nc_3d(path, 'term1_3d_m_s', grid3d.term1);
+    write_nc_3d(path, 'term2_3d_m_s', grid3d.term2);
+    write_nc_3d(path, 'z_rho_anom_3d_m', grid3d.z_anom);
+    write_nc_3d(path, 'sample_count_3d', grid3d.count);
+    write_nc_3d(path, 'mapped_support_3d', grid3d.mapped_support);
+    ncwriteatt(path, '/', 'polarity', polarity);
+    ncwriteatt(path, '/', 'lat_band', band_label);
+    ncwriteatt(path, '/', 'w_positive_direction', 'upward');
+    ncwriteatt(path, '/', 'depth_positive_direction', 'downward');
+end
+
+function write_nc_3d(path, name, value)
+    [ny, nx, nz] = size(value);
+    nccreate(path, name, 'Dimensions', {'y', ny, 'x', nx, 'depth', nz}, 'Datatype', 'double', 'DeflateLevel', 4);
+    ncwrite(path, name, double(value));
+end
+
+function metadata = grid_metadata(grid, polarity, band_label)
+    metadata = struct('polarity', polarity, 'lat_band', band_label, 'w_positive_direction', 'upward', 'depth_positive_direction', 'downward', ...
+        'mean_cx_raw_m_s', grid.mean_cx_raw, 'mean_u_bg_m_s', grid.mean_u_bg, 'cx_rel_m_s', grid.cx_rel, ...
+        'mean_radius_m', grid.mean_radius_m, 'mean_wpk_observed_m_s', grid.mean_wpk_observed, ...
+        'corr_rebuild_wpk', grid.corr_rebuild_wpk, 'corr_sample_rebuild_wpk', grid.corr_sample_rebuild_wpk, ...
+        'grid_mapping', grid.grid_mapping, 'cressman_radius_r', grid.cressman_radius_r, 'cressman_min_obs', grid.cressman_min_obs, ...
+        'match_mode', grid.match_mode, 'rho0_mode', grid.rho0_mode, 'z_mode', grid.z_mode, ...
+        'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, 'min_drho_dz', grid.min_drho_dz, ...
+        'max_rho_bracket_dz_m', grid.max_rho_bracket_dz_m, 'match_count', grid.match_count, ...
+        'unique_argo_count', grid.unique_argo_count, 'duplicate_match_count', grid.duplicate_match_count, ...
+        'boa_bg_valid_count', grid.boa_bg_valid_count, 'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), ...
+        'total_grid_cells', numel(grid.count));
+end
+
+function metadata = grid3d_metadata(grid3d, polarity, band_label)
+    metadata = struct('polarity', polarity, 'lat_band', band_label, 'vertical_mode', 'isopycnal_depth_stack', ...
+        'w_positive_direction', 'upward', 'depth_positive_direction', 'downward', 'section_axis', grid3d.section_axis, ...
+        'section_half_width_r', grid3d.section_half_width_r, 'mean_cx_raw_m_s', grid3d.mean_cx_raw, ...
+        'mean_u_bg_m_s', grid3d.mean_u_bg, 'cx_rel_m_s', grid3d.cx_rel, 'mean_radius_m', grid3d.mean_radius_m, ...
+        'match_count', grid3d.match_count, 'unique_argo_count', grid3d.unique_argo_count, ...
+        'duplicate_match_count', grid3d.duplicate_match_count, 'match_mode', grid3d.match_mode, ...
+        'z_mode', grid3d.z_mode, 'min_drho_dz', grid3d.min_drho_dz, ...
+        'max_rho_bracket_dz_m', grid3d.max_rho_bracket_dz_m);
 end
 
 function row = summary_from_matches_3d(matches, grid3d, polarity, band_label, group_dir)
@@ -1902,6 +2101,22 @@ function write_grid_json_3d(path, grid3d, polarity, band_label)
     fclose(fid);
 end
 
+function plot_filled_2d_field(grid, data, lim_micro)
+    if any(isfinite(data(:)))
+        contourf(grid.x(1,:), grid.y(:,1), data, 24, 'LineStyle', 'none');
+    else
+        h = imagesc(grid.x(1,:), grid.y(:,1), data);
+        set(h, 'AlphaData', isfinite(data));
+    end
+    set(gca, 'YDir', 'normal');
+    set(gca, 'Color', [1 1 1]);
+    axis image;
+    xlim([-4 4]); ylim([-4 4]);
+    clim([-lim_micro lim_micro]);
+    colormap(redblue_colormap());
+    colorbar;
+end
+
 function label = lat_band_label(lat_min, lat_max)
     label = [lat_token(lat_min) '_' lat_token(lat_max)];
 end
@@ -1933,15 +2148,7 @@ function plot_three_panel(path, grid, title_prefix)
     for k = 1:3
         subplot(1,3,k);
         data = grid.(fields{k}) * 1e6;
-        h = imagesc(grid.x(1,:), grid.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim] * 1e6);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid, data, lim * 1e6);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.2);
@@ -1981,15 +2188,7 @@ function plot_wpk_validation(path, grid, title_prefix)
     for k = 1:2
         subplot(1,2,k);
         data = grid.(fields{k}) * 1e6;
-        h = imagesc(grid.x(1,:), grid.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim] * 1e6);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid, data, lim * 1e6);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.2);
@@ -2032,15 +2231,7 @@ function plot_sensitivity(path, grid, title_prefix)
     for k = 1:4
         subplot(2,2,k);
         data = grid.(fields{k}) * 1e6;
-        h = imagesc(grid.x(1,:), grid.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim] * 1e6);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid, data, lim * 1e6);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.2);
@@ -2080,15 +2271,7 @@ function plot_gradient_order_comparison(path, grid, title_prefix)
     for k = 1:2
         subplot(1,2,k);
         data = grid.(fields{k}) * 1e6;
-        h = imagesc(grid.x(1,:), grid.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim] * 1e6);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid, data, lim * 1e6);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.2);
@@ -2170,15 +2353,7 @@ function plot_sensitivity_montage(path, grids, configs, polarity, band_label)
         subplot(2, 3, c);
         grid = grids{c};
         data = grid.rebuild_w * 1e6;
-        h = imagesc(grid.x(1,:), grid.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim] * 1e6);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid, data, lim * 1e6);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.0);
@@ -2223,15 +2398,7 @@ function plot_3d_depth_slices(path, grid3d, title_prefix)
     for k = 1:numel(idx)
         subplot(2, ceil(numel(idx)/2), k);
         data = grid3d.w(:,:,idx(k)) * 1e6;
-        h = imagesc(grid3d.x(1,:), grid3d.y(:,1), data);
-        set(h, 'AlphaData', isfinite(data));
-        set(gca, 'YDir', 'normal');
-        set(gca, 'Color', [1 1 1]);
-        axis image;
-        xlim([-4 4]); ylim([-4 4]);
-        clim([-lim lim]);
-        colormap(redblue_colormap());
-        colorbar;
+        plot_filled_2d_field(grid3d, data, lim);
         hold on;
         th = linspace(0, 2*pi, 240);
         plot(cos(th), sin(th), 'k-', 'LineWidth', 1.0);
@@ -2291,6 +2458,8 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_r
     fprintf(fid, '- BOA 背景模式：`%s`。默认按月份平均 `PDen1000_YYYYMM.mat`，对每个 profile 的 `lon/lat/month` 双线性插值得到背景密度剖面。\n', boa_background_mode);
     fprintf(fid, '- `z_rho` 反插值：profile 和 BOA 背景均只使用显式 bracket crossing，不再用全剖面 fallback；有效窗口 `%.0f-%.0f m`，`abs(local_drho_dz) >= %.3g`，bracket 厚度 `<= %.0f m`。\n', z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
     fprintf(fid, '- 默认网格化：Cressman objective mapping。权重 `w=(R_c^2-r^2)/(R_c^2+r^2)`，仅使用 `R_c` 内样本；默认 `R_c=0.5R`、每格至少 `3` 个样本。`sample_count` 是原始 bin 覆盖，`mapped_support` 是 Cressman 支撑样本数。\n');
+    fprintf(fid, '- 默认输出格式：大匹配表写为 `.mat`；网格写为 `.mat` 和 `.nc`；SUMMARY 写为 `.mat`。CSV 与网格 JSON 默认关闭，可用 `--write-matched-csv`、`--write-summary-csv` 和 `--write-grid-json` 显式打开。\n');
+    fprintf(fid, '- 默认绘图：二维 W 图使用 `contourf(..., ''LineStyle'', ''none'')`，只显示填色块，不叠加等值线描边。\n');
     fprintf(fid, '- 深度变量约定：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 均保存为正深度向下，便于海洋剖面阅读。\n');
     fprintf(fid, '- W 符号约定：`rebuild_w_m_s`、`term1_m_s`、`term2_m_s` 统一为向上为正，与历史 `I_Wpk` 中 `z=-Depth` 后计算 `Dz/Dt` 的口径一致；同时保留 `rebuild_w_raw_depth_positive_m_s` 作为深度向下正公式对照。\n');
     fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`。\n');
@@ -2315,7 +2484,7 @@ function write_group_doc(path, matches, grid, polarity, band_label)
     valid_fraction = valid_cells / numel(grid.count);
     fprintf(fid, '- 有样本支撑网格：`%d / %d (%.2f%%)`。\n', valid_cells, numel(grid.count), valid_fraction * 100);
     fprintf(fid, '- 符号约定：W 向上为正；`z_rho` 和 `z_rho_anom` 为正深度向下。\n');
-    fprintf(fid, '- 输出：`matched_core_argo.csv`、`composite_grid.npz`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`、`velocity_sign_sensitivity.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\n');
+    fprintf(fid, '- 输出：默认 `matched_core_argo.mat`、`composite_grid.mat`、`composite_grid.nc`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`、`velocity_sign_sensitivity.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\n');
     fclose(fid);
 end
 
@@ -2332,7 +2501,7 @@ function write_group_doc_3d(path, matches, grid3d, polarity, band_label)
     fprintf(fid, '- 公式：`term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw,v_pk)·grad(z''_rho)]`，`W = term1 + term2`。\n');
     fprintf(fid, '- W 符号：向上为正；深度和 `z_rho_anom` 按正深度向下保存和标注。\n');
     fprintf(fid, '- 横截面：`%s` 方向，半宽 `%.3gR`，纵坐标显示正深度数值。\n', grid3d.section_axis, grid3d.section_half_width_r);
-    fprintf(fid, '- 输出：`matched_core_argo_3d.csv`、`w_3d_grid.npz/json`、`w_3d_section_%s.png`、`w_3d_depth_slices.png`。\n', grid3d.section_axis);
+    fprintf(fid, '- 输出：默认 `matched_core_argo_3d.mat`、`w_3d_grid.mat`、`w_3d_grid.nc`、`w_3d_section_%s.png`、`w_3d_depth_slices.png`。\n', grid3d.section_axis);
     fclose(fid);
 end
 
@@ -2341,7 +2510,7 @@ function write_summary_doc(path, summary_rows, output_root)
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建运行摘要\n\n');
     fprintf(fid, '- 输出根目录：`%s`\n', output_root);
     fprintf(fid, '- 主图变量：W 向上为正，`term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`。\n');
-    fprintf(fid, '- 深度变量：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 仍为正深度向下；JSON/NPZ 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\n');
+    fprintf(fid, '- 深度变量：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 仍为正深度向下；默认 MAT/NetCDF 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\n');
     fprintf(fid, '- 若使用 `--max-matches-per-group` 做 smoke run，覆盖率会很低；正式结果应使用默认 `0` 读取全部匹配。\n\n');
     fprintf(fid, '| polarity | lat_band | matches | unique Argo | duplicated | 0-1R | 1-2R | 2-4R | valid grid %% | BOA bg %% | c_x_rel m/s | corr W/Wpk | corr sample/Wpk | q95 rebuild | q95 sample | q95 Wpk |\n');
     fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n');

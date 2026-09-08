@@ -85,7 +85,7 @@ profile 自身的 parking depth，导致 `dz_rho/dx` 和重建 W 接近 0。脚�
 mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 `w=(R_c^2-r^2)/(R_c^2+r^2)`，只使用映射半径 `R_c` 内样本；脚本默认
 `--cressman-radius-r 0.5`、`--cressman-min-obs 3`。脚本同时在
-`composite_grid.json/.npz` 中写出原始 bin 计数 `sample_count` 和 Cressman
+默认 `composite_grid.mat/.nc` 中写出原始 bin 计数 `sample_count` 和 Cressman
 支撑样本数 `mapped_support`。
 
 `dz_rho/dx` 的数值梯度在连续 composite 场上计算；白色表示当前格点没有达到
@@ -113,7 +113,12 @@ mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 
 本模式默认深度层为 `100:100:1900 m`，横截面用 `--section-axis x`，即沿
 `x/R=-4..4`、`|y/R|<=0.25` 做中位数截面。纵坐标显示正深度数值，W 仍向上为正。
-输出为 `matched_core_argo_3d.csv`、`w_3d_grid.npz/json`、`w_3d_section_x.png` 和
+输出默认使用二进制科学格式：匹配表写为 `matched_core_argo.mat`，网格写为
+`composite_grid.mat/.nc` 或 `w_3d_grid.mat/.nc`。大 CSV 和网格 JSON 默认关闭，
+只在显式加 `--write-matched-csv`、`--write-summary-csv` 或 `--write-grid-json` 时生成。
+汇总表默认写为 `SUMMARY.mat` 或 `SENSITIVITY_SUMMARY.mat`。三维输出为
+`matched_core_argo_3d.mat`、`w_3d_grid.mat/.nc`、
+`w_3d_section_x.png` 和
 `w_3d_depth_slices.png`。
 
 ## 2D 快速参数敏感度
@@ -202,7 +207,7 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 --match-mode all
 ```
 
-重复匹配结果的 `SUMMARY.csv` 会额外记录 `unique_argo_count` 和
+重复匹配结果的 `SUMMARY.mat` 或 `SENSITIVITY_SUMMARY.mat` 会额外记录 `unique_argo_count` 和
 `duplicate_match_count`。
 
 20N crossing 修正版验证命令：

@@ -251,15 +251,24 @@ def run_matlab_pipeline(args: argparse.Namespace) -> list[Path]:
             )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     output_root = Path(manifest.get("output_root", args.output_root))
-    grid_json_paths = sorted(output_root.rglob("composite_grid.json"))
-    if not grid_json_paths:
-        grid_json_paths = [Path(item) for item in manifest.get("grid_json_files", [])]
+    manifest_grid_paths = [Path(item) for item in manifest.get("grid_files", [])]
+    if manifest_grid_paths:
+        grid_paths = manifest_grid_paths
+    else:
+        grid_paths = [Path(item) for item in manifest.get("grid_json_files", [])]
+        if not grid_paths:
+            grid_paths = sorted(output_root.rglob("composite_grid.json"))
     npz_paths = []
-    for grid_json in grid_json_paths:
-        npz_path = grid_json.with_suffix(".npz")
-        write_npz_from_grid_json(grid_json, npz_path)
-        npz_paths.append(npz_path)
-    w3d_json_paths = sorted(output_root.rglob("w_3d_grid.json"))
+    for grid_path in grid_paths:
+        if grid_path.suffix.lower() == ".json":
+            npz_path = grid_path.with_suffix(".npz")
+            write_npz_from_grid_json(grid_path, npz_path)
+            npz_paths.append(npz_path)
+        else:
+            npz_paths.append(grid_path)
+    w3d_json_paths = []
+    if not manifest_grid_paths:
+        w3d_json_paths = sorted(output_root.rglob("w_3d_grid.json"))
     for grid_json in w3d_json_paths:
         npz_path = grid_json.with_suffix(".npz")
         write_npz_from_w3d_json(grid_json, npz_path)
@@ -312,6 +321,10 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@SENSITIVITY_WORKERS@", str(int(args.workers)))
         .replace("@SENSITIVITY_CONFIGS@", sensitivity_configs)
         .replace("@COMPUTE_DEVICE@", str(args.compute_device).replace("'", "''"))
+        .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
+        .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
+        .replace("@WRITE_GRID_NC@", "true" if args.write_grid_nc else "false")
+        .replace("@WRITE_SUMMARY_CSV@", "true" if args.write_summary_csv else "false")
         .replace("@DEPTH_LEVELS@", depth_levels)
         .replace("@SECTION_AXIS@", str(args.section_axis).replace("'", "''"))
         .replace("@SECTION_HALF_WIDTH_R@", f"{float(args.section_half_width_r):.12g}")
@@ -481,6 +494,28 @@ def main() -> int:
         default=0,
         help="Debug/smoke limit. Use 0 for all matched profiles.",
     )
+    parser.add_argument(
+        "--write-matched-csv",
+        action="store_true",
+        help="Opt in to large matched-table CSV files. Default writes matched tables as MAT only.",
+    )
+    parser.add_argument(
+        "--write-grid-json",
+        action="store_true",
+        help="Opt in to large grid JSON files and Python NPZ conversion. Default writes MAT/NetCDF grids.",
+    )
+    parser.add_argument(
+        "--write-summary-csv",
+        action="store_true",
+        help="Opt in to SUMMARY CSV files. Default writes summary tables as MAT.",
+    )
+    parser.add_argument(
+        "--no-grid-nc",
+        action="store_false",
+        dest="write_grid_nc",
+        help="Disable default NetCDF grid output and keep MAT-only grids.",
+    )
+    parser.set_defaults(write_grid_nc=True)
     raw_argv = sys.argv[1:]
     argv: list[str] = []
     i = 0

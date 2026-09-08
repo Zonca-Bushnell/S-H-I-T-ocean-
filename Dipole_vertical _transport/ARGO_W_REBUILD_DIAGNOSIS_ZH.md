@@ -320,4 +320,4 @@ rebuild_W = term1 + term2
 物理 W 与 `I_Wpk` 可比、深度异常图仍按正深度向下阅读两个需求。
 
 旧的独立临时 `I_Wpk` 绘图脚本已删除；历史 `I_Wpk` 现在只作为正式程序中的
-观测校验字段，进入 `wpk_validation.png`、相关系数和 `SUMMARY.csv`。
+观测校验字段，进入 `wpk_validation.png`、相关系数和默认 MAT summary。
