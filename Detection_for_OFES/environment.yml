@@ -1,0 +1,9 @@
+name: OFES_detection
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - pillow
+  - pyarrow
