@@ -32,7 +32,7 @@ Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。历史
 - 时间匹配：Argo profile 与 META 轨迹点相差不超过 `1 day`。
 - 空间匹配：以 META 涡心为原点，以 `final_radius` 为 `R`，保留 `0-4R`
   内 profile，并标记 `0-1R`、`1-2R`、`2-4R`。
-- 极性：cyclonic 和 anticyclonic 分开计算，并输出 combined 汇总。
+- 极性：cyclonic 和 anticyclonic 分开计算；不再输出 combined，因为两种极性合并后不保留清晰物理意义。
 - 目录标签：crossing 使用 `cross_20N_1R`、`cross_50S_1R`；lat-band 对照使用
   `60S_55S`、`05S_00N`、`00N_05N`、`55N_60N` 这类半球显式标签。
 
@@ -102,6 +102,33 @@ mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 `z'_rho` 后求梯度”，右图是轻量诊断“逐样本局地平面梯度后再合成 W”。
 为避免诊断项拖慢全样本，后者默认最多使用 `--sample-gradient-max-profiles 1000`
 个确定性抽样 profile，不作为主结果。
+
+## 三维 W 模式
+
+`--vertical-mode isopycnal_depth_stack` 会把单一约 1000 m 等密面 W 扩展为
+`W(x/R,y/R,z)`。每个名义深度 `z0` 使用 BOA 多年同月局地背景密度
+`rho_bg(lon,lat,month,z0)` 作为目标密度，在 Argo profile 和 BOA 背景剖面上分别
+严格 bracket 反插值得到 `z_rho_profile` 与 `z_rho_bg`，再计算
+`z'_rho = z_rho_profile - z_rho_bg`。
+
+本模式默认深度层为 `100:100:1900 m`，横截面用 `--section-axis x`，即沿
+`x/R=-4..4`、`|y/R|<=0.25` 做中位数截面。纵坐标显示正深度数值，W 仍向上为正。
+输出为 `matched_core_argo_3d.csv`、`w_3d_grid.npz/json`、`w_3d_section_x.png` 和
+`w_3d_depth_slices.png`。
+
+## 2D 快速参数敏感度
+
+`--fast-sensitivity-2d` 用于快速判断 20N crossing W 图像碎片/锯齿是否来自
+Cressman 半径、最小支撑样本、网格分辨率和平滑强度。该模式每个极性只做一次
+Argo-META 匹配、`rho0/z_rho` 反插值和 BOA 背景 QC，然后把缓存样本表复用于 6 组
+预设参数：`baseline`、`recommended`、`smoother`、`strong_support`、
+`low_res_smooth`、`high_smooth`。
+
+加速默认使用 `--compute-device auto`：若 MATLAB 能访问 GPU，则 Cressman 的距离矩阵
+和权重求和走 `gpuArray` 分块计算；若 GPU 不可用则自动回到 CPU。CPU 模式下参数组合
+可使用 MATLAB 并行池，`--workers` 默认取 CPU 核心数的一半、最多 8。GPU 模式和
+参数组合 `parfor` 不同时启用，避免多个 worker 抢同一张 GPU。此模式仍只输出
+cyclonic 和 anticyclonic，不输出 combined。
 
 ## BOA_Argo 假定
 
