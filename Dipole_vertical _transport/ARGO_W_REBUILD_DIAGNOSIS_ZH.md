@@ -34,7 +34,7 @@ Cortes-Morales et al. 2026 在综述中把 Freeland 2013 和 Christensen et al. 
 对我们的影响：
 
 - `ArgoData_SA_CT_PT_PDen_sigma.mat` 提供 TEOS-10 密度剖面和 `I_ParkDepth`，但当前正式脚本没有使用真实 parking segment 的起止位置、停泊压力时间序列或已计算 `I_Wpk`。
-- 临时 `Argo1000m_UVW_TSDen_199601_202306.mat` 的 `I_Wpk` 能出现偶极，说明数据中已有的 W 量更接近文献中的直接 Argo W 观测路线。
+- 历史 `Argo1000m_UVW_TSDen_199601_202306.mat` 的 `I_Wpk` 能出现偶极，说明数据中已有的 W 量更接近文献中的直接 Argo W 观测路线。
 - 因此正式程序若只从 profile 密度和近似水平速度重建 W，不能预期自动复现 `I_Wpk` 的偶极结构。
 
 ### 2. Argo parking drift 应是停泊段位移速度，不是相邻 profile 位置差的粗代理
@@ -136,7 +136,7 @@ omega = (R^2 - r^2) / (R^2 + r^2)
 1. 将正式程序的 `u/v` 来源改为真实 parking drift：优先尝试把 `Argo1000m_UVW_TSDen_199601_202306.mat` 的 `I_Upk/I_Vpk/I_Wpk` 与 TEOS 数据按 `I_PF + I_Time + I_Lon/I_Lat` 匹配；匹配成功后用 TEOS 密度算 `z_rho`，用历史文件的 `I_Upk/I_Vpk` 做速度，并用 `I_Wpk` 做形态校验。
 2. 增加 `z_rho_anomaly`：先建立同密度面在背景场中的深度，例如按纬度、经度、月份或远离涡心 `2-4R` 的背景均值，然后 composite `z_rho - z_rho_bg`。
 3. 重写 `isopycnal_depth`：只允许显式 bracket crossing；输出 crossing 个数、bracket 厚度、局地层结强度，弱层结和多重异常 crossing 剔除。
-4. 给 `term1` 加符号敏感性：至少输出 `+c dzdx` 和 `-c dzdx` 两套，并用临时 `I_Wpk` 偶极方向决定符号。
+4. 给 `term1` 加符号敏感性：至少输出 `+c dzdx` 和 `-c dzdx` 两套，并用历史 `I_Wpk` 偶极方向决定符号。
 5. `term2` 使用相对速度敏感性：测试 `u_abs · grad(z_anom)`、`(u_abs-c) · grad(z_anom)`、`u_anom · grad(z_anom)`，不要默认直接相加为最终 W。
 
 ### 可敏感性测试
@@ -151,13 +151,13 @@ omega = (R^2 - r^2) / (R^2 + r^2)
 
 1. 不立刻恢复全球全样本运行。
 2. 不把 BOA_Argo 用来直接推导背景速度；BOA/ISAS 目前只适合作为背景密度/温盐场候选。
-3. 不把 `I_Wpk` 临时程序替代正式方法；它只作为观测形态 sanity check 和符号/量级校验。
+3. 不把历史 `I_Wpk` 替代正式方法；它只作为观测形态 sanity check 和符号/量级校验。
 
 ## 下一步最小验证
 
 建议先做 20N crossing 的小样本闭环：
 
-1. 用临时 `I_Wpk` 程序生成观测 W composite，作为目标偶极方向。
+1. 用历史 `I_Wpk` 观测 composite 作为目标偶极方向。
 2. 在正式程序中合并历史 `I_Upk/I_Vpk/I_Wpk` 到 TEOS profile。
 3. 只改 `u/v` 后跑一次，判断是否恢复偶极。
 4. 再改 `z_rho_anomaly` 和反插值 QC，逐项比较 `term1/term2/rebuild_W`。
@@ -296,3 +296,28 @@ MATLAB 对二维矩阵的第一个输出是沿列方向的 `dF/dx`，第二个�
 正负约定之间仍差一个符号。下一步应优先输出和比较
 `rebuild_W`、`-rebuild_W`、`term1_plus/term1_minus` 与 `I_Wpk` 的相关，
 以锁定垂直速度正负号。
+
+## 2026-09-08 正式 crossing 全量重构决定
+
+本轮把正式程序的默认样本选择从 5 度 `lat_band` 改为 crossing：默认纬线为
+`60S,50S,40S,30S,20S,10S,00N,10N,20N,30N,40N,50N,60N`，每条纬线选择
+涡旋本体 `1R` 跨过该纬线的 META4.0 轨迹点。`lat_band` 保留为敏感性对照，
+但不再是默认正式全量口径。
+
+符号上，历史 `I_Wpk` 的生成脚本使用 `z=-Depth` 后计算 `Dz/Dt`，因此 W 是
+向上为正。正式程序内部的 `z_rho_m`、`z_rho_bg_m` 和 `z_rho_anom_m` 仍保持
+海洋剖面常用的正深度向下；但输出主变量 `rebuild_w_m_s`、`term1_m_s` 和
+`term2_m_s` 已统一改为向上为正：
+
+```text
+term1 = +c_x_rel dz'_rho/dx
+term2 = -[(u_pk-c_x_raw, v_pk) · grad(z'_rho)]
+rebuild_W = term1 + term2
+```
+
+同时保留 `rebuild_w_raw_depth_positive_m_s`、`term1_depth_positive_m_s` 和
+`term2_depth_positive_m_s`，用于追踪原始正深度向下公式。这样可以同时满足
+物理 W 与 `I_Wpk` 可比、深度异常图仍按正深度向下阅读两个需求。
+
+旧的独立临时 `I_Wpk` 绘图脚本已删除；历史 `I_Wpk` 现在只作为正式程序中的
+观测校验字段，进入 `wpk_validation.png`、相关系数和 `SUMMARY.csv`。

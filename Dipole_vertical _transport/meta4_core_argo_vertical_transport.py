@@ -5,6 +5,7 @@ import json
 import math
 import struct
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -16,9 +17,10 @@ DEFAULT_HISTORY_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
 DEFAULT_BOA_PDEN_ROOT = Path(r"F:\Argo_data\Self_BOA_Argo_PotentialDensity")
 DEFAULT_OUTPUT_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg"
+    r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg"
 )
 DEFAULT_BBOX = "0,360,-60,60"
+DEFAULT_CROSSING_LATS = "-60,-50,-40,-30,-20,-10,0,10,20,30,40,50,60"
 DEFAULT_LAT_BANDS = (
     "-60:-55,-55:-50,-50:-45,-45:-40,-40:-35,-35:-30,"
     "-30:-25,-25:-20,-20:-15,-15:-10,-10:-5,-5:0,"
@@ -46,6 +48,21 @@ def parse_lat_bands(value: str) -> list[tuple[float, float]]:
             raise argparse.ArgumentTypeError("latitude bands must be increasing")
         bands.append((lo, hi))
     return bands
+
+
+def parse_crossing_lats(value: str) -> list[float]:
+    lats: list[float] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        lat = float(item)
+        if lat < -90 or lat > 90:
+            raise argparse.ArgumentTypeError("crossing latitudes must be within [-90, 90]")
+        lats.append(lat)
+    if not lats:
+        raise argparse.ArgumentTypeError("--crossing-lats must contain at least one latitude")
+    return lats
 
 
 def matlab_quote(path: Path) -> str:
@@ -93,6 +110,9 @@ def write_npz_from_grid_json(json_path: Path, npz_path: Path) -> None:
         "term1_m_s",
         "term2_m_s",
         "rebuild_w_m_s",
+        "term1_depth_positive_m_s",
+        "term2_depth_positive_m_s",
+        "rebuild_w_raw_depth_positive_m_s",
         "term1_plus_m_s",
         "term1_minus_m_s",
         "term2_abs_m_s",
@@ -141,6 +161,7 @@ def run_matlab_pipeline(args: argparse.Namespace) -> list[Path]:
 def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     bbox = " ".join(f"{item:.12g}" for item in args.bbox)
     lat_bands = "; ".join(f"{lo:.12g} {hi:.12g}" for lo, hi in args.lat_bands)
+    crossing_lats = " ".join(f"{lat:.12g}" for lat in args.crossing_lats)
     target_label = latitude_crossing_label(args.target_lat, args.intersect_radius_r)
     argo_mat = matlab_quote(args.argo_mat)
     history_argo_mat = matlab_quote(args.history_argo_mat)
@@ -157,6 +178,7 @@ boa_pden_root = '@BOA_PDEN_ROOT@';
 output_root = '@OUTPUT_ROOT@';
 bbox = [@BBOX@];
 lat_bands = [@LAT_BANDS@];
+crossing_lats = [@CROSSING_LATS@];
 selection_mode = '@SELECTION_MODE@';
 target_lat = @TARGET_LAT@;
 intersect_radius_r = @INTERSECT_RADIUS_R@;
@@ -191,7 +213,7 @@ if exist(output_root, 'dir') ~= 7
 end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
-write_method_doc(method_md, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+write_method_doc(method_md, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, crossing_lats, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
 
 fprintf('Loading Argo vectors from %s\\n', argo_mat);
 A = load(argo_mat, 'I_Time', 'I_Lon', 'I_Lat', 'I_ParkDepth', 'I_PF', density_variable, 'Depth');
@@ -246,7 +268,7 @@ grid_json_files = {};
 summary_rows = {};
 summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','boa_bg_valid_count','boa_bg_valid_fraction','mean_wpk_observed_m_s','corr_rebuild_wpk','corr_sample_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_sample_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','output_dir'};
 if strcmp(selection_mode, 'crossing_lat')
-    group_count = 1;
+    group_count = numel(crossing_lats);
 else
     group_count = size(lat_bands, 1);
 end
@@ -270,15 +292,16 @@ for p = 1:numel(polarities)
 
     for b = 1:group_count
         if strcmp(selection_mode, 'crossing_lat')
-            band_label = target_label;
-            cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+            this_target_lat = crossing_lats(b);
+            band_label = crossing_label(this_target_lat, intersect_radius_r);
+            cross_distance_m = abs(meta_lat - this_target_lat) * deg_m;
             meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & isfinite(meta_radius) & meta_radius > 0 & ...
                 cross_distance_m <= meta_radius * intersect_radius_r);
             if isempty(meta_band)
                 argo_band = [];
             else
                 argo_lat_window_m = (intersect_radius_r + 4) * max(meta_radius(meta_band));
-                argo_band = find(argo_base_mask & abs(argo_lat - target_lat) * deg_m <= argo_lat_window_m);
+                argo_band = find(argo_base_mask & abs(argo_lat - this_target_lat) * deg_m <= argo_lat_window_m);
             end
         else
             lat_min = lat_bands(b,1);
@@ -303,7 +326,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n);
+combined_rows = write_combined_outputs(output_root, lat_bands, crossing_lats, combined_matches, selection_mode, target_label, intersect_radius_r, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -719,6 +742,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     grid = struct('x', X, 'y', Y, 'z', nan_grid, 'z_raw', nan_grid, 'z_anom', nan_grid, 'u', nan_grid, 'v', nan_grid, 'wpk', nan_grid, ...
         'mapped_support', count_grid, 'wpk_mapped_support', count_grid, ...
         'count', count_grid, 'term1', nan_grid, 'term2', nan_grid, 'rebuild_w', nan_grid, ...
+        'term1_depth_positive', nan_grid, 'term2_depth_positive', nan_grid, 'rebuild_w_raw_depth_positive', nan_grid, ...
         'term1_plus', nan_grid, 'term1_minus', nan_grid, 'term2_abs', nan_grid, 'term2_rel', nan_grid, ...
         'rebuild_plus_abs', nan_grid, 'rebuild_minus_rel', nan_grid, ...
         'sample_term1', nan_grid, 'sample_term2', nan_grid, 'sample_rebuild_w', nan_grid, 'corr_sample_rebuild_wpk', NaN, ...
@@ -808,13 +832,16 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         grid.term2_rel = mask_to_support((grid.u - grid.mean_cx_raw) .* dzdx + grid.v .* dzdy, support);
         grid.rebuild_plus_abs = mask_to_support(grid.term1_plus + grid.term2_abs, support);
         grid.rebuild_minus_rel = mask_to_support(grid.term1_minus + grid.term2_rel, support);
+        grid.term1_depth_positive = grid.term1_minus;
+        grid.term2_depth_positive = grid.term2_rel;
+        grid.rebuild_w_raw_depth_positive = grid.rebuild_minus_rel;
         if plot_filled_gradient
-            grid.term1 = -grid.cx_rel .* dzdx;
+            grid.term1 = grid.cx_rel .* dzdx;
         else
-            grid.term1 = grid.term1_minus;
+            grid.term1 = grid.term1_plus;
         end
-        grid.term2 = grid.term2_rel;
-        grid.rebuild_w = grid.rebuild_minus_rel;
+        grid.term2 = mask_to_support(-grid.term2_rel, support);
+        grid.rebuild_w = mask_to_support(grid.term1 + grid.term2, support);
         grid.corr_rebuild_wpk = spatial_corr(grid.rebuild_w, grid.wpk);
         grid.corr_sample_rebuild_wpk = spatial_corr(grid.sample_rebuild_w, grid.wpk);
     end
@@ -846,8 +873,8 @@ function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, cx_raw, 
         coef = Xfit \\ z(inside);
         dzdx = coef(2) / radius(ii);
         dzdy = coef(3) / radius(ii);
-        term1(ii) = -cx_rel * dzdx;
-        term2(ii) = (u(ii) - cx_raw(ii)) * dzdx + v(ii) * dzdy;
+        term1(ii) = cx_rel * dzdx;
+        term2(ii) = -((u(ii) - cx_raw(ii)) * dzdx + v(ii) * dzdy);
         rebuild(ii) = term1(ii) + term2(ii);
     end
 end
@@ -1092,11 +1119,11 @@ function f = safe_fraction(a, b)
     end
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n)
+function combined_rows = write_combined_outputs(output_root, lat_bands, crossing_lats, combined_matches, selection_mode, target_label, intersect_radius_r, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n)
     combined_rows = {};
     for b = 1:numel(combined_matches)
         if strcmp(selection_mode, 'crossing_lat')
-            band_label = target_label;
+            band_label = crossing_label(crossing_lats(b), intersect_radius_r);
         else
             band_label = lat_band_label(lat_bands(b,1), lat_bands(b,2));
         end
@@ -1114,7 +1141,8 @@ end
 
 function write_grid_json(path, grid, polarity, band_label)
     G = struct();
-    G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'mean_cx_raw_m_s', grid.mean_cx_raw, ...
+    G.metadata = struct('polarity', polarity, 'lat_band', band_label, 'w_positive_direction', 'upward', 'depth_positive_direction', 'downward', ...
+        'mean_cx_raw_m_s', grid.mean_cx_raw, ...
         'mean_u_bg_m_s', grid.mean_u_bg, 'cx_rel_m_s', grid.cx_rel, 'mean_radius_m', grid.mean_radius_m, ...
         'mean_wpk_observed_m_s', grid.mean_wpk_observed, 'corr_rebuild_wpk', grid.corr_rebuild_wpk, ...
         'grid_mapping', grid.grid_mapping, 'cressman_radius_r', grid.cressman_radius_r, 'cressman_min_obs', grid.cressman_min_obs, ...
@@ -1139,6 +1167,9 @@ function write_grid_json(path, grid, polarity, band_label)
     G.term1_m_s = grid.term1;
     G.term2_m_s = grid.term2;
     G.rebuild_w_m_s = grid.rebuild_w;
+    G.term1_depth_positive_m_s = grid.term1_depth_positive;
+    G.term2_depth_positive_m_s = grid.term2_depth_positive;
+    G.rebuild_w_raw_depth_positive_m_s = grid.rebuild_w_raw_depth_positive;
     G.term1_plus_m_s = grid.term1_plus;
     G.term1_minus_m_s = grid.term1_minus;
     G.term2_abs_m_s = grid.term2_abs;
@@ -1157,6 +1188,11 @@ function label = lat_band_label(lat_min, lat_max)
     label = [lat_token(lat_min) '_' lat_token(lat_max)];
 end
 
+function label = crossing_label(target_lat, intersect_radius_r)
+    radius_text = regexprep(sprintf('%.6g', intersect_radius_r), '\\.', 'p');
+    label = ['cross_' lat_token(target_lat) '_' radius_text 'R'];
+end
+
 function token = lat_token(lat)
     if lat < 0
         hemi = 'S';
@@ -1169,7 +1205,7 @@ end
 function plot_three_panel(path, grid, title_prefix)
     fig = figure('Visible','off','Position',[100 100 1500 430]);
     fields = {'term1','term2','rebuild_w'};
-    titles = {'-c_x^{rel} dz''_\\rho/dx','(u_{pk}-c_x, v_{pk}) \\cdot \\nabla z''_\\rho','rebuild W'};
+    titles = {'+c_x^{rel} dz''_\\rho/dx  (W up+)','-(u_{pk}-c_x, v_{pk}) \\cdot \\nabla z''_\\rho','rebuild W  (up+)'};
     vals = [grid.term1(:); grid.term2(:); grid.rebuild_w(:)];
     lim = max(abs(vals(isfinite(vals))));
     if isempty(lim) || ~isfinite(lim) || lim == 0
@@ -1196,7 +1232,7 @@ function plot_three_panel(path, grid, title_prefix)
         title(titles{k});
         xlabel('x/R'); ylabel('y/R');
     end
-    sgtitle([title_prefix '  (10^{-6} m s^{-1})'], 'Interpreter', 'tex');
+    sgtitle([title_prefix '  W upward-positive (10^{-6} m s^{-1})'], 'Interpreter', 'tex');
     tmp_path = [tempname(fileparts(path)) '.png'];
     try
         exportgraphics(fig, tmp_path, 'Resolution', 180);
@@ -1217,7 +1253,7 @@ end
 function plot_wpk_validation(path, grid, title_prefix)
     fig = figure('Visible','off','Position',[100 100 1020 430]);
     fields = {'rebuild_w','wpk'};
-    titles = {'rebuild W','observed I\\_Wpk'};
+    titles = {'rebuild W (up+)','observed I\\_Wpk (up+)'};
     vals = [grid.rebuild_w(:); grid.wpk(:)];
     lim = max(abs(vals(isfinite(vals))));
     if isempty(lim) || ~isfinite(lim) || lim == 0
@@ -1264,8 +1300,8 @@ end
 
 function plot_sensitivity(path, grid, title_prefix)
     fig = figure('Visible','off','Position',[100 100 1180 900]);
-    fields = {'rebuild_plus_abs','rebuild_minus_rel','term1_plus','term1_minus'};
-    titles = {'+c dz'' + u_{pk}\\cdot grad','-c dz'' + (u_{pk}-c_x)\\cdot grad','term1 plus','term1 minus'};
+    fields = {'rebuild_w','rebuild_w_raw_depth_positive','term1','term2'};
+    titles = {'main W upward-positive','raw W depth-positive','term1 W up+','term2 W up+'};
     vals = [];
     for k = 1:numel(fields)
         vals = [vals; grid.(fields{k})(:)]; %#ok<AGROW>
@@ -1369,7 +1405,7 @@ function cmap = redblue_colormap()
     cmap = [r(:), g(:), b(:)];
 end
 
-function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
+function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, crossing_lats, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
     fid = fopen(path, 'w');
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建方法与假定\\n\\n');
     fprintf(fid, '- Argo 主数据源：`%s`\\n', argo_mat);
@@ -1379,7 +1415,7 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_r
     fprintf(fid, '- 输出根目录：`%s`\\n', output_root);
     fprintf(fid, '- 运行范围：`%.1fE-%.1fE, %.1f-%.1f latitude`\\n', bbox(1), bbox(2), bbox(3), bbox(4));
     if strcmp(selection_mode, 'crossing_lat')
-        fprintf(fid, '- 样本选择：涡旋本体 `%.3gR` 跨过 `%.3g latitude`，输出标签 `%s`。Argo profile 不再按纬度带预筛，只由 bbox、parking depth、时间窗和 `0-4R` 空间匹配决定。\\n', intersect_radius_r, target_lat, target_label);
+        fprintf(fid, '- 样本选择：默认 crossing。涡旋本体 `%.3gR` 跨过纬线 `%s`，逐纬线输出 `cross_XX_%.3gR` 目录。Argo profile 不再按纬度带预筛，只由 bbox、parking depth、时间窗和 `0-4R` 空间匹配决定。\\n', intersect_radius_r, crossing_list_text(crossing_lats), intersect_radius_r);
     else
         fprintf(fid, '- 纬度带：');
         for i=1:size(lat_bands,1), fprintf(fid, '`%s` ', lat_band_label(lat_bands(i,1), lat_bands(i,2))); end
@@ -1394,7 +1430,9 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_r
     fprintf(fid, '- BOA 背景模式：`%s`。默认按月份平均 `PDen1000_YYYYMM.mat`，对每个 profile 的 `lon/lat/month` 双线性插值得到背景密度剖面。\\n', boa_background_mode);
     fprintf(fid, '- `z_rho` 反插值：profile 和 BOA 背景均只使用显式 bracket crossing，不再用全剖面 fallback；有效窗口 `%.0f-%.0f m`，`abs(local_drho_dz) >= %.3g`，bracket 厚度 `<= %.0f m`。\\n', z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
     fprintf(fid, '- 默认网格化：Cressman objective mapping。权重 `w=(R_c^2-r^2)/(R_c^2+r^2)`，仅使用 `R_c` 内样本；默认 `R_c=0.5R`、每格至少 `3` 个样本。`sample_count` 是原始 bin 覆盖，`mapped_support` 是 Cressman 支撑样本数。\\n');
-    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = -c_x_rel dz''_rho/dx`，`term2 = (u_pk-c_x_raw, v_pk) · grad(z''_rho)`。\\n');
+    fprintf(fid, '- 深度变量约定：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 均保存为正深度向下，便于海洋剖面阅读。\\n');
+    fprintf(fid, '- W 符号约定：`rebuild_w_m_s`、`term1_m_s`、`term2_m_s` 统一为向上为正，与历史 `I_Wpk` 中 `z=-Depth` 后计算 `Dz/Dt` 的口径一致；同时保留 `rebuild_w_raw_depth_positive_m_s` 作为深度向下正公式对照。\\n');
+    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`。\\n');
     fprintf(fid, '- BOA_Argo 只作为 gridded 密度背景，不直接推导背景速度。\\n\\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\\n');
     fclose(fid);
@@ -1415,7 +1453,8 @@ function write_group_doc(path, matches, grid, polarity, band_label)
     valid_cells = sum(isfinite(grid.rebuild_w(:)));
     valid_fraction = valid_cells / numel(grid.count);
     fprintf(fid, '- 有样本支撑网格：`%d / %d (%.2f%%)`。\\n', valid_cells, numel(grid.count), valid_fraction * 100);
-    fprintf(fid, '- 输出：`matched_core_argo.csv`、`composite_grid.npz`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\\n');
+    fprintf(fid, '- 符号约定：W 向上为正；`z_rho` 和 `z_rho_anom` 为正深度向下。\\n');
+    fprintf(fid, '- 输出：`matched_core_argo.csv`、`composite_grid.npz`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`、`velocity_sign_sensitivity.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\\n');
     fclose(fid);
 end
 
@@ -1423,8 +1462,8 @@ function write_summary_doc(path, summary_rows, output_root)
     fid = fopen(path, 'w');
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建运行摘要\\n\\n');
     fprintf(fid, '- 输出根目录：`%s`\\n', output_root);
-    fprintf(fid, '- 主图变量：`term1 = -c_x_rel dz''_rho/dx`，`term2 = (u_pk-c_x_raw, v_pk) · grad(z''_rho)`，`rebuild_W = term1 + term2`。\\n');
-    fprintf(fid, '- 单位：JSON/NPZ 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\\n');
+    fprintf(fid, '- 主图变量：W 向上为正，`term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`。\\n');
+    fprintf(fid, '- 深度变量：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 仍为正深度向下；JSON/NPZ 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\\n');
     fprintf(fid, '- 若使用 `--max-matches-per-group` 做 smoke run，覆盖率会很低；正式结果应使用默认 `0` 读取全部匹配。\\n\\n');
     fprintf(fid, '| polarity | lat_band | matches | unique Argo | duplicated | 0-1R | 1-2R | 2-4R | valid grid %% | BOA bg %% | c_x_rel m/s | corr W/Wpk | corr sample/Wpk | q95 rebuild | q95 sample | q95 Wpk |\\n');
     fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\\n');
@@ -1432,6 +1471,14 @@ function write_summary_doc(path, summary_rows, output_root)
         fprintf(fid, '| %s | %s | %d | %d | %d | %d | %d | %d | %.2f | %.2f | %.6g | %.3g | %.3g | %.3g | %.3g | %.3g |\\n', summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,7}, summary_rows{i,8}, summary_rows{i,10} * 100, summary_rows{i,17} * 100, summary_rows{i,13}, summary_rows{i,19}, summary_rows{i,20}, summary_rows{i,21}, summary_rows{i,22}, summary_rows{i,23});
     end
     fclose(fid);
+end
+
+function text = crossing_list_text(crossing_lats)
+    parts = cell(1, numel(crossing_lats));
+    for i = 1:numel(crossing_lats)
+        parts{i} = lat_token(crossing_lats(i));
+    end
+    text = strjoin(parts, ',');
 end
 """
     return (
@@ -1442,6 +1489,7 @@ end
         .replace("@OUTPUT_ROOT@", output_root)
         .replace("@BBOX@", bbox)
         .replace("@LAT_BANDS@", lat_bands)
+        .replace("@CROSSING_LATS@", crossing_lats)
         .replace("@SELECTION_MODE@", str(args.selection_mode).replace("'", "''"))
         .replace("@TARGET_LAT@", f"{float(args.target_lat):.12g}")
         .replace("@INTERSECT_RADIUS_R@", f"{float(args.intersect_radius_r):.12g}")
@@ -1482,9 +1530,15 @@ def main() -> int:
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
     parser.add_argument("--lat-bands", type=parse_lat_bands, default=parse_lat_bands(DEFAULT_LAT_BANDS))
     parser.add_argument(
+        "--crossing-lats",
+        type=parse_crossing_lats,
+        default=None,
+        help="Comma-separated crossing latitudes. Defaults to -60,-50,...,60 unless --target-lat is explicitly used as a single-lat shortcut.",
+    )
+    parser.add_argument(
         "--selection-mode",
         choices=("lat_band", "crossing_lat"),
-        default="lat_band",
+        default="crossing_lat",
         help="Choose standard latitude-band sampling or eddies whose radius crosses a target latitude.",
     )
     parser.add_argument("--target-lat", type=float, default=20.0)
@@ -1570,7 +1624,23 @@ def main() -> int:
         default=0,
         help="Debug/smoke limit. Use 0 for all matched profiles.",
     )
-    args = parser.parse_args()
+    raw_argv = sys.argv[1:]
+    argv: list[str] = []
+    i = 0
+    while i < len(raw_argv):
+        if raw_argv[i] == "--crossing-lats" and i + 1 < len(raw_argv):
+            argv.append(f"--crossing-lats={raw_argv[i + 1]}")
+            i += 2
+        else:
+            argv.append(raw_argv[i])
+            i += 1
+    args = parser.parse_args(argv)
+    target_lat_explicit = any(item == "--target-lat" or item.startswith("--target-lat=") for item in raw_argv)
+    if args.crossing_lats is None:
+        if args.selection_mode == "crossing_lat" and target_lat_explicit:
+            args.crossing_lats = [args.target_lat]
+        else:
+            args.crossing_lats = parse_crossing_lats(DEFAULT_CROSSING_LATS)
     npz_paths = run_matlab_pipeline(args)
     for path in npz_paths:
         print(path)

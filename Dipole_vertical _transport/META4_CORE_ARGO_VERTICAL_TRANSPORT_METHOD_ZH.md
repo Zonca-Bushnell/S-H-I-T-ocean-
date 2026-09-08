@@ -8,7 +8,7 @@
 - Argo 主数据源：`F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat`
 - 历史速度/观测 W 校准源：`F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat`
 - META4.0 涡旋源：`F:\Eddy\Eddy\META4.0_DT_allsat`
-- 结果根目录：`E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg`
+- 结果根目录：`E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg`
 
 Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。历史
 `Argo1000m_UVW_TSDen_199601_202306.mat` 不作为正式密度口径，但修正版默认
@@ -18,10 +18,13 @@ Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。历史
 ## 样本选择
 
 - 区域：全球 Argo 常规有效覆盖带 `0E-360E, 60S-60N`。
-- 纬度带：默认按 5 度分带，从 `60S-55S` 到 `55N-60N`。
-- 可选 crossing 模式：`--selection-mode crossing_lat --target-lat 20 --intersect-radius-r 1`
-  会选择涡旋本体 `1R` 跨过目标纬线的 META 涡旋；此时 Argo 不按纬度带预筛，
+- 默认 crossing：`--selection-mode crossing_lat`，默认纬线为
+  `60S,50S,40S,30S,20S,10S,00N,10N,20N,30N,40N,50N,60N`。
+- 每条纬线选择涡旋本体 `1R` 跨过该纬线的 META 涡旋；此时 Argo 不按纬度带预筛，
   只由 bbox、Core parking depth、时间窗和 `0-4R` 空间匹配决定。
+- 若只想跑单条纬线，可使用 `--target-lat 20`；若显式给出多条纬线，
+  使用 `--crossing-lats -60,-50,...,60`，其优先级高于 `--target-lat`。
+- 纬度带模式保留为对照：`--selection-mode lat_band --lat-bands 20:25`。
 - 可选重复匹配：`--match-mode all` 会让同一条 Argo profile 在所有满足时间窗和
   `0-4R` 的涡旋坐标系中重复投影；默认 `--match-mode nearest` 仍只归属最近
   `r/R` 涡旋，避免重复计数。
@@ -30,26 +33,26 @@ Argo 使用 TEOS-10 派生密度变量，默认读取 `I_sigma1`。历史
 - 空间匹配：以 META 涡心为原点，以 `final_radius` 为 `R`，保留 `0-4R`
   内 profile，并标记 `0-1R`、`1-2R`、`2-4R`。
 - 极性：cyclonic 和 anticyclonic 分开计算，并输出 combined 汇总。
-- 目录标签：纬度带使用 `60S_55S`、`05S_00N`、`00N_05N`、`55N_60N`
-  这类半球显式标签，避免南半球被误标为 `N`。
+- 目录标签：crossing 使用 `cross_20N_1R`、`cross_50S_1R`；lat-band 对照使用
+  `60S_55S`、`05S_00N`、`00N_05N`、`55N_60N` 这类半球显式标签。
 
 ## 速度与垂直速度分解
 
 修正版默认重建：
 
 ```text
-rebuild_W = -c_x_rel * dz'_rho/dx + (u_pk - c_x_raw, v_pk) · grad(z'_rho)
+rebuild_W_up = +c_x_rel * dz'_rho/dx - (u_pk - c_x_raw, v_pk) · grad(z'_rho)
 ```
 
 其中：
 
 - `c_x_raw`：从 META track 相邻轨迹点中央差分得到的局地东西向传播速度。
-- `u_bg`：同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值。
+- `u_bg`：同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值。
 - `c_x_rel = mean(c_x_raw) - mean(u_bg)`。
 - 默认 `--velocity-source argo1000m_match`：使用历史文件的 `I_Upk/I_Vpk`
   作为 parking drift；旧的相邻 profile 位置差近似仅保留为
   `--velocity-source profile_diff` 对照。
-- `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
+- `rho0`：默认取每个 crossing 组/极性内，匹配 Core Argo 在实际 parking depth
   处 `I_sigma1` 的中位数，作为共同目标等密面。
 - `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
 - 默认推荐 `--z-mode anomaly_boa_climatology`：使用
@@ -91,6 +94,10 @@ mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 `--grid-mapping scattered`。如果使用 `--max-matches-per-group 200` 做 smoke run，
 覆盖和插值支撑都会偏低；正式结果应使用默认 `0` 读取全部匹配样本。
 
+符号约定：W 统一向上为正，与历史 `I_Wpk` 一致；但 `z_rho_m`、`z_rho_bg_m`
+和 `z_rho_anom_m` 仍按正深度向下保存和标识。JSON/NPZ 里同时保留
+`rebuild_w_raw_depth_positive_m_s`，用于检查深度向下正公式的原始符号。
+
 脚本还输出 `gradient_order_comparison.png`：左图是主口径“先 Cressman 合成
 `z'_rho` 后求梯度”，右图是轻量诊断“逐样本局地平面梯度后再合成 W”。
 为避免诊断项拖慢全样本，后者默认最多使用 `--sample-gradient-max-profiles 1000`
@@ -109,13 +116,14 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py"
 ```
 
-默认入口即全球 `60S-60N`、5 度分带、全样本。调试或 smoke run 可限制每组
+默认入口即全球 `60S-60N`、每 10 度 crossing、全样本。调试或 smoke run 可限制每组
 匹配数，并建议输出到单独 smoke 目录：
 
 ```powershell
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
-  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg_smoke" `
+  --crossing-lats -20,0,20 `
+  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg_smoke" `
   --max-matches-per-group 200
 ```
 
@@ -144,16 +152,16 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   --rho0-mode profile
 ```
 
-若需要按“涡旋本体跨过某条纬线”而不是涡心纬度带选样本，可使用：
+若需要显式跑全量 crossing，可使用：
 
 ```powershell
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --selection-mode crossing_lat `
-  --target-lat 20 `
+  --crossing-lats -60,-50,-40,-30,-20,-10,0,10,20,30,40,50,60 `
   --intersect-radius-r 1 `
   --bbox 0,360,-60,60 `
-  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_20N_1R"
+  --output-root "E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg"
 ```
 
 若需要测试一条 Argo 重复参与多个涡旋 composite，可加：
@@ -179,7 +187,8 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 ```
 
 该目录额外输出 `wpk_validation.png` 和 `velocity_sign_sensitivity.png`，用于
-比较正式重建 W、历史观测 `I_Wpk` 和速度/符号敏感性。
+比较正式重建 W、历史观测 `I_Wpk` 和速度/符号敏感性。旧的单独临时
+`I_Wpk` 绘图入口已删除；`I_Wpk` 现在只作为正式程序里的观测校验字段保存和出图。
 
 ## 参考依据
 
