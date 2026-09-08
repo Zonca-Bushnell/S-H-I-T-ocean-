@@ -27,6 +27,7 @@ fast_sensitivity_2d = @FAST_SENSITIVITY_2D@;
 sensitivity_workers = @SENSITIVITY_WORKERS@;
 sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
+matlab_profile_enabled = @MATLAB_PROFILE@;
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
 write_grid_nc_flag = @WRITE_GRID_NC@;
@@ -62,6 +63,12 @@ if exist(output_root, 'dir') ~= 7
 end
 if exist(cache_root, 'dir') ~= 7
     mkdir(cache_root);
+end
+
+if matlab_profile_enabled
+    profile clear;
+    profile on;
+    log_step('MATLAB profiler enabled.');
 end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
@@ -181,12 +188,14 @@ for p = 1:numel(polarities)
             mkdir(group_dir);
         end
         if strcmp(vertical_mode, 'isopycnal_depth_stack') || strcmp(vertical_mode, 'thermal_wind_depth_stack')
+            group_timer = tic;
             [matches, grid3d] = build_group_3d(argo_band, meta_band, polarity, band_label, ...
                 argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
                 meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
                 time_window_days, grid_n, min_bin_count, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, ...
                 z_mode, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, section_axis, section_half_width_r, vertical_mode, cache_root);
             grid_file = write_group_outputs_3d(group_dir, matches, grid3d, polarity, band_label);
+            log_step(sprintf('%s %s 3D group finished in %.1f s', polarity, band_label, toc(group_timer)));
             grid_files{end+1} = grid_file; %#ok<SAGROW>
             summary_rows(end+1,:) = summary_from_matches_3d(matches, grid3d, polarity, band_label, group_dir); %#ok<SAGROW>
         else
@@ -216,6 +225,14 @@ if strcmp(vertical_mode, 'isopycnal_depth_stack') || strcmp(vertical_mode, 'ther
     write_summary_doc_3d(fullfile(output_root, 'RUN_SUMMARY_ZH.md'), summary_rows, output_root, depth_levels, section_axis, section_half_width_r);
 else
     write_summary_doc(fullfile(output_root, 'RUN_SUMMARY_ZH.md'), summary_rows, output_root);
+end
+
+if matlab_profile_enabled
+    profile_info = profile('info');
+    profile off;
+    save(fullfile(output_root, 'matlab_profile_info.mat'), 'profile_info', '-v7.3');
+    profsave(profile_info, fullfile(output_root, 'matlab_profile_html'));
+    log_step('MATLAB profiler saved.');
 end
 
 manifest = struct();
@@ -771,6 +788,7 @@ function [matches, grid3d] = build_group_3d(argo_idx, meta_idx, polarity, band_l
     time_window_days, grid_n, min_bin_count, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, ...
     z_mode, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, section_axis, section_half_width_r, vertical_mode, cache_root)
 
+    match_timer = tic;
     if strcmp(match_mode, 'all')
         rows = build_match_rows_time_blocks(argo_idx, meta_idx, polarity, band_label, ...
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
@@ -782,8 +800,11 @@ function [matches, grid3d] = build_group_3d(argo_idx, meta_idx, polarity, band_l
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
             time_window_days, max_matches_per_group, deg_m);
     end
+    log_step(sprintf('%s %s 3D matching produced %d rows in %.1f s', polarity, band_label, size(rows, 1), toc(match_timer)));
     matches = rows;
+    composite_timer = tic;
     grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels, grid_n, min_bin_count, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, min_drho_dz, max_rho_bracket_dz_m, section_axis, section_half_width_r, vertical_mode, cache_root, polarity, band_label, match_mode);
+    log_step(sprintf('%s %s 3D composite finished in %.1f s', polarity, band_label, toc(composite_timer)));
     grid3d.match_mode = match_mode;
     grid3d.z_mode = z_mode;
     grid3d.min_drho_dz = min_drho_dz;
@@ -1355,71 +1376,106 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     edges = linspace(-4, 4, grid_n + 1);
     dx_m = mean(diff(x_vec)) * grid3d.mean_radius_m;
     dy_m = mean(diff(y_vec)) * grid3d.mean_radius_m;
+    profile_timer = tic;
     profile_cache = profile_depth_stack_cache(matches, rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m, cache_root, polarity, band_label, match_mode);
+    log_step(sprintf('%s %s profile depth cache ready in %.1f s', polarity, band_label, toc(profile_timer)));
     [~, unique_pos] = ismember(argo_indices, profile_cache.argo_indices);
     finite_unique = unique_pos > 0;
+    base_timer = tic;
     [base_uv, base_support] = cressman_map_multi(x(finite_unique), y(finite_unique), [u(finite_unique), v(finite_unique)], X, Y, cressman_radius_r, cressman_min_obs);
+    log_step(sprintf('%s %s base velocity Cressman ready in %.1f s', polarity, band_label, toc(base_timer)));
     u_base = base_uv(:,:,1);
     v_base = base_uv(:,:,2);
     base_support = base_support >= cressman_min_obs;
     rho_grids = nan3;
     support3 = false(grid_n, grid_n, nz);
-    for zz = 1:nz
-        z_anom_sample = nan(size(x));
-        rho_anom_sample = nan(size(x));
-        profile_valid = false(size(x));
-        boa_valid = false(size(x));
-        z_anom_sample(finite_unique) = profile_cache.z_anom(unique_pos(finite_unique), zz);
-        rho_anom_sample(finite_unique) = profile_cache.rho_anom(unique_pos(finite_unique), zz);
-        profile_valid(finite_unique) = profile_cache.profile_valid(unique_pos(finite_unique), zz);
-        boa_valid(finite_unique) = profile_cache.boa_valid(unique_pos(finite_unique), zz);
-        good = isfinite(x) & isfinite(y) & isfinite(z_anom_sample) & isfinite(rho_anom_sample) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & hypot(x, y) <= 4;
-        grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
-        grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
-        xb = discretize(x(good), edges);
-        yb = discretize(y(good), edges);
-        bin_ok = isfinite(xb) & isfinite(yb);
-        if any(bin_ok)
-            subs = [yb(bin_ok), xb(bin_ok)];
-            grid3d.count(:,:,zz) = accumarray(subs, 1, [grid_n grid_n], @sum, 0);
-        end
-        if strcmp(grid_mapping, 'cressman')
-            [mapped, support_all] = cressman_map_multi(x(good), y(good), [z_anom_sample(good), rho_anom_sample(good)], X, Y, cressman_radius_r, cressman_min_obs);
-            z_grid = mapped(:,:,1);
-            rho_grid = mapped(:,:,2);
-            support = support_all >= cressman_min_obs;
-            grid3d.mapped_support(:,:,zz) = support_all;
-        elseif strcmp(grid_mapping, 'scattered')
-            z_grid = scattered_map(x(good), y(good), z_anom_sample(good), X, Y);
-            rho_grid = scattered_map(x(good), y(good), rho_anom_sample(good), X, Y);
-            support = isfinite(z_grid) & isfinite(rho_grid) & hypot(X, Y) <= 4;
-            grid3d.mapped_support(:,:,zz) = double(support);
-        else
-            z_grid = nan(size(X)); rho_grid = nan(size(X));
+    z_samples = nan(numel(x), nz);
+    rho_samples = nan(numel(x), nz);
+    z_samples(finite_unique,:) = profile_cache.z_anom(unique_pos(finite_unique), :);
+    rho_samples(finite_unique,:) = profile_cache.rho_anom(unique_pos(finite_unique), :);
+    base_good = isfinite(x) & isfinite(y) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & hypot(x, y) <= 4;
+    z_samples(~base_good,:) = NaN;
+    rho_samples(~base_good,:) = NaN;
+    valid_pair = isfinite(z_samples) & isfinite(rho_samples);
+    z_samples(~valid_pair) = NaN;
+    rho_samples(~valid_pair) = NaN;
+    map_timer = tic;
+    if strcmp(grid_mapping, 'cressman')
+        [mapped_stack, support_stack] = cressman_map_multi_missing(x, y, [z_samples, rho_samples], X, Y, cressman_radius_r, cressman_min_obs);
+        for zz = 1:nz
+            grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
+            grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
+            good = base_good & valid_pair(:,zz);
+            xb = discretize(x(good), edges);
+            yb = discretize(y(good), edges);
+            bin_ok = isfinite(xb) & isfinite(yb);
             if any(bin_ok)
                 subs = [yb(bin_ok), xb(bin_ok)];
-                z_vals = z_anom_sample(good); rho_vals = rho_anom_sample(good);
-                z_grid = accumarray(subs, z_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
-                rho_grid = accumarray(subs, rho_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+                grid3d.count(:,:,zz) = accumarray(subs, 1, [grid_n grid_n], @sum, 0);
             end
-            support = grid3d.count(:,:,zz) >= min_bin_count;
-            grid3d.mapped_support(:,:,zz) = grid3d.count(:,:,zz);
+            z_grid = mapped_stack(:,:,zz);
+            rho_grid = mapped_stack(:,:,nz+zz);
+            support = support_stack(:,:,zz) >= cressman_min_obs & support_stack(:,:,nz+zz) >= cressman_min_obs;
+            grid3d.mapped_support(:,:,zz) = min(support_stack(:,:,zz), support_stack(:,:,nz+zz));
+            if smooth_passes > 0
+                z_grid = smooth2_supported(z_grid, support, smooth_passes);
+                rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
+            end
+            grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
+            grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
+            rho_grids(:,:,zz) = rho_grid;
+            support3(:,:,zz) = support;
         end
-        if smooth_passes > 0
-            z_grid = smooth2_supported(z_grid, support, smooth_passes);
-            rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
+    else
+        for zz = 1:nz
+            z_anom_sample = z_samples(:,zz);
+            rho_anom_sample = rho_samples(:,zz);
+            good = base_good & valid_pair(:,zz);
+            grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
+            grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
+            xb = discretize(x(good), edges);
+            yb = discretize(y(good), edges);
+            bin_ok = isfinite(xb) & isfinite(yb);
+            if any(bin_ok)
+                subs = [yb(bin_ok), xb(bin_ok)];
+                grid3d.count(:,:,zz) = accumarray(subs, 1, [grid_n grid_n], @sum, 0);
+            end
+            if strcmp(grid_mapping, 'scattered')
+                z_grid = scattered_map(x(good), y(good), z_anom_sample(good), X, Y);
+                rho_grid = scattered_map(x(good), y(good), rho_anom_sample(good), X, Y);
+                support = isfinite(z_grid) & isfinite(rho_grid) & hypot(X, Y) <= 4;
+                grid3d.mapped_support(:,:,zz) = double(support);
+            else
+                z_grid = nan(size(X)); rho_grid = nan(size(X));
+                if any(bin_ok)
+                    subs = [yb(bin_ok), xb(bin_ok)];
+                    z_vals = z_anom_sample(good); rho_vals = rho_anom_sample(good);
+                    z_grid = accumarray(subs, z_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+                    rho_grid = accumarray(subs, rho_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+                end
+                support = grid3d.count(:,:,zz) >= min_bin_count;
+                grid3d.mapped_support(:,:,zz) = grid3d.count(:,:,zz);
+            end
+            if smooth_passes > 0
+                z_grid = smooth2_supported(z_grid, support, smooth_passes);
+                rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
+            end
+            grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
+            grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
+            rho_grids(:,:,zz) = rho_grid;
+            support3(:,:,zz) = support;
         end
-        grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
-        grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
-        rho_grids(:,:,zz) = rho_grid;
-        support3(:,:,zz) = support;
     end
+    log_step(sprintf('%s %s depth-stack Cressman mapped %d layers in %.1f s', polarity, band_label, nz, toc(map_timer)));
     if strcmp(vertical_mode, 'thermal_wind_depth_stack')
+        tw_timer = tic;
         [grid3d.u_tw, grid3d.v_tw] = thermal_wind_velocity_stack(rho_grids, support3, u_base, v_base, base_support, depth_levels, dx_m, dy_m, grid3d.thermal_wind_f_s_1);
+        log_step(sprintf('%s %s thermal-wind velocity stack ready in %.1f s', polarity, band_label, toc(tw_timer)));
     else
         grid3d.u_tw = repmat(u_base, 1, 1, nz);
         grid3d.v_tw = repmat(v_base, 1, 1, nz);
     end
+    w_timer = tic;
     for zz = 1:nz
         z_grid = grid3d.z_anom(:,:,zz);
         support = support3(:,:,zz) & isfinite(grid3d.u_tw(:,:,zz)) & isfinite(grid3d.v_tw(:,:,zz));
@@ -1432,6 +1488,7 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
             grid3d.w(:,:,zz) = mask_to_support(term1 + term2, support);
         end
     end
+    log_step(sprintf('%s %s W terms computed for %d layers in %.1f s', polarity, band_label, nz, toc(w_timer)));
     [grid3d.section_coord, grid3d.section_w] = section_from_grid3d(grid3d, section_axis, section_half_width_r);
 end
 
@@ -1684,6 +1741,124 @@ function [Z, support_count] = cressman_map_multi(x, y, V, X, Y, radius_r, min_ob
     support_count(outside) = 0;
 end
 
+function [Z, support_count] = cressman_map_multi_missing(x, y, V, X, Y, radius_r, min_obs)
+    n_var = size(V, 2);
+    Z = NaN([size(X), n_var]);
+    support_count = zeros([size(X), n_var]);
+    good_xy = isfinite(x) & isfinite(y) & any(isfinite(V), 2) & hypot(x, y) <= 4;
+    x = x(good_xy);
+    y = y(good_xy);
+    V = V(good_xy,:);
+    if isempty(x) || ~isfinite(radius_r) || radius_r <= 0
+        return
+    end
+    global USE_GPU_CRESSMAN;
+    if USE_GPU_CRESSMAN
+        try
+            [Z, support_count] = cressman_map_multi_missing_gpu(x, y, V, X, Y, radius_r, min_obs);
+            return
+        catch ME
+            warning('GPU missing-aware Cressman failed; falling back to CPU for this map: %s', ME.message);
+        end
+    end
+    r2_limit = radius_r ^ 2;
+    finite_v = isfinite(V);
+    V0 = V;
+    V0(~finite_v) = 0;
+    for ii = 1:numel(X)
+        d2 = (x - X(ii)).^2 + (y - Y(ii)).^2;
+        inside = d2 < r2_limit;
+        if ~any(inside)
+            continue
+        end
+        w = (r2_limit - d2(inside)) ./ (r2_limit + d2(inside));
+        ok_w = isfinite(w) & w > 0;
+        if ~any(ok_w)
+            continue
+        end
+        w = w(ok_w);
+        finite_inside = finite_v(inside,:);
+        finite_inside = finite_inside(ok_w,:);
+        vals = V0(inside,:);
+        vals = vals(ok_w,:);
+        counts = sum(finite_inside, 1);
+        denom = sum(w .* finite_inside, 1);
+        mapped = sum(w .* vals, 1) ./ denom;
+        ok = counts >= min_obs & denom > 0;
+        support_count(ii + (0:n_var-1) * numel(X)) = counts;
+        if any(ok)
+            Z(ii + find(ok) * numel(X) - numel(X)) = mapped(ok);
+        end
+    end
+    outside = hypot(X, Y) > 4;
+    for kk = 1:n_var
+        tmp = Z(:,:,kk);
+        tmp(outside) = NaN;
+        Z(:,:,kk) = tmp;
+        tmp_count = support_count(:,:,kk);
+        tmp_count(outside) = 0;
+        support_count(:,:,kk) = tmp_count;
+    end
+end
+
+function [Z, support_count] = cressman_map_multi_missing_gpu(x, y, V, X, Y, radius_r, min_obs)
+    n_grid = numel(X);
+    n_var = size(V, 2);
+    Z = NaN([size(X), n_var]);
+    support_count = zeros([size(X), n_var]);
+    xg = gpuArray(single(x(:)));
+    yg = gpuArray(single(y(:)));
+    valid_cpu = isfinite(V);
+    V0 = single(V);
+    V0(~valid_cpu) = 0;
+    Vg = gpuArray(V0);
+    valid_g = gpuArray(single(valid_cpu));
+    Xv = single(X(:)');
+    Yv = single(Y(:)');
+    r2_limit = single(radius_r ^ 2);
+    grid_chunk = 1024;
+    var_chunk = 64;
+    for start_idx = 1:grid_chunk:n_grid
+        stop_idx = min(n_grid, start_idx + grid_chunk - 1);
+        cols = start_idx:stop_idx;
+        Xg = gpuArray(Xv(cols));
+        Yg = gpuArray(Yv(cols));
+        d2 = (xg - Xg) .^ 2 + (yg - Yg) .^ 2;
+        inside = d2 < r2_limit;
+        W = (r2_limit - d2) ./ (r2_limit + d2);
+        W(~inside) = 0;
+        Wt = W';
+        inside_t = single(inside');
+        for var0 = 1:var_chunk:n_var
+            var1 = min(n_var, var0 + var_chunk - 1);
+            vars = var0:var1;
+            valid_chunk = valid_g(:,vars);
+            counts = inside_t * valid_chunk;
+            denom = Wt * valid_chunk;
+            numerator = Wt * Vg(:,vars);
+            mapped = numerator ./ denom;
+            counts_cpu = double(gather(counts));
+            denom_cpu = double(gather(denom));
+            mapped_cpu = double(gather(mapped));
+            ok = counts_cpu >= min_obs & denom_cpu > 0;
+            block = nan(numel(cols), numel(vars));
+            block(ok) = mapped_cpu(ok);
+            linear_idx = cols(:) + (vars - 1) * n_grid;
+            Z(linear_idx) = block;
+            support_count(linear_idx) = counts_cpu;
+        end
+    end
+    outside = hypot(X, Y) > 4;
+    for kk = 1:n_var
+        tmp = Z(:,:,kk);
+        tmp(outside) = NaN;
+        Z(:,:,kk) = tmp;
+        tmp_count = support_count(:,:,kk);
+        tmp_count(outside) = 0;
+        support_count(:,:,kk) = tmp_count;
+    end
+end
+
 function [Z, support_count] = cressman_map_multi_gpu(x, y, V, X, Y, radius_r, min_obs)
     Z = NaN([size(X), size(V, 2)]);
     support_count = zeros(size(X));
@@ -1843,21 +2018,37 @@ function grid_file = write_group_outputs_3d(group_dir, matches, grid3d, polarity
     grid3d.duplicate_match_count = grid3d.match_count - grid3d.unique_argo_count;
     header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0_parking','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched','boa_rho_crossing_count','boa_rho_bracket_dz_m','boa_local_drho_dz','boa_bg_valid'};
     global WRITE_MATCHED_CSV WRITE_GRID_JSON WRITE_GRID_NC;
+    io_timer = tic;
+    stage_timer = tic;
     write_matched_table_mat(fullfile(group_dir, 'matched_core_argo_3d.mat'), header, matches);
+    log_step(sprintf('%s %s wrote matched MAT in %.1f s', polarity, band_label, toc(stage_timer)));
     if WRITE_MATCHED_CSV
+        stage_timer = tic;
         writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo_3d.csv'));
+        log_step(sprintf('%s %s wrote matched CSV in %.1f s', polarity, band_label, toc(stage_timer)));
     end
     grid_file = fullfile(group_dir, 'w_3d_grid.mat');
+    stage_timer = tic;
     write_grid_3d_mat(grid_file, grid3d, polarity, band_label);
+    log_step(sprintf('%s %s wrote 3D grid MAT in %.1f s', polarity, band_label, toc(stage_timer)));
     if WRITE_GRID_NC
+        stage_timer = tic;
         write_grid_3d_nc_file(fullfile(group_dir, 'w_3d_grid.nc'), grid3d, polarity, band_label);
+        log_step(sprintf('%s %s wrote 3D grid NetCDF in %.1f s', polarity, band_label, toc(stage_timer)));
     end
     if WRITE_GRID_JSON
+        stage_timer = tic;
         write_grid_json_3d(fullfile(group_dir, 'w_3d_grid.json'), grid3d, polarity, band_label);
+        log_step(sprintf('%s %s wrote 3D grid JSON in %.1f s', polarity, band_label, toc(stage_timer)));
     end
+    stage_timer = tic;
     plot_3d_section(fullfile(group_dir, ['w_3d_section_' grid3d.section_axis '.png']), grid3d, [polarity ' ' band_label]);
+    log_step(sprintf('%s %s wrote section PNG in %.1f s', polarity, band_label, toc(stage_timer)));
+    stage_timer = tic;
     plot_3d_depth_slices(fullfile(group_dir, 'w_3d_depth_slices.png'), grid3d, [polarity ' ' band_label]);
+    log_step(sprintf('%s %s wrote depth-slice PNG in %.1f s', polarity, band_label, toc(stage_timer)));
     write_group_doc_3d(fullfile(group_dir, 'METHOD_3D_W_ZH.md'), matches, grid3d, polarity, band_label);
+    log_step(sprintf('%s %s total 3D output write time %.1f s', polarity, band_label, toc(io_timer)));
 end
 
 function C = clean_write_cells(C)
