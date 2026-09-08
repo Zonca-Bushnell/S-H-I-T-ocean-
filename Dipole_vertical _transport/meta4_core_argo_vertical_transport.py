@@ -17,6 +17,7 @@ DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat")
 DEFAULT_HISTORY_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
 DEFAULT_BOA_PDEN_ROOT = Path(r"F:\Argo_data\Self_BOA_Argo_PotentialDensity")
+DEFAULT_CACHE_ROOT = Path(r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\_cache")
 DEFAULT_OUTPUT_ROOT = Path(
     r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg"
 )
@@ -287,6 +288,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     history_argo_mat = matlab_quote(args.history_argo_mat)
     meta_dir = matlab_quote(args.meta_dir)
     boa_pden_root = matlab_quote(args.boa_pden_root)
+    cache_root = matlab_quote(args.cache_root)
     output_root = matlab_quote(args.output_root)
     manifest = matlab_quote(manifest_path)
     max_matches = int(args.max_matches_per_group)
@@ -297,6 +299,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@HISTORY_ARGO_MAT@", history_argo_mat)
         .replace("@META_DIR@", meta_dir)
         .replace("@BOA_PDEN_ROOT@", boa_pden_root)
+        .replace("@CACHE_ROOT@", cache_root)
         .replace("@OUTPUT_ROOT@", output_root)
         .replace("@BBOX@", bbox)
         .replace("@LAT_BANDS@", lat_bands)
@@ -349,6 +352,7 @@ def main() -> int:
     parser.add_argument("--history-argo-mat", type=Path, default=DEFAULT_HISTORY_ARGO_MAT)
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
     parser.add_argument("--boa-pden-root", type=Path, default=DEFAULT_BOA_PDEN_ROOT)
+    parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
     parser.add_argument("--lat-bands", type=parse_lat_bands, default=parse_lat_bands(DEFAULT_LAT_BANDS))
@@ -425,9 +429,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--vertical-mode",
-        choices=("single_isopycnal", "isopycnal_depth_stack"),
+        choices=("single_isopycnal", "isopycnal_depth_stack", "thermal_wind_depth_stack"),
         default="single_isopycnal",
-        help="single_isopycnal keeps the existing 2-D parking-depth W. isopycnal_depth_stack builds W(x/R,y/R,z).",
+        help="single_isopycnal keeps the existing 2-D parking-depth W. isopycnal_depth_stack builds W(x/R,y/R,z). thermal_wind_depth_stack extends parking drift vertically with thermal-wind shear.",
     )
     parser.add_argument(
         "--fast-sensitivity-2d",
@@ -455,8 +459,8 @@ def main() -> int:
     parser.add_argument(
         "--depth-levels",
         type=parse_depth_levels,
-        default=parse_depth_levels("100:100:1900"),
-        help="Depth levels for --vertical-mode isopycnal_depth_stack, e.g. 100:100:1900 or 100,200,300.",
+        default=parse_depth_levels("10:10:2000"),
+        help="Depth levels for 3-D vertical modes, e.g. 10:10:2000 or 100,200,300.",
     )
     parser.add_argument(
         "--section-axis",
