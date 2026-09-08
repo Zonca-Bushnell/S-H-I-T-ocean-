@@ -84,6 +84,17 @@ def parse_depth_levels(value: str) -> list[float]:
     return levels
 
 
+def parse_sensitivity_configs(value: str) -> list[str]:
+    allowed = {"baseline", "recommended", "smoother", "strong_support", "low_res_smooth", "high_smooth"}
+    names = [item.strip() for item in value.split(",") if item.strip()]
+    if not names:
+        raise argparse.ArgumentTypeError("--sensitivity-configs must contain at least one name")
+    unknown = sorted(set(names) - allowed)
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown sensitivity config(s): {', '.join(unknown)}")
+    return names
+
+
 def matlab_quote(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "''")
 
@@ -206,19 +217,37 @@ def write_npz_from_w3d_json(json_path: Path, npz_path: Path) -> None:
 
 
 def run_matlab_pipeline(args: argparse.Namespace) -> list[Path]:
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    log_path = args.output_root / "matlab_run.log"
     with tempfile.TemporaryDirectory(prefix="meta4_core_argo_") as tmp:
         tmp_dir = Path(tmp)
         manifest_path = tmp_dir / "manifest.json"
         script_path = tmp_dir / "run_meta4_core_argo.m"
         script_path.write_text(_matlab_script(args, manifest_path), encoding="utf-8")
         cmd = ["matlab", "-batch", f"run('{matlab_quote(script_path)}')"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-        if proc.returncode != 0:
+        with log_path.open("w", encoding="utf-8", errors="replace") as log:
+            log.write(f"Command: {' '.join(cmd)}\n")
+            log.flush()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+            returncode = proc.wait()
+        if returncode != 0:
+            tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:])
             raise RuntimeError(
                 "MATLAB vertical-transport pipeline failed.\n"
                 f"Command: {' '.join(cmd)}\n"
-                f"STDOUT:\n{proc.stdout}\n"
-                f"STDERR:\n{proc.stderr}"
+                f"Log: {log_path}\n"
+                f"Log tail:\n{tail}"
             )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     output_root = Path(manifest.get("output_root", args.output_root))
@@ -243,6 +272,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     lat_bands = "; ".join(f"{lo:.12g} {hi:.12g}" for lo, hi in args.lat_bands)
     crossing_lats = " ".join(f"{lat:.12g}" for lat in args.crossing_lats)
     depth_levels = " ".join(f"{depth:.12g}" for depth in args.depth_levels)
+    sensitivity_configs = " ".join(f"'{name}'" for name in args.sensitivity_configs)
     target_label = latitude_crossing_label(args.target_lat, args.intersect_radius_r)
     argo_mat = matlab_quote(args.argo_mat)
     history_argo_mat = matlab_quote(args.history_argo_mat)
@@ -280,6 +310,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@VERTICAL_MODE@", str(args.vertical_mode).replace("'", "''"))
         .replace("@FAST_SENSITIVITY_2D@", "true" if args.fast_sensitivity_2d else "false")
         .replace("@SENSITIVITY_WORKERS@", str(int(args.workers)))
+        .replace("@SENSITIVITY_CONFIGS@", sensitivity_configs)
         .replace("@COMPUTE_DEVICE@", str(args.compute_device).replace("'", "''"))
         .replace("@DEPTH_LEVELS@", depth_levels)
         .replace("@SECTION_AXIS@", str(args.section_axis).replace("'", "''"))
@@ -389,6 +420,12 @@ def main() -> int:
         "--fast-sensitivity-2d",
         action="store_true",
         help="Run the cached 2-D 20N-style sensitivity sweep: match once, then remap the six built-in Cressman/smoothing configurations.",
+    )
+    parser.add_argument(
+        "--sensitivity-configs",
+        type=parse_sensitivity_configs,
+        default=parse_sensitivity_configs("baseline,recommended,smoother,strong_support,low_res_smooth,high_smooth"),
+        help="Comma-separated subset of fast sensitivity configs to run, e.g. baseline,recommended.",
     )
     parser.add_argument(
         "--workers",

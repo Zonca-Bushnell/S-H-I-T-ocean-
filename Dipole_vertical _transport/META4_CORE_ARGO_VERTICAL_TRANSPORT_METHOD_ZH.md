@@ -120,15 +120,20 @@ mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 
 `--fast-sensitivity-2d` 用于快速判断 20N crossing W 图像碎片/锯齿是否来自
 Cressman 半径、最小支撑样本、网格分辨率和平滑强度。该模式每个极性只做一次
-Argo-META 匹配、`rho0/z_rho` 反插值和 BOA 背景 QC，然后把缓存样本表复用于 6 组
+Argo-META 匹配、`rho0/z_rho` 反插值和 BOA 背景 QC，然后把缓存样本表复用于指定的
 预设参数：`baseline`、`recommended`、`smoother`、`strong_support`、
-`low_res_smooth`、`high_smooth`。
+`low_res_smooth`、`high_smooth`。默认跑全部 6 组；可用
+`--sensitivity-configs baseline,recommended` 收窄到少量高信息组合。
 
 加速默认使用 `--compute-device auto`：若 MATLAB 能访问 GPU，则 Cressman 的距离矩阵
 和权重求和走 `gpuArray` 分块计算；若 GPU 不可用则自动回到 CPU。CPU 模式下参数组合
 可使用 MATLAB 并行池，`--workers` 默认取 CPU 核心数的一半、最多 8。GPU 模式和
 参数组合 `parfor` 不同时启用，避免多个 worker 抢同一张 GPU。此模式仍只输出
 cyclonic 和 anticyclonic，不输出 combined。
+
+`--match-mode all` 下，profile-to-eddy 匹配使用按时间块展开的矩阵化距离计算，并对
+重复出现的唯一 Argo profile 共享 `z_rho` 与 BOA 背景 QC 结果。坐标定义保持不变：
+`x/R` 为局地东西向经度差，`y/R` 为局地南北向纬度差，避免把东西偶极误旋转成南北偶极。
 
 ## BOA_Argo 假定
 

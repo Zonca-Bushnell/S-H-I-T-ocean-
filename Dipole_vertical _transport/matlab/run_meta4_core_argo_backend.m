@@ -24,6 +24,7 @@ z_mode = '@Z_MODE@';
 vertical_mode = '@VERTICAL_MODE@';
 fast_sensitivity_2d = @FAST_SENSITIVITY_2D@;
 sensitivity_workers = @SENSITIVITY_WORKERS@;
+sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
 depth_levels = [@DEPTH_LEVELS@];
 section_axis = '@SECTION_AXIS@';
@@ -43,6 +44,8 @@ deg_m = earth_radius_m * pi / 180;
 density_variable = '@DENSITY_VARIABLE@';
 global USE_GPU_CRESSMAN;
 USE_GPU_CRESSMAN = should_use_gpu(compute_device);
+global QC_WORKERS;
+QC_WORKERS = sensitivity_workers;
 
 if exist(output_root, 'dir') ~= 7
     mkdir(output_root);
@@ -103,7 +106,7 @@ if fast_sensitivity_2d
     grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
         argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
         time_window_days, min_bin_count, plot_filled_gradient, grid_mapping, sample_gradient_max_profiles, rho0_mode, z_mode, boa_clim, ...
-        z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers);
+        z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers, sensitivity_config_names);
     manifest = struct();
     manifest.grid_json_files = grid_json_files;
     manifest.output_root = output_root;
@@ -248,7 +251,7 @@ end
 function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
     argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
     time_window_days, min_bin_count, plot_filled_gradient, grid_mapping, sample_gradient_max_profiles, rho0_mode, z_mode, boa_clim, ...
-    z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers)
+    z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers, sensitivity_config_names)
 
     if isempty(crossing_lats)
         sensitivity_lat = target_lat;
@@ -256,15 +259,16 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
         sensitivity_lat = crossing_lats(1);
     end
     band_label = crossing_label(sensitivity_lat, intersect_radius_r);
-    configs = sensitivity_configs();
+    configs = select_sensitivity_configs(sensitivity_configs(), sensitivity_config_names);
     polarities = {'cyclonic','anticyclonic'};
     summary_rows = {};
     grid_json_files = {};
-    summary_header = {'polarity','config','grid_n','cressman_radius_r','cressman_min_obs','smooth_passes','match_count','unique_argo_count','valid_grid_fraction','mapped_support_median','mapped_support_p10','corr_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','roughness_score','dipole_score','output_dir'};
+    summary_header = {'polarity','config','grid_n','cressman_radius_r','cressman_min_obs','smooth_passes','match_count','unique_argo_count','duplicate_match_count','valid_grid_fraction','mapped_support_median','mapped_support_p10','corr_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','roughness_score','dipole_score','output_dir'};
     for p = 1:numel(polarities)
         polarity = polarities{p};
+        stage_timer = tic;
         meta_file = find_meta_file(meta_dir, polarity);
-        fprintf('Fast sensitivity loading META %s from %s\n', polarity, meta_file);
+        log_step(sprintf('Fast sensitivity loading META %s from %s', polarity, meta_file));
         M = load(meta_file, 'final_lon', 'final_lat', 'final_time', 'final_track', 'final_radius');
         meta_lon = double(M.final_lon);
         meta_lon(meta_lon < 0) = meta_lon(meta_lon < 0) + 360;
@@ -282,11 +286,13 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
             argo_lat_window_m = (intersect_radius_r + 4) * max(meta_radius(meta_band));
             argo_band = find(argo_base_mask & abs(argo_lat - sensitivity_lat) * deg_m <= argo_lat_window_m);
         end
-        [matches, ~] = build_group(argo_band, meta_band, polarity, band_label, ...
+        log_step(sprintf('%s %s candidates: %d Argo profiles, %d META snapshots', polarity, band_label, numel(argo_band), numel(meta_band)));
+        match_timer = tic;
+        matches = build_group_matches_only(argo_band, meta_band, polarity, band_label, ...
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-            time_window_days, configs(1).grid_n, min_bin_count, plot_filled_gradient, grid_mapping, configs(1).smooth_passes, configs(1).cressman_radius_r, configs(1).cressman_min_obs, sample_gradient_max_profiles, rho0_mode, ...
-            z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
+            time_window_days, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
+        log_step(sprintf('%s %s cache built: %d QC matches, %d unique Argo, %.1f s', polarity, band_label, size(matches, 1), count_unique_argo(matches), toc(match_timer)));
         cache_dir = fullfile(output_root, polarity, band_label, '_cache');
         if exist(cache_dir, 'dir') ~= 7
             mkdir(cache_dir);
@@ -296,6 +302,7 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
         grids = cell(numel(configs), 1);
         global USE_GPU_CRESSMAN;
         use_parallel = ~USE_GPU_CRESSMAN && maybe_start_parallel_pool(sensitivity_workers);
+        map_timer = tic;
         if use_parallel
             parfor c = 1:numel(configs)
                 cfg = configs(c);
@@ -307,6 +314,7 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
                 grids{c} = composite_grid(matches, cfg.grid_n, min_bin_count, plot_filled_gradient, grid_mapping, cfg.smooth_passes, cfg.cressman_radius_r, cfg.cressman_min_obs, sample_gradient_max_profiles);
             end
         end
+        log_step(sprintf('%s %s remapped %d sensitivity configs in %.1f s', polarity, band_label, numel(configs), toc(map_timer)));
         for c = 1:numel(configs)
             cfg = configs(c);
             grid = grids{c};
@@ -326,6 +334,7 @@ function grid_json_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, 
             summary_rows(end+1,:) = sensitivity_summary_row(matches, grid, polarity, cfg, cfg_dir); %#ok<AGROW>
         end
         plot_sensitivity_montage(fullfile(output_root, [polarity '_sensitivity_montage.png']), grids, configs, polarity, band_label);
+        log_step(sprintf('%s %s fast sensitivity finished in %.1f s', polarity, band_label, toc(stage_timer)));
     end
     writecell([summary_header; summary_rows], fullfile(output_root, 'SENSITIVITY_SUMMARY.csv'));
     write_best_sensitivity_doc(fullfile(output_root, 'BEST_PARAMETER_RECOMMENDATION_ZH.md'), summary_rows);
@@ -339,6 +348,111 @@ function configs = sensitivity_configs()
     configs(4) = struct('name', 'strong_support', 'grid_n', 61, 'cressman_radius_r', 1.0, 'cressman_min_obs', 12, 'smooth_passes', 4);
     configs(5) = struct('name', 'low_res_smooth', 'grid_n', 51, 'cressman_radius_r', 1.25, 'cressman_min_obs', 8, 'smooth_passes', 4);
     configs(6) = struct('name', 'high_smooth', 'grid_n', 61, 'cressman_radius_r', 1.0, 'cressman_min_obs', 8, 'smooth_passes', 6);
+end
+
+function selected = select_sensitivity_configs(configs, names)
+    if isempty(names)
+        selected = configs;
+        return
+    end
+    selected = struct('name', {}, 'grid_n', {}, 'cressman_radius_r', {}, 'cressman_min_obs', {}, 'smooth_passes', {});
+    config_names = {configs.name};
+    for i = 1:numel(names)
+        name = char(names{i});
+        idx = find(strcmp(config_names, name), 1);
+        if isempty(idx)
+            error('Unknown sensitivity config: %s', name);
+        end
+        selected(end+1) = configs(idx); %#ok<AGROW>
+    end
+end
+
+function rows = preallocate_match_rows(n_argo)
+    n_rows = max(1024, min(max(1, n_argo) * 2, 200000));
+    rows = cell(n_rows, 33);
+end
+
+function rows = grow_match_rows(rows)
+    rows(end + size(rows, 1), 33) = {[]};
+end
+
+function n = count_unique_argo(matches)
+    if isempty(matches)
+        n = 0;
+    else
+        n = numel(unique(cell2mat(matches(:,3))));
+    end
+end
+
+function log_step(message)
+    fprintf('[%s] %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'), message);
+end
+
+function values = profile_values_at_depth_by_index(depth, rho, profile_idx, target_depth)
+    target_depth = target_depth(:);
+    values = nan(numel(target_depth), 1);
+    for kk = 1:numel(depth)-1
+        z1 = depth(kk);
+        z2 = depth(kk+1);
+        if z2 == z1
+            continue
+        end
+        if kk == numel(depth)-1
+            mask = target_depth >= z1 & target_depth <= z2;
+        else
+            mask = target_depth >= z1 & target_depth < z2;
+        end
+        if ~any(mask)
+            continue
+        end
+        w = (target_depth(mask) - z1) ./ (z2 - z1);
+        rows = profile_idx(mask);
+        v1 = double(rho(rows, kk));
+        v2 = double(rho(rows, kk+1));
+        values(mask) = v1 .* (1 - w) + v2 .* w;
+    end
+end
+
+function idx = time_window_indices(sorted_time, t0, window_days)
+    if ~isfinite(t0) || isempty(sorted_time)
+        idx = [];
+        return
+    end
+    lo = lower_bound(sorted_time, t0 - window_days);
+    hi = upper_bound(sorted_time, t0 + window_days) - 1;
+    if lo > hi
+        idx = [];
+    else
+        idx = lo:hi;
+    end
+end
+
+function idx = lower_bound(values, target)
+    lo = 1;
+    hi = numel(values) + 1;
+    while lo < hi
+        mid = floor((lo + hi) / 2);
+        if values(mid) < target
+            lo = mid + 1;
+        else
+            hi = mid;
+        end
+    end
+    idx = lo;
+end
+
+function idx = upper_bound(values, target)
+    lo = 1;
+    hi = numel(values) + 1;
+    while lo < hi
+        mid = floor((lo + hi) / 2);
+        if values(mid) <= target
+            lo = mid + 1;
+        else
+            hi = mid;
+        end
+    end
+    idx = lo;
 end
 
 function ok = maybe_start_parallel_pool(workers)
@@ -508,11 +622,46 @@ function cx = track_cx(lon, lat, time, track, deg_m)
     end
 end
 
+function matches = build_group_matches_only(argo_idx, meta_idx, polarity, band_label, ...
+    argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+    meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+    time_window_days, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m)
+
+    if strcmp(match_mode, 'all')
+        rows = build_match_rows_time_blocks(argo_idx, meta_idx, polarity, band_label, ...
+            argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+            meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+            time_window_days, max_matches_per_group, deg_m);
+    else
+        rows = build_match_rows_nearest(argo_idx, meta_idx, polarity, band_label, ...
+            argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+            meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+            time_window_days, max_matches_per_group, deg_m);
+    end
+    matches = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+end
+
 function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label, ...
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
     time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, rho0_mode, ...
     z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m)
+
+    if strcmp(match_mode, 'all')
+        matches = build_group_matches_only(argo_idx, meta_idx, polarity, band_label, ...
+            argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+            meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+            time_window_days, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
+        grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
+        grid.match_mode = match_mode;
+        grid.rho0_mode = rho0_mode;
+        grid.z_mode = z_mode;
+        grid.z_rho_min_m = z_rho_min_m;
+        grid.z_rho_max_m = z_rho_max_m;
+        grid.min_drho_dz = min_drho_dz;
+        grid.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
+        return
+    end
 
     rows = {};
     row_count = 0;
@@ -633,6 +782,140 @@ function [matches, grid3d] = build_group_3d(argo_idx, meta_idx, polarity, band_l
     grid3d.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
 end
 
+function rows = build_match_rows_time_blocks(argo_idx, meta_idx, polarity, band_label, ...
+    argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+    meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+    time_window_days, max_matches_per_group, deg_m)
+
+    rows = preallocate_match_rows(numel(argo_idx));
+    row_count = 0;
+    if isempty(argo_idx) || isempty(meta_idx)
+        rows = rows(1:0,:);
+        return
+    end
+
+    block_days = 3;
+    sub_block_size = 1024;
+    [argo_time_sorted, argo_order] = sort(argo_time(argo_idx));
+    argo_idx_sorted = argo_idx(argo_order);
+    [meta_time_sorted, meta_order] = sort(meta_time(meta_idx));
+    meta_idx_sorted = meta_idx(meta_order);
+    rho0_sorted = profile_values_at_depth_by_index(depth, rho, argo_idx_sorted, argo_park(argo_idx_sorted));
+    t_min = floor(min(argo_time_sorted, [], 'omitnan'));
+    t_max = ceil(max(argo_time_sorted, [], 'omitnan'));
+    if ~isfinite(t_min) || ~isfinite(t_max)
+        rows = rows(1:0,:);
+        return
+    end
+
+    block_starts = t_min:block_days:t_max;
+    for bb = 1:numel(block_starts)
+        t0 = block_starts(bb);
+        t1 = min(t0 + block_days, t_max + 1);
+        a_lo = lower_bound(argo_time_sorted, t0);
+        a_hi = lower_bound(argo_time_sorted, t1) - 1;
+        m_lo = lower_bound(meta_time_sorted, t0 - time_window_days);
+        m_hi = lower_bound(meta_time_sorted, t1 + time_window_days) - 1;
+        if a_lo > a_hi || m_lo > m_hi
+            continue
+        end
+        a_block = argo_idx_sorted(a_lo:a_hi);
+        rho0_block = rho0_sorted(a_lo:a_hi);
+        m_block = meta_idx_sorted(m_lo:m_hi);
+        if isempty(a_block) || isempty(m_block)
+            continue
+        end
+        for a0 = 1:sub_block_size:numel(a_block)
+            a1 = min(a0 + sub_block_size - 1, numel(a_block));
+            a_sub = a_block(a0:a1);
+            rho0_sub = rho0_block(a0:a1);
+
+            dt_ok = abs(argo_time(a_sub(:)) - meta_time(m_block(:))') <= time_window_days;
+            dlon = argo_lon(a_sub(:)) - meta_lon(m_block(:))';
+            dlon(dlon > 180) = dlon(dlon > 180) - 360;
+            dlon(dlon < -180) = dlon(dlon < -180) + 360;
+            dx = dlon .* deg_m .* cosd(argo_lat(a_sub(:)));
+            dy = (argo_lat(a_sub(:)) - meta_lat(m_block(:))') .* deg_m;
+            r_norm = hypot(dx, dy) ./ meta_radius(m_block(:))';
+            mask = dt_ok & isfinite(r_norm) & r_norm <= 4 & isfinite(rho0_sub);
+            if ~any(mask(:))
+                continue
+            end
+            [ai, mi] = find(mask);
+            lin = sub2ind(size(mask), ai, mi);
+            n_add = numel(ai);
+            while row_count + n_add > size(rows, 1)
+                rows = grow_match_rows(rows);
+            end
+            for kk = 1:n_add
+                ii = a_sub(ai(kk));
+                jj = m_block(mi(kk));
+                rr = row_count + kk;
+                this_r = r_norm(lin(kk));
+                rows(rr,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
+                    argo_park(ii), argo_u(ii), argo_v(ii), argo_wpk(ii), rho0_sub(ai(kk)), NaN, NaN, NaN, NaN, NaN, NaN, ...
+                    meta_track(jj), meta_time(jj), meta_lon(jj), meta_lat(jj), meta_radius(jj), ...
+                    dx(lin(kk)) / meta_radius(jj), dy(lin(kk)) / meta_radius(jj), this_r, ring_label(this_r), meta_cx(jj), history_match_mask(ii), ...
+                    NaN, NaN, NaN, false};
+            end
+            row_count = row_count + n_add;
+            if max_matches_per_group > 0 && row_count >= max_matches_per_group
+                rows = rows(1:max_matches_per_group,:);
+                return
+            end
+        end
+        if max_matches_per_group == 0 && (mod(bb, 500) == 0 || bb == numel(block_starts))
+            log_step(sprintf('%s %s match blocks: %d/%d, raw rows so far: %d', polarity, band_label, bb, numel(block_starts), row_count));
+        end
+    end
+    rows = rows(1:row_count,:);
+end
+
+function rows = build_match_rows_nearest(argo_idx, meta_idx, polarity, band_label, ...
+    argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+    meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+    time_window_days, max_matches_per_group, deg_m)
+
+    rows = preallocate_match_rows(numel(argo_idx));
+    row_count = 0;
+    meta_time_band = meta_time(meta_idx);
+    [meta_time_sorted, meta_order] = sort(meta_time_band);
+    meta_idx_sorted = meta_idx(meta_order);
+    for a = 1:numel(argo_idx)
+        ii = argo_idx(a);
+        candidate_sorted = time_window_indices(meta_time_sorted, argo_time(ii), time_window_days);
+        if isempty(candidate_sorted)
+            continue
+        end
+        candidates = meta_idx_sorted(candidate_sorted);
+        dx = local_dx_m(argo_lon(ii), meta_lon(candidates), argo_lat(ii), deg_m);
+        dy = (argo_lat(ii) - meta_lat(candidates)) * deg_m;
+        r_norm = hypot(dx, dy) ./ meta_radius(candidates);
+        rho0 = interp1(depth, double(rho(ii,:)), argo_park(ii), 'linear', NaN);
+        if ~isfinite(rho0)
+            continue
+        end
+        [best_r, best_pos] = min(r_norm);
+        if ~isfinite(best_r) || best_r > 4
+            continue
+        end
+        jj = candidates(best_pos);
+        row_count = row_count + 1;
+        if row_count > size(rows, 1)
+            rows = grow_match_rows(rows);
+        end
+        rows(row_count,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
+            argo_park(ii), argo_u(ii), argo_v(ii), argo_wpk(ii), rho0, NaN, NaN, NaN, NaN, NaN, NaN, ...
+            meta_track(jj), meta_time(jj), meta_lon(jj), meta_lat(jj), meta_radius(jj), ...
+            dx(best_pos) / meta_radius(jj), dy(best_pos) / meta_radius(jj), best_r, ring_label(best_r), meta_cx(jj), history_match_mask(ii), ...
+            NaN, NaN, NaN, false};
+        if max_matches_per_group > 0 && row_count >= max_matches_per_group
+            break
+        end
+    end
+    rows = rows(1:row_count,:);
+end
+
 function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
     if isempty(rows)
         return
@@ -645,17 +928,57 @@ function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, 
         target_rho0 = profile_rho0;
     end
     keep = false(size(rows, 1), 1);
-    for rr = 1:size(rows, 1)
-        ii = rows{rr,3};
-        [z_rho, crossing_count, bracket_dz, local_drho_dz] = isopycnal_depth_qc(depth, double(rho(ii,:)), target_rho0(rr), argo_park(ii));
-        if isfinite(z_rho) && z_rho >= z_rho_min_m && z_rho <= z_rho_max_m && ...
+    argo_ids = cell2mat(rows(:,3));
+    [unique_argo_ids, first_row, row_to_unique] = unique(argo_ids);
+    log_step(sprintf('profile rho QC start: %d raw rows, %d unique Argo', size(rows, 1), numel(unique_argo_ids)));
+    profile_timer = tic;
+    unique_z_rho = nan(numel(unique_argo_ids), 1);
+    unique_crossing_count = nan(numel(unique_argo_ids), 1);
+    unique_bracket_dz = nan(numel(unique_argo_ids), 1);
+    unique_drho_dz = nan(numel(unique_argo_ids), 1);
+    unique_ok = false(numel(unique_argo_ids), 1);
+    unique_rho0 = nan(numel(unique_argo_ids), 1);
+    global QC_WORKERS;
+    use_qc_parallel = maybe_start_parallel_pool(QC_WORKERS);
+    if use_qc_parallel
+        parfor uu = 1:numel(unique_argo_ids)
+            rr0 = first_row(uu);
+            ii = unique_argo_ids(uu);
+            this_rho0 = target_rho0(rr0);
+            [z_rho, crossing_count, bracket_dz, local_drho_dz] = isopycnal_depth_qc(depth, double(rho(ii,:)), this_rho0, argo_park(ii));
+            unique_rho0(uu) = this_rho0;
+            unique_z_rho(uu) = z_rho;
+            unique_crossing_count(uu) = crossing_count;
+            unique_bracket_dz(uu) = bracket_dz;
+            unique_drho_dz(uu) = local_drho_dz;
+            unique_ok(uu) = isfinite(z_rho) && z_rho >= z_rho_min_m && z_rho <= z_rho_max_m && ...
                 isfinite(bracket_dz) && bracket_dz <= max_rho_bracket_dz_m && ...
-                isfinite(local_drho_dz) && abs(local_drho_dz) >= min_drho_dz
-            rows{rr,12} = target_rho0(rr);
-            rows{rr,13} = z_rho;
-            rows{rr,16} = crossing_count;
-            rows{rr,17} = bracket_dz;
-            rows{rr,18} = local_drho_dz;
+                isfinite(local_drho_dz) && abs(local_drho_dz) >= min_drho_dz;
+        end
+    else
+        for uu = 1:numel(unique_argo_ids)
+            rr0 = first_row(uu);
+            ii = unique_argo_ids(uu);
+            unique_rho0(uu) = target_rho0(rr0);
+            [z_rho, crossing_count, bracket_dz, local_drho_dz] = isopycnal_depth_qc(depth, double(rho(ii,:)), unique_rho0(uu), argo_park(ii));
+            unique_z_rho(uu) = z_rho;
+            unique_crossing_count(uu) = crossing_count;
+            unique_bracket_dz(uu) = bracket_dz;
+            unique_drho_dz(uu) = local_drho_dz;
+            unique_ok(uu) = isfinite(z_rho) && z_rho >= z_rho_min_m && z_rho <= z_rho_max_m && ...
+                isfinite(bracket_dz) && bracket_dz <= max_rho_bracket_dz_m && ...
+                isfinite(local_drho_dz) && abs(local_drho_dz) >= min_drho_dz;
+        end
+    end
+    log_step(sprintf('profile rho QC done: %d unique kept, %.1f s', nnz(unique_ok), toc(profile_timer)));
+    for rr = 1:size(rows, 1)
+        uu = row_to_unique(rr);
+        if unique_ok(uu)
+            rows{rr,12} = unique_rho0(uu);
+            rows{rr,13} = unique_z_rho(uu);
+            rows{rr,16} = unique_crossing_count(uu);
+            rows{rr,17} = unique_bracket_dz(uu);
+            rows{rr,18} = unique_drho_dz(uu);
             keep(rr) = true;
         end
     end
@@ -669,21 +992,57 @@ function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, 
         z_bg_all = nan(size(z_rho));
         z_anom = nan(size(z_rho));
         keep_boa = false(size(rows, 1), 1);
+        argo_ids = cell2mat(rows(:,3));
+        [unique_argo_ids, first_row, row_to_unique] = unique(argo_ids);
+        unique_z_bg = nan(numel(unique_argo_ids), 1);
+        unique_bg_crossing_count = nan(numel(unique_argo_ids), 1);
+        unique_bg_bracket_dz = nan(numel(unique_argo_ids), 1);
+        unique_bg_drho_dz = nan(numel(unique_argo_ids), 1);
+        unique_bg_ok = false(numel(unique_argo_ids), 1);
+        log_step(sprintf('BOA rho QC start: %d unique Argo', numel(unique_argo_ids)));
+        boa_timer = tic;
+        if use_qc_parallel
+            parfor uu = 1:numel(unique_argo_ids)
+                rr0 = first_row(uu);
+                [~, month_id, ~] = datevec(rows{rr0,5});
+                boa_profile = boa_density_profile_at(boa_clim, rows{rr0,6}, rows{rr0,7}, month_id);
+                boa_profile = align_density_units(boa_profile, rows{rr0,12});
+                [z_bg, bg_crossing_count, bg_bracket_dz, bg_drho_dz] = isopycnal_depth_qc(boa_clim.pres, boa_profile, rows{rr0,12}, rows{rr0,8});
+                unique_z_bg(uu) = z_bg;
+                unique_bg_crossing_count(uu) = bg_crossing_count;
+                unique_bg_bracket_dz(uu) = bg_bracket_dz;
+                unique_bg_drho_dz(uu) = bg_drho_dz;
+                unique_bg_ok(uu) = isfinite(z_bg) && z_bg >= z_rho_min_m && z_bg <= z_rho_max_m && ...
+                    isfinite(bg_bracket_dz) && bg_bracket_dz <= max_rho_bracket_dz_m && ...
+                    isfinite(bg_drho_dz) && abs(bg_drho_dz) >= min_drho_dz;
+            end
+        else
+            for uu = 1:numel(unique_argo_ids)
+                rr0 = first_row(uu);
+                [~, month_id, ~] = datevec(rows{rr0,5});
+                boa_profile = boa_density_profile_at(boa_clim, rows{rr0,6}, rows{rr0,7}, month_id);
+                boa_profile = align_density_units(boa_profile, rows{rr0,12});
+                [z_bg, bg_crossing_count, bg_bracket_dz, bg_drho_dz] = isopycnal_depth_qc(boa_clim.pres, boa_profile, rows{rr0,12}, rows{rr0,8});
+                unique_z_bg(uu) = z_bg;
+                unique_bg_crossing_count(uu) = bg_crossing_count;
+                unique_bg_bracket_dz(uu) = bg_bracket_dz;
+                unique_bg_drho_dz(uu) = bg_drho_dz;
+                unique_bg_ok(uu) = isfinite(z_bg) && z_bg >= z_rho_min_m && z_bg <= z_rho_max_m && ...
+                    isfinite(bg_bracket_dz) && bg_bracket_dz <= max_rho_bracket_dz_m && ...
+                    isfinite(bg_drho_dz) && abs(bg_drho_dz) >= min_drho_dz;
+            end
+        end
+        log_step(sprintf('BOA rho QC done: %d unique kept, %.1f s', nnz(unique_bg_ok), toc(boa_timer)));
         for rr = 1:size(rows, 1)
-            [~, month_id, ~] = datevec(rows{rr,5});
-            boa_profile = boa_density_profile_at(boa_clim, rows{rr,6}, rows{rr,7}, month_id);
-            boa_profile = align_density_units(boa_profile, rows{rr,12});
-            [z_bg, bg_crossing_count, bg_bracket_dz, bg_drho_dz] = isopycnal_depth_qc(boa_clim.pres, boa_profile, rows{rr,12}, rows{rr,8});
-            rows{rr,30} = bg_crossing_count;
-            rows{rr,31} = bg_bracket_dz;
-            rows{rr,32} = bg_drho_dz;
-            bg_ok = isfinite(z_bg) && z_bg >= z_rho_min_m && z_bg <= z_rho_max_m && ...
-                isfinite(bg_bracket_dz) && bg_bracket_dz <= max_rho_bracket_dz_m && ...
-                isfinite(bg_drho_dz) && abs(bg_drho_dz) >= min_drho_dz;
-            rows{rr,33} = bg_ok;
+            uu = row_to_unique(rr);
+            rows{rr,30} = unique_bg_crossing_count(uu);
+            rows{rr,31} = unique_bg_bracket_dz(uu);
+            rows{rr,32} = unique_bg_drho_dz(uu);
+            rows{rr,33} = unique_bg_ok(uu);
+            bg_ok = unique_bg_ok(uu);
             if bg_ok
-                z_bg_all(rr) = z_bg;
-                z_anom(rr) = z_rho(rr) - z_bg;
+                z_bg_all(rr) = unique_z_bg(uu);
+                z_anom(rr) = z_rho(rr) - unique_z_bg(uu);
                 keep_boa(rr) = true;
             end
         end
@@ -1394,7 +1753,7 @@ function row = sensitivity_summary_row(matches, grid, polarity, cfg, group_dir)
     rough = roughness_score(grid.rebuild_w);
     dipole = dipole_score(grid.rebuild_w, grid.x, grid.y);
     row = {polarity, cfg.name, cfg.grid_n, cfg.cressman_radius_r, cfg.cressman_min_obs, cfg.smooth_passes, ...
-        n, unique_count, safe_fraction(sum(isfinite(grid.rebuild_w(:))), numel(grid.rebuild_w)), ...
+        n, unique_count, n - unique_count, safe_fraction(sum(isfinite(grid.rebuild_w(:))), numel(grid.rebuild_w)), ...
         support_median, support_p10, grid.corr_rebuild_wpk, q95_rebuild, q95_wpk, rough, dipole, group_dir};
 end
 
