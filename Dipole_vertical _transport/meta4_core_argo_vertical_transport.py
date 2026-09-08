@@ -14,6 +14,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat")
 DEFAULT_HISTORY_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
+DEFAULT_BOA_PDEN_ROOT = Path(r"F:\Argo_data\Self_BOA_Argo_PotentialDensity")
 DEFAULT_OUTPUT_ROOT = Path(
     r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_global_60S60N_5deg"
 )
@@ -98,6 +99,9 @@ def write_npz_from_grid_json(json_path: Path, npz_path: Path) -> None:
         "term2_rel_m_s",
         "rebuild_plus_abs_m_s",
         "rebuild_minus_rel_m_s",
+        "sample_term1_m_s",
+        "sample_term2_m_s",
+        "sample_rebuild_w_m_s",
     ]
     arrays = {key: grid[key] for key in array_keys if key in grid}
     with zipfile.ZipFile(npz_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -141,6 +145,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     argo_mat = matlab_quote(args.argo_mat)
     history_argo_mat = matlab_quote(args.history_argo_mat)
     meta_dir = matlab_quote(args.meta_dir)
+    boa_pden_root = matlab_quote(args.boa_pden_root)
     output_root = matlab_quote(args.output_root)
     manifest = matlab_quote(manifest_path)
     max_matches = int(args.max_matches_per_group)
@@ -148,6 +153,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
 argo_mat = '@ARGO_MAT@';
 history_argo_mat = '@HISTORY_ARGO_MAT@';
 meta_dir = '@META_DIR@';
+boa_pden_root = '@BOA_PDEN_ROOT@';
 output_root = '@OUTPUT_ROOT@';
 bbox = [@BBOX@];
 lat_bands = [@LAT_BANDS@];
@@ -163,8 +169,10 @@ grid_mapping = '@GRID_MAPPING@';
 smooth_passes = @SMOOTH_PASSES@;
 cressman_radius_r = @CRESSMAN_RADIUS_R@;
 cressman_min_obs = @CRESSMAN_MIN_OBS@;
+sample_gradient_max_profiles = @SAMPLE_GRADIENT_MAX_PROFILES@;
 rho0_mode = '@RHO0_MODE@';
 z_mode = '@Z_MODE@';
+boa_background_mode = '@BOA_BACKGROUND_MODE@';
 velocity_source = '@VELOCITY_SOURCE@';
 match_mode = '@MATCH_MODE@';
 max_matches_per_group = @MAX_MATCHES@;
@@ -183,7 +191,7 @@ if exist(output_root, 'dir') ~= 7
 end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
-write_method_doc(method_md, argo_mat, history_argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+write_method_doc(method_md, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
 
 fprintf('Loading Argo vectors from %s\\n', argo_mat);
 A = load(argo_mat, 'I_Time', 'I_Lon', 'I_Lat', 'I_ParkDepth', 'I_PF', density_variable, 'Depth');
@@ -195,6 +203,12 @@ argo_time = double(A.I_Time);
 argo_park = double(A.I_ParkDepth);
 argo_pf = double(A.I_PF);
 depth = double(A.Depth(:));
+
+boa_clim = struct();
+if strcmp(z_mode, 'anomaly_boa_climatology')
+    fprintf('Loading BOA monthly climatology from %s\\n', boa_pden_root);
+    boa_clim = load_boa_monthly_climatology(boa_pden_root);
+end
 
 fprintf('Computing Argo parking drift\\n');
 argo_u = nan(size(argo_time));
@@ -230,7 +244,7 @@ argo_base_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3)
 polarities = {'cyclonic','anticyclonic'};
 grid_json_files = {};
 summary_rows = {};
-summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','mean_wpk_observed_m_s','corr_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','output_dir'};
+summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','boa_bg_valid_count','boa_bg_valid_fraction','mean_wpk_observed_m_s','corr_rebuild_wpk','corr_sample_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_sample_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','output_dir'};
 if strcmp(selection_mode, 'crossing_lat')
     group_count = 1;
 else
@@ -238,7 +252,7 @@ else
 end
 combined_matches = cell(group_count, 1);
 for b = 1:group_count
-    combined_matches{b} = cell(0, 29);
+    combined_matches{b} = cell(0, 33);
 end
 
 for p = 1:numel(polarities)
@@ -280,8 +294,8 @@ for p = 1:numel(polarities)
         [matches, grid] = build_group(argo_band, meta_band, polarity, band_label, ...
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-            time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
-            z_mode, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
+            time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, rho0_mode, ...
+            z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
         write_group_outputs(group_dir, matches, grid, polarity, band_label);
         grid_json_files{end+1} = fullfile(group_dir, 'composite_grid.json'); %#ok<SAGROW>
         summary_rows(end+1,:) = summary_from_matches(matches, grid, polarity, band_label, group_dir); %#ok<SAGROW>
@@ -289,7 +303,7 @@ for p = 1:numel(polarities)
     end
 end
 
-combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n);
+combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n);
 summary_rows = [summary_rows; combined_rows];
 summary_path = fullfile(output_root, 'SUMMARY.csv');
 writecell([summary_header; summary_rows], summary_path);
@@ -357,6 +371,98 @@ function key = argo_match_key(pf, time, lon, lat)
         string(round(double(lon) * 1e4)) + "_" + string(round(double(lat) * 1e4));
 end
 
+function boa = load_boa_monthly_climatology(root_dir)
+    files = dir(fullfile(root_dir, 'PDen1000_*.mat'));
+    if isempty(files)
+        error('No BOA potential-density files found in %s', root_dir);
+    end
+    sums = cell(12, 1);
+    counts = cell(12, 1);
+    lon_in = [];
+    lat_in = [];
+    pres = [];
+    for k = 1:numel(files)
+        name = files(k).name;
+        tok = regexp(name, 'PDen1000_\\d{4}(\\d{2})\\.mat', 'tokens', 'once');
+        if isempty(tok)
+            continue
+        end
+        mon = str2double(tok{1});
+        if ~isfinite(mon) || mon < 1 || mon > 12
+            continue
+        end
+        S = load(fullfile(files(k).folder, files(k).name), 'Den', 'lon_in', 'lat_in', 'pres');
+        if isempty(lon_in)
+            lon_in = double(S.lon_in(:));
+            lat_in = double(S.lat_in(:));
+            pres = double(S.pres(:));
+        end
+        D = double(S.Den);
+        ok = isfinite(D);
+        D(~ok) = 0;
+        if isempty(sums{mon})
+            sums{mon} = D;
+            counts{mon} = double(ok);
+        else
+            sums{mon} = sums{mon} + D;
+            counts{mon} = counts{mon} + double(ok);
+        end
+    end
+    den = nan([numel(lon_in), numel(lat_in), numel(pres), 12]);
+    month_count = zeros(12, 1);
+    for mon = 1:12
+        if isempty(sums{mon})
+            continue
+        end
+        C = counts{mon};
+        tmp = sums{mon} ./ C;
+        tmp(C == 0) = NaN;
+        den(:,:,:,mon) = tmp;
+        month_count(mon) = max(C(:));
+    end
+    boa = struct('lon', lon_in, 'lat', lat_in, 'pres', pres, 'den', den, 'month_count', month_count);
+end
+
+function profile = boa_density_profile_at(boa, lon, lat, month_id)
+    profile = nan(size(boa.pres));
+    if isempty(fieldnames(boa)) || ~isfinite(lon) || ~isfinite(lat) || ~isfinite(month_id)
+        return
+    end
+    month_id = max(1, min(12, round(month_id)));
+    lon = mod(lon, 360);
+    if lon < min(boa.lon)
+        lon = lon + 360;
+    end
+    lon2 = boa.lon;
+    den = boa.den(:,:,:,month_id);
+    if lon > max(lon2)
+        lon2 = [lon2; lon2(1) + 360];
+        den = cat(1, den, den(1,:,:));
+    end
+    if lat < min(boa.lat) || lat > max(boa.lat)
+        return
+    end
+    ix2 = find(lon2 >= lon, 1, 'first');
+    iy2 = find(boa.lat >= lat, 1, 'first');
+    if isempty(ix2) || isempty(iy2) || ix2 <= 1 || iy2 <= 1
+        return
+    end
+    ix1 = ix2 - 1;
+    iy1 = iy2 - 1;
+    x1 = lon2(ix1); x2 = lon2(ix2);
+    y1 = boa.lat(iy1); y2 = boa.lat(iy2);
+    if x2 == x1 || y2 == y1
+        return
+    end
+    wx = (lon - x1) / (x2 - x1);
+    wy = (lat - y1) / (y2 - y1);
+    p11 = squeeze(den(ix1,iy1,:));
+    p21 = squeeze(den(ix2,iy1,:));
+    p12 = squeeze(den(ix1,iy2,:));
+    p22 = squeeze(den(ix2,iy2,:));
+    profile = (1-wx) * (1-wy) * p11 + wx * (1-wy) * p21 + (1-wx) * wy * p12 + wx * wy * p22;
+end
+
 function cx = track_cx(lon, lat, time, track, deg_m)
     cx = nan(size(time));
     for i = 2:numel(time)-1
@@ -378,8 +484,8 @@ end
 function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label, ...
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-    time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, rho0_mode, ...
-    z_mode, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m)
+    time_window_days, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, rho0_mode, ...
+    z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m)
 
     rows = {};
     row_count = 0;
@@ -419,7 +525,8 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
             rows(row_count,:) = {polarity, band_label, ii, argo_pf(ii), argo_time(ii), argo_lon(ii), argo_lat(ii), ...
                 argo_park(ii), argo_u(ii), argo_v(ii), argo_wpk(ii), rho0, NaN, NaN, NaN, NaN, NaN, NaN, ...
                 meta_track(jj), meta_time(jj), meta_lon(jj), meta_lat(jj), meta_radius(jj), ...
-                best_dx / meta_radius(jj), best_dy / meta_radius(jj), this_r, ring, meta_cx(jj), history_match_mask(ii)}; %#ok<AGROW>
+                best_dx / meta_radius(jj), best_dy / meta_radius(jj), this_r, ring, meta_cx(jj), history_match_mask(ii), ...
+                NaN, NaN, NaN, false}; %#ok<AGROW>
             if max_matches_per_group > 0 && row_count >= max_matches_per_group
                 break
             end
@@ -428,9 +535,9 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
             break
         end
     end
-    rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+    rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
     matches = rows;
-    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
+    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
     grid.match_mode = match_mode;
     grid.rho0_mode = rho0_mode;
     grid.z_mode = z_mode;
@@ -440,7 +547,7 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
     grid.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
 end
 
-function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
+function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
     if isempty(rows)
         return
     end
@@ -472,7 +579,35 @@ function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, 
     end
     z_rho = cell2mat(rows(:,13));
     r_norm = cell2mat(rows(:,26));
-    if strcmp(z_mode, 'anomaly_farfield') || strcmp(z_mode, 'anomaly_farfield_plane')
+    if strcmp(z_mode, 'anomaly_boa_climatology')
+        z_bg_all = nan(size(z_rho));
+        z_anom = nan(size(z_rho));
+        keep_boa = false(size(rows, 1), 1);
+        for rr = 1:size(rows, 1)
+            [~, month_id, ~] = datevec(rows{rr,5});
+            boa_profile = boa_density_profile_at(boa_clim, rows{rr,6}, rows{rr,7}, month_id);
+            boa_profile = align_density_units(boa_profile, rows{rr,12});
+            [z_bg, bg_crossing_count, bg_bracket_dz, bg_drho_dz] = isopycnal_depth_qc(boa_clim.pres, boa_profile, rows{rr,12}, rows{rr,8});
+            rows{rr,30} = bg_crossing_count;
+            rows{rr,31} = bg_bracket_dz;
+            rows{rr,32} = bg_drho_dz;
+            bg_ok = isfinite(z_bg) && z_bg >= z_rho_min_m && z_bg <= z_rho_max_m && ...
+                isfinite(bg_bracket_dz) && bg_bracket_dz <= max_rho_bracket_dz_m && ...
+                isfinite(bg_drho_dz) && abs(bg_drho_dz) >= min_drho_dz;
+            rows{rr,33} = bg_ok;
+            if bg_ok
+                z_bg_all(rr) = z_bg;
+                z_anom(rr) = z_rho(rr) - z_bg;
+                keep_boa(rr) = true;
+            end
+        end
+        rows = rows(keep_boa,:);
+        if isempty(rows)
+            return
+        end
+        z_bg_all = z_bg_all(keep_boa);
+        z_anom = z_anom(keep_boa);
+    elseif strcmp(z_mode, 'anomaly_farfield') || strcmp(z_mode, 'anomaly_farfield_plane')
         farfield = z_rho(r_norm >= 2 & r_norm <= 4 & isfinite(z_rho));
         if strcmp(z_mode, 'anomaly_farfield_plane')
             x_norm = cell2mat(rows(:,24));
@@ -502,6 +637,20 @@ function rows = apply_rho0_mode(rows, rho, depth, argo_park, rho0_mode, z_mode, 
     for rr = 1:size(rows, 1)
         rows{rr,14} = z_bg_all(rr);
         rows{rr,15} = z_anom(rr);
+        if size(rows, 2) < 33 || isempty(rows{rr,33})
+            rows{rr,33} = strcmp(z_mode, 'anomaly_boa_climatology') == false;
+        end
+    end
+end
+
+function profile = align_density_units(profile, rho0)
+    med = median(profile, 'omitnan');
+    if isfinite(med) && isfinite(rho0)
+        if med > 1000 && rho0 < 100
+            profile = profile - 1000;
+        elseif med < 100 && rho0 > 1000
+            profile = profile + 1000;
+        end
     end
 end
 
@@ -561,7 +710,7 @@ function label = ring_label(r_norm)
     end
 end
 
-function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs)
+function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles)
     x_vec = linspace(-4, 4, grid_n);
     y_vec = linspace(-4, 4, grid_n);
     [X, Y] = meshgrid(x_vec, y_vec);
@@ -572,6 +721,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         'count', count_grid, 'term1', nan_grid, 'term2', nan_grid, 'rebuild_w', nan_grid, ...
         'term1_plus', nan_grid, 'term1_minus', nan_grid, 'term2_abs', nan_grid, 'term2_rel', nan_grid, ...
         'rebuild_plus_abs', nan_grid, 'rebuild_minus_rel', nan_grid, ...
+        'sample_term1', nan_grid, 'sample_term2', nan_grid, 'sample_rebuild_w', nan_grid, 'corr_sample_rebuild_wpk', NaN, ...
         'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, 'mean_radius_m', NaN, ...
         'mean_wpk_observed', NaN, 'corr_rebuild_wpk', NaN, ...
         'grid_mapping', grid_mapping, 'cressman_radius_r', cressman_radius_r, 'cressman_min_obs', cressman_min_obs, ...
@@ -588,6 +738,9 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     wpk = cell2mat(matches(:,11)); wpk = wpk(:);
     cx_raw = cell2mat(matches(:,28)); cx_raw = cx_raw(:);
     radius = cell2mat(matches(:,23)); radius = radius(:);
+    sample_term1 = nan(size(z));
+    sample_term2 = nan(size(z));
+    sample_rebuild_w = nan(size(z));
     grid.mean_cx_raw = mean(cx_raw, 'omitnan');
     grid.mean_u_bg = mean(u, 'omitnan');
     grid.cx_rel = grid.mean_cx_raw - grid.mean_u_bg;
@@ -598,6 +751,8 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     yb = discretize(y, edges);
     n = min([numel(xb), numel(yb), numel(z), numel(z_raw), numel(u), numel(v), numel(wpk)]);
     xb = xb(1:n); yb = yb(1:n); z = z(1:n); z_raw = z_raw(1:n); u = u(1:n); v = v(1:n); wpk = wpk(1:n);
+    cx_raw = cx_raw(1:n); radius = radius(1:n);
+    [sample_term1, sample_term2, sample_rebuild_w] = sample_gradient_terms(x(1:n), y(1:n), z, u, v, cx_raw, radius, grid.cx_rel, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
     valid = isfinite(xb) & isfinite(yb);
     subs = [yb(valid), xb(valid)];
     grid.count = accumarray(subs, 1, [grid_n grid_n], @sum, 0);
@@ -607,15 +762,19 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     grid.u = accumarray(subs, u(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.v = accumarray(subs, v(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     grid.wpk = accumarray(subs, wpk(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+    grid.sample_term1 = accumarray(subs, sample_term1(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+    grid.sample_term2 = accumarray(subs, sample_term2(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+    grid.sample_rebuild_w = accumarray(subs, sample_rebuild_w(valid), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
     if strcmp(grid_mapping, 'cressman')
-        [grid.z, support_z] = cressman_map(x, y, z, X, Y, cressman_radius_r, cressman_min_obs);
-        [grid.z_raw, ~] = cressman_map(x, y, z_raw, X, Y, cressman_radius_r, cressman_min_obs);
+        [mapped, support_all] = cressman_map_multi(x, y, [z, z_raw, u, v, wpk], X, Y, cressman_radius_r, cressman_min_obs);
+        grid.z = mapped(:,:,1);
+        grid.z_raw = mapped(:,:,2);
         grid.z_anom = grid.z;
-        [grid.u, support_u] = cressman_map(x, y, u, X, Y, cressman_radius_r, cressman_min_obs);
-        [grid.v, support_v] = cressman_map(x, y, v, X, Y, cressman_radius_r, cressman_min_obs);
-        [grid.wpk, support_wpk] = cressman_map(x, y, wpk, X, Y, cressman_radius_r, cressman_min_obs);
-        grid.mapped_support = min(cat(3, support_z, support_u, support_v), [], 3);
-        grid.wpk_mapped_support = support_wpk;
+        grid.u = mapped(:,:,3);
+        grid.v = mapped(:,:,4);
+        grid.wpk = mapped(:,:,5);
+        grid.mapped_support = support_all;
+        grid.wpk_mapped_support = support_all;
     elseif strcmp(grid_mapping, 'scattered')
         grid.z = scattered_map(x, y, z, X, Y);
         grid.z_raw = scattered_map(x, y, z_raw, X, Y);
@@ -657,6 +816,39 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         grid.term2 = grid.term2_rel;
         grid.rebuild_w = grid.rebuild_minus_rel;
         grid.corr_rebuild_wpk = spatial_corr(grid.rebuild_w, grid.wpk);
+        grid.corr_sample_rebuild_wpk = spatial_corr(grid.sample_rebuild_w, grid.wpk);
+    end
+end
+
+function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, cx_raw, radius, cx_rel, radius_r, min_obs, max_profiles)
+    term1 = nan(size(z));
+    term2 = nan(size(z));
+    rebuild = nan(size(z));
+    good_all = isfinite(x) & isfinite(y) & isfinite(z) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & isfinite(radius) & radius > 0 & hypot(x, y) <= 4;
+    if nnz(good_all) < min_obs || ~isfinite(radius_r) || radius_r <= 0
+        return
+    end
+    eval_idx = find(good_all);
+    if isfinite(max_profiles) && max_profiles > 0 && numel(eval_idx) > max_profiles
+        eval_idx = eval_idx(unique(round(linspace(1, numel(eval_idx), max_profiles))));
+    end
+    for kk = 1:numel(eval_idx)
+        ii = eval_idx(kk);
+        if ~good_all(ii)
+            continue
+        end
+        d2 = (x - x(ii)).^2 + (y - y(ii)).^2;
+        inside = good_all & d2 < radius_r ^ 2;
+        if nnz(inside) < max(min_obs, 6)
+            continue
+        end
+        Xfit = [ones(nnz(inside), 1), x(inside) - x(ii), y(inside) - y(ii)];
+        coef = Xfit \\ z(inside);
+        dzdx = coef(2) / radius(ii);
+        dzdy = coef(3) / radius(ii);
+        term1(ii) = -cx_rel * dzdx;
+        term2(ii) = (u(ii) - cx_raw(ii)) * dzdx + v(ii) * dzdy;
+        rebuild(ii) = term1(ii) + term2(ii);
     end
 end
 
@@ -709,6 +901,44 @@ function [Z, support_count] = cressman_map(x, y, v, X, Y, radius_r, min_obs)
     end
     Z(hypot(X, Y) > 4) = NaN;
     support_count(hypot(X, Y) > 4) = 0;
+end
+
+function [Z, support_count] = cressman_map_multi(x, y, V, X, Y, radius_r, min_obs)
+    Z = NaN([size(X), size(V, 2)]);
+    support_count = zeros(size(X));
+    good = isfinite(x) & isfinite(y) & all(isfinite(V), 2) & hypot(x, y) <= 4;
+    x = x(good);
+    y = y(good);
+    V = V(good,:);
+    if isempty(x) || ~isfinite(radius_r) || radius_r <= 0
+        return
+    end
+    r2_limit = radius_r ^ 2;
+    for ii = 1:numel(X)
+        d2 = (x - X(ii)).^2 + (y - Y(ii)).^2;
+        inside = d2 < r2_limit;
+        n_inside = nnz(inside);
+        support_count(ii) = n_inside;
+        if n_inside >= min_obs
+            w = (r2_limit - d2(inside)) ./ (r2_limit + d2(inside));
+            ok = isfinite(w) & w > 0;
+            if any(ok)
+                vals = V(inside,:);
+                vals = vals(ok,:);
+                w = w(ok);
+                for kk = 1:size(V, 2)
+                    Z(ii + (kk-1) * numel(X)) = sum(w .* vals(:,kk)) ./ sum(w);
+                end
+            end
+        end
+    end
+    outside = hypot(X, Y) > 4;
+    for kk = 1:size(V, 2)
+        tmp = Z(:,:,kk);
+        tmp(outside) = NaN;
+        Z(:,:,kk) = tmp;
+    end
+    support_count(outside) = 0;
 end
 
 function out = smooth2_supported(A, support, passes)
@@ -778,16 +1008,23 @@ function write_group_outputs(group_dir, matches, grid, polarity, band_label)
     grid.match_count = size(matches, 1);
     if isempty(matches)
         grid.unique_argo_count = 0;
+        grid.boa_bg_valid_count = 0;
     else
         grid.unique_argo_count = numel(unique(cell2mat(matches(:,3))));
+        if size(matches, 2) >= 33
+            grid.boa_bg_valid_count = sum(cell2mat(matches(:,33)));
+        else
+            grid.boa_bg_valid_count = 0;
+        end
     end
     grid.duplicate_match_count = grid.match_count - grid.unique_argo_count;
-    header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched'};
+    header = {'polarity','lat_band','argo_index','platform','argo_time','argo_lon','argo_lat','parking_depth_m','u_argo_m_s','v_argo_m_s','wpk_observed_m_s','rho0','z_rho_m','z_rho_bg_m','z_rho_anom_m','rho_crossing_count','rho_bracket_dz_m','local_drho_dz','eddy_track','eddy_time','eddy_lon','eddy_lat','eddy_radius_m','x_over_R','y_over_R','r_over_R','ring','cx_raw_m_s','history_velocity_matched','boa_rho_crossing_count','boa_rho_bracket_dz_m','boa_local_drho_dz','boa_bg_valid'};
     writecell(clean_write_cells([header; matches]), fullfile(group_dir, 'matched_core_argo.csv'));
     write_grid_json(fullfile(group_dir, 'composite_grid.json'), grid, polarity, band_label);
     plot_three_panel(fullfile(group_dir, 'vertical_transport_terms.png'), grid, [polarity ' ' band_label]);
     plot_sensitivity(fullfile(group_dir, 'velocity_sign_sensitivity.png'), grid, [polarity ' ' band_label]);
     plot_wpk_validation(fullfile(group_dir, 'wpk_validation.png'), grid, [polarity ' ' band_label]);
+    plot_gradient_order_comparison(fullfile(group_dir, 'gradient_order_comparison.png'), grid, [polarity ' ' band_label]);
     write_group_doc(fullfile(group_dir, 'METHOD_ASSUMPTIONS_ZH.md'), matches, grid, polarity, band_label);
 end
 
@@ -808,21 +1045,33 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
         n = 0;
         unique_argo_count = 0;
         history_velocity_match_count = 0;
+        boa_bg_valid_count = 0;
     else
         rings = matches(:,27);
         n = size(matches, 1);
         unique_argo_count = numel(unique(cell2mat(matches(:,3))));
         history_velocity_match_count = sum(cell2mat(matches(:,29)));
+        if size(matches, 2) >= 33
+            boa_bg_valid_count = sum(cell2mat(matches(:,33)));
+        else
+            boa_bg_valid_count = 0;
+        end
     end
     duplicate_match_count = n - unique_argo_count;
     valid_cells = sum(isfinite(grid.rebuild_w(:)));
     valid_fraction = valid_cells / numel(grid.count);
     rebuild = grid.rebuild_w(:);
+    sample_rebuild = grid.sample_rebuild_w(:);
     wpk = grid.wpk(:);
     if any(isfinite(rebuild))
         q95_rebuild = prctile(abs(rebuild(isfinite(rebuild))) * 1e6, 95);
     else
         q95_rebuild = NaN;
+    end
+    if any(isfinite(sample_rebuild))
+        q95_sample_rebuild = prctile(abs(sample_rebuild(isfinite(sample_rebuild))) * 1e6, 95);
+    else
+        q95_sample_rebuild = NaN;
     end
     if any(isfinite(wpk))
         q95_wpk = prctile(abs(wpk(isfinite(wpk))) * 1e6, 95);
@@ -831,10 +1080,19 @@ function row = summary_from_matches(matches, grid, polarity, band_label, group_d
     end
     row = {polarity, band_label, n, unique_argo_count, duplicate_match_count, sum(strcmp(rings,'0-1R')), sum(strcmp(rings,'1-2R')), sum(strcmp(rings,'2-4R')), ...
         valid_cells, valid_fraction, grid.mean_cx_raw, grid.mean_u_bg, grid.cx_rel, grid.mean_radius_m / 1000, ...
-        history_velocity_match_count, grid.mean_wpk_observed, grid.corr_rebuild_wpk, q95_rebuild, q95_wpk, group_dir};
+        history_velocity_match_count, boa_bg_valid_count, safe_fraction(boa_bg_valid_count, n), grid.mean_wpk_observed, grid.corr_rebuild_wpk, ...
+        grid.corr_sample_rebuild_wpk, q95_rebuild, q95_sample_rebuild, q95_wpk, group_dir};
 end
 
-function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, grid_n)
+function f = safe_fraction(a, b)
+    if b > 0
+        f = a / b;
+    else
+        f = NaN;
+    end
+end
+
+function combined_rows = write_combined_outputs(output_root, lat_bands, combined_matches, selection_mode, target_label, match_mode, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, grid_n)
     combined_rows = {};
     for b = 1:numel(combined_matches)
         if strcmp(selection_mode, 'crossing_lat')
@@ -847,7 +1105,7 @@ function combined_rows = write_combined_outputs(output_root, lat_bands, combined
             mkdir(combined_dir);
         end
         all_matches = combined_matches{b};
-        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs);
+        grid = composite_grid(all_matches, grid_n, min_bin_count, plot_filled_gradient, grid_mapping, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
         grid.match_mode = match_mode;
         write_group_outputs(combined_dir, all_matches, grid, 'combined', band_label);
         combined_rows(end+1,:) = summary_from_matches(all_matches, grid, 'combined', band_label, combined_dir); %#ok<AGROW>
@@ -864,7 +1122,9 @@ function write_grid_json(path, grid, polarity, band_label)
         'z_rho_min_m', grid.z_rho_min_m, 'z_rho_max_m', grid.z_rho_max_m, 'min_drho_dz', grid.min_drho_dz, ...
         'max_rho_bracket_dz_m', grid.max_rho_bracket_dz_m, ...
         'match_count', grid.match_count, 'unique_argo_count', grid.unique_argo_count, 'duplicate_match_count', grid.duplicate_match_count, ...
-        'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count));
+        'boa_bg_valid_count', grid.boa_bg_valid_count, ...
+        'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count), ...
+        'corr_sample_rebuild_wpk', grid.corr_sample_rebuild_wpk);
     G.x_over_R = grid.x;
     G.y_over_R = grid.y;
     G.z_rho_m = grid.z;
@@ -885,6 +1145,9 @@ function write_grid_json(path, grid, polarity, band_label)
     G.term2_rel_m_s = grid.term2_rel;
     G.rebuild_plus_abs_m_s = grid.rebuild_plus_abs;
     G.rebuild_minus_rel_m_s = grid.rebuild_minus_rel;
+    G.sample_term1_m_s = grid.sample_term1;
+    G.sample_term2_m_s = grid.sample_term2;
+    G.sample_rebuild_w_m_s = grid.sample_rebuild_w;
     fid = fopen(path, 'w');
     fwrite(fid, jsonencode(G), 'char');
     fclose(fid);
@@ -1050,6 +1313,54 @@ function plot_sensitivity(path, grid, title_prefix)
     close(fig);
 end
 
+function plot_gradient_order_comparison(path, grid, title_prefix)
+    fig = figure('Visible','off','Position',[100 100 1180 430]);
+    fields = {'rebuild_w','sample_rebuild_w'};
+    titles = {'Cressman z'' then gradient','sample gradient then Cressman W'};
+    vals = [grid.rebuild_w(:); grid.sample_rebuild_w(:)];
+    lim = max(abs(vals(isfinite(vals))));
+    if isempty(lim) || ~isfinite(lim) || lim == 0
+        lim = 2.5e-6;
+    end
+    lim = max(lim, 2.5e-6);
+    for k = 1:2
+        subplot(1,2,k);
+        data = grid.(fields{k}) * 1e6;
+        h = imagesc(grid.x(1,:), grid.y(:,1), data);
+        set(h, 'AlphaData', isfinite(data));
+        set(gca, 'YDir', 'normal');
+        set(gca, 'Color', [1 1 1]);
+        axis image;
+        xlim([-4 4]); ylim([-4 4]);
+        clim([-lim lim] * 1e6);
+        colormap(redblue_colormap());
+        colorbar;
+        hold on;
+        th = linspace(0, 2*pi, 240);
+        plot(cos(th), sin(th), 'k-', 'LineWidth', 1.2);
+        plot(4*cos(th), 4*sin(th), 'k-', 'LineWidth', 1.2);
+        plot(0, 0, 'k.', 'MarkerSize', 16);
+        title(titles{k}, 'Interpreter', 'tex');
+        xlabel('x/R'); ylabel('y/R');
+    end
+    sgtitle([title_prefix ' gradient order comparison  (10^{-6} m s^{-1})'], 'Interpreter', 'tex');
+    tmp_path = [tempname(fileparts(path)) '.png'];
+    try
+        exportgraphics(fig, tmp_path, 'Resolution', 180);
+        if exist(path, 'file') == 2
+            delete(path);
+        end
+        movefile(tmp_path, path, 'f');
+    catch ME
+        fallback_path = fullfile(fileparts(path), ['gradient_order_comparison_' datestr(now, 'yyyymmdd_HHMMSS') '.png']);
+        if exist(tmp_path, 'file') == 2
+            movefile(tmp_path, fallback_path, 'f');
+        end
+        warning('Could not replace %s: %s. Wrote %s instead.', path, ME.message, fallback_path);
+    end
+    close(fig);
+end
+
 function cmap = redblue_colormap()
     n = 256;
     r = [(0:(n/2-1))/(n/2), ones(1,n/2)];
@@ -1058,12 +1369,13 @@ function cmap = redblue_colormap()
     cmap = [r(:), g(:), b(:)];
 end
 
-function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
+function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, lat_bands, selection_mode, target_lat, intersect_radius_r, target_label, match_mode, velocity_source, z_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m)
     fid = fopen(path, 'w');
     fprintf(fid, '# META4.0 + Core Argo 垂直速度重建方法与假定\\n\\n');
     fprintf(fid, '- Argo 主数据源：`%s`\\n', argo_mat);
     fprintf(fid, '- 历史 Argo 速度校准源：`%s`\\n', history_argo_mat);
     fprintf(fid, '- META4.0 涡旋源：`%s`\\n', meta_dir);
+    fprintf(fid, '- BOA 背景位密源：`%s`\\n', boa_pden_root);
     fprintf(fid, '- 输出根目录：`%s`\\n', output_root);
     fprintf(fid, '- 运行范围：`%.1fE-%.1fE, %.1f-%.1f latitude`\\n', bbox(1), bbox(2), bbox(3), bbox(4));
     if strcmp(selection_mode, 'crossing_lat')
@@ -1078,11 +1390,12 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, output_roo
     fprintf(fid, '- 速度来源：`%s`。`argo1000m_match` 使用历史文件 `I_Upk/I_Vpk/I_Wpk` 与 TEOS profile 的 `I_PF/I_Time/I_Lon/I_Lat` 近似键匹配；`profile_diff` 是旧的相邻 profile 位置差近似。\\n', velocity_source);
     fprintf(fid, '- 空间分区：保存 `0-1R`、`1-2R`、`2-4R`，图像网格为 `x/R, y/R = -4..4`。\\n');
     fprintf(fid, '- 密度变量：`%s`。默认 `rho0` 为每个纬度带/极性在实际 parking depth 处密度的中位数；可用 `--rho0-mode profile` 做旧口径对照。\\n', density_variable);
-    fprintf(fid, '- `z_mode`：`%s`。默认对 `z_rho_anom = z_rho - median(z_rho in 2-4R)` 求梯度，减少背景水团坡度污染。\\n', z_mode);
-    fprintf(fid, '- `z_rho` 反插值：只使用显式 bracket crossing，不再用全剖面 fallback；有效窗口 `%.0f-%.0f m`，`abs(local_drho_dz) >= %.3g`，bracket 厚度 `<= %.0f m`。\\n', z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+    fprintf(fid, '- `z_mode`：`%s`。`anomaly_boa_climatology` 使用 BOA 多年同月局地背景密度剖面，`anomaly_farfield_plane` 仅作为内部远场平面对照。\\n', z_mode);
+    fprintf(fid, '- BOA 背景模式：`%s`。默认按月份平均 `PDen1000_YYYYMM.mat`，对每个 profile 的 `lon/lat/month` 双线性插值得到背景密度剖面。\\n', boa_background_mode);
+    fprintf(fid, '- `z_rho` 反插值：profile 和 BOA 背景均只使用显式 bracket crossing，不再用全剖面 fallback；有效窗口 `%.0f-%.0f m`，`abs(local_drho_dz) >= %.3g`，bracket 厚度 `<= %.0f m`。\\n', z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
     fprintf(fid, '- 默认网格化：Cressman objective mapping。权重 `w=(R_c^2-r^2)/(R_c^2+r^2)`，仅使用 `R_c` 内样本；默认 `R_c=0.5R`、每格至少 `3` 个样本。`sample_count` 是原始 bin 覆盖，`mapped_support` 是 Cressman 支撑样本数。\\n');
     fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同纬度带、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = -c_x_rel dz''_rho/dx`，`term2 = (u_pk-c_x_raw, v_pk) · grad(z''_rho)`。\\n');
-    fprintf(fid, '- BOA_Argo 只作为 gridded 温盐/密度背景可行性假设记录，不在第一版中直接推导背景速度。\\n\\n');
+    fprintf(fid, '- BOA_Argo 只作为 gridded 密度背景，不直接推导背景速度。\\n\\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\\n');
     fclose(fid);
 end
@@ -1096,11 +1409,13 @@ function write_group_doc(path, matches, grid, polarity, band_label)
     fprintf(fid, '- c_x_rel：`%.6g m/s`\\n', grid.cx_rel);
     fprintf(fid, '- mean observed I_Wpk：`%.6g m/s`\\n', grid.mean_wpk_observed);
     fprintf(fid, '- corr(rebuild_W, I_Wpk)：`%.6g`\\n', grid.corr_rebuild_wpk);
+    fprintf(fid, '- corr(sample-gradient W, I_Wpk)：`%.6g`\\n', grid.corr_sample_rebuild_wpk);
+    fprintf(fid, '- BOA 背景有效样本：`%d / %d`\\n', grid.boa_bg_valid_count, size(matches,1));
     fprintf(fid, '- mean radius：`%.3f km`\\n', grid.mean_radius_m / 1000);
     valid_cells = sum(isfinite(grid.rebuild_w(:)));
     valid_fraction = valid_cells / numel(grid.count);
     fprintf(fid, '- 有样本支撑网格：`%d / %d (%.2f%%)`。\\n', valid_cells, numel(grid.count), valid_fraction * 100);
-    fprintf(fid, '- 输出：`matched_core_argo.csv`、`composite_grid.npz`、`vertical_transport_terms.png`、`wpk_validation.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\\n');
+    fprintf(fid, '- 输出：`matched_core_argo.csv`、`composite_grid.npz`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\\n');
     fclose(fid);
 end
 
@@ -1111,10 +1426,10 @@ function write_summary_doc(path, summary_rows, output_root)
     fprintf(fid, '- 主图变量：`term1 = -c_x_rel dz''_rho/dx`，`term2 = (u_pk-c_x_raw, v_pk) · grad(z''_rho)`，`rebuild_W = term1 + term2`。\\n');
     fprintf(fid, '- 单位：JSON/NPZ 保存原始 `m/s`；PNG 色标显示为 `10^-6 m/s`；白色为空样本格点。\\n');
     fprintf(fid, '- 若使用 `--max-matches-per-group` 做 smoke run，覆盖率会很低；正式结果应使用默认 `0` 读取全部匹配。\\n\\n');
-    fprintf(fid, '| polarity | lat_band | matches | unique Argo | duplicated | 0-1R | 1-2R | 2-4R | valid grid %% | c_x_rel m/s | corr W/Wpk | q95 rebuild | q95 Wpk |\\n');
-    fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\\n');
+    fprintf(fid, '| polarity | lat_band | matches | unique Argo | duplicated | 0-1R | 1-2R | 2-4R | valid grid %% | BOA bg %% | c_x_rel m/s | corr W/Wpk | corr sample/Wpk | q95 rebuild | q95 sample | q95 Wpk |\\n');
+    fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\\n');
     for i=1:size(summary_rows,1)
-        fprintf(fid, '| %s | %s | %d | %d | %d | %d | %d | %d | %.2f | %.6g | %.3g | %.3g | %.3g |\\n', summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,7}, summary_rows{i,8}, summary_rows{i,10} * 100, summary_rows{i,13}, summary_rows{i,17}, summary_rows{i,18}, summary_rows{i,19});
+        fprintf(fid, '| %s | %s | %d | %d | %d | %d | %d | %d | %.2f | %.2f | %.6g | %.3g | %.3g | %.3g | %.3g | %.3g |\\n', summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,7}, summary_rows{i,8}, summary_rows{i,10} * 100, summary_rows{i,17} * 100, summary_rows{i,13}, summary_rows{i,19}, summary_rows{i,20}, summary_rows{i,21}, summary_rows{i,22}, summary_rows{i,23});
     end
     fclose(fid);
 end
@@ -1123,6 +1438,7 @@ end
         template.replace("@ARGO_MAT@", argo_mat)
         .replace("@HISTORY_ARGO_MAT@", history_argo_mat)
         .replace("@META_DIR@", meta_dir)
+        .replace("@BOA_PDEN_ROOT@", boa_pden_root)
         .replace("@OUTPUT_ROOT@", output_root)
         .replace("@BBOX@", bbox)
         .replace("@LAT_BANDS@", lat_bands)
@@ -1138,8 +1454,10 @@ end
         .replace("@SMOOTH_PASSES@", str(int(args.smooth_passes)))
         .replace("@CRESSMAN_RADIUS_R@", f"{float(args.cressman_radius_r):.12g}")
         .replace("@CRESSMAN_MIN_OBS@", str(int(args.cressman_min_obs)))
+        .replace("@SAMPLE_GRADIENT_MAX_PROFILES@", str(int(args.sample_gradient_max_profiles)))
         .replace("@RHO0_MODE@", str(args.rho0_mode).replace("'", "''"))
         .replace("@Z_MODE@", str(args.z_mode).replace("'", "''"))
+        .replace("@BOA_BACKGROUND_MODE@", str(args.boa_background_mode).replace("'", "''"))
         .replace("@VELOCITY_SOURCE@", str(args.velocity_source).replace("'", "''"))
         .replace("@MATCH_MODE@", str(args.match_mode).replace("'", "''"))
         .replace("@MAX_MATCHES@", str(max_matches))
@@ -1159,6 +1477,7 @@ def main() -> int:
     parser.add_argument("--argo-mat", type=Path, default=DEFAULT_ARGO_MAT)
     parser.add_argument("--history-argo-mat", type=Path, default=DEFAULT_HISTORY_ARGO_MAT)
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
+    parser.add_argument("--boa-pden-root", type=Path, default=DEFAULT_BOA_PDEN_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
     parser.add_argument("--lat-bands", type=parse_lat_bands, default=parse_lat_bands(DEFAULT_LAT_BANDS))
@@ -1210,6 +1529,12 @@ def main() -> int:
         help="Minimum profiles within the Cressman influence radius required to map a grid point.",
     )
     parser.add_argument(
+        "--sample-gradient-max-profiles",
+        type=int,
+        default=1000,
+        help="Deterministic cap for the sample-gradient-then-composite diagnostic. Use 0 for all profiles.",
+    )
+    parser.add_argument(
         "--rho0-mode",
         choices=("band_median", "profile"),
         default="band_median",
@@ -1217,9 +1542,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--z-mode",
-        choices=("anomaly_farfield_plane", "anomaly_farfield", "absolute"),
-        default="anomaly_farfield_plane",
-        help="Use far-field plane or scalar isopycnal displacement anomaly for gradients, or use absolute z_rho.",
+        choices=("anomaly_boa_climatology", "anomaly_farfield_plane", "anomaly_farfield", "absolute"),
+        default="anomaly_boa_climatology",
+        help="Use BOA monthly climatology, far-field plane/scalar isopycnal displacement anomaly, or absolute z_rho.",
+    )
+    parser.add_argument(
+        "--boa-background-mode",
+        choices=("monthly_climatology",),
+        default="monthly_climatology",
+        help="BOA background density mode. monthly_climatology averages PDen1000_YYYYMM files by calendar month.",
     )
     parser.add_argument(
         "--velocity-source",

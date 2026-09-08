@@ -213,3 +213,55 @@ cyclonic `0.720`、anticyclonic `0.823`、combined `0.826`；而 `I_Wpk` 与
 2. 即便改正这一层，`z_rho` 坡度项重建仍不能复现 direct parking `I_Wpk`。这说明
    主要剩余问题在计算方式/观测量定义：单时刻 profile 的等密面深度异常与
    Christensen/Freeland 类型的 parking-phase vertical velocity 不是同一个观测量。
+
+## 2026-09-08 BOA 多年同月气候态背景测试
+
+本轮按文献式“局地/季节/水团背景”方向，将正式程序新增为：
+
+```text
+BOA monthly climatology density profile -> z_rho_bg -> z_rho_anom -> Cressman composite -> gradient/W
+```
+
+使用的数据源为 `F:\Argo_data\Self_BOA_Argo_PotentialDensity\PDen1000_YYYYMM.mat`。
+该产品的 `Den` 是约 `1032 kg/m^3` 的位密，而正式程序默认 `I_sigma1`
+是约 `32 kg/m^3` 的 sigma 口径；因此脚本已加入自动单位对齐：
+当 BOA 背景剖面约为 `rho` 而目标 `rho0` 为 `sigma` 时，先对 BOA 剖面减
+`1000`，再做同一 `rho0` 的 bracket crossing。
+
+新增有效 PDF：
+
+- `Lin_etal_2019_RemoteSensing_Argo_Eddy_Bay_of_Bengal.pdf`：Argo 与卫星涡旋配准后，
+  使用温盐/密度异常和涡旋坐标 composite，支持先扣背景再合成的路线。
+- `Cressman_1959_MWR_Operational_Objective_Analysis_System.pdf`：确认 Cressman
+  权重形式和客观分析思想，当前脚本继续使用同类有限半径加权。
+
+仍未作为有效 PDF 使用：
+
+- `Sandalyuk_etal_2020_Lofoten_Basin_Argo_Eddy_Structure.pdf` 下载后 PDF 解析失败，
+  已从有效文献清单排除。
+
+20N crossing、`nearest`、全样本输出目录：
+
+```text
+E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_boa_clim_crossing_20N_1R
+```
+
+结果摘要：
+
+| polarity | matches | BOA bg valid | valid grid cells | corr(rebuild_W, I_Wpk) | corr(sample-gradient W, I_Wpk) | q95 rebuild | q95 sample-gradient | q95 I_Wpk |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cyclonic | 48555 | 100% | 5025 | -0.0063 | -0.5400 | 13.29 | 19.78 | 7.56 |
+| anticyclonic | 45788 | 100% | 5025 | -0.0409 | -0.4954 | 9.88 | 19.83 | 6.89 |
+| combined | 94343 | 100% | 5025 | 0.0596 | -0.0922 | 5.35 | 9.43 | 2.23 |
+
+解释：
+
+1. BOA 多年同月背景没有造成样本损失，说明 `lon/lat/month` 背景密度面技术上可行。
+2. `I_Wpk` 仍显示中心附近东西偶极，但 BOA 背景后的 `rebuild_W` 仍不是稳定东西偶极，
+   与 `I_Wpk` 的空间相关接近 0。
+3. “逐样本局地梯度后合成”的诊断没有改善，两个极性反而与 `I_Wpk` 呈明显负相关；
+   因此当前差异不主要来自“先合成再求梯度”的数值顺序。
+4. 结论进一步收敛：密度异常背景处理确实必须改为 BOA/气候态口径，但即便如此，
+   单时刻 `z_rho_anom` 坡度公式仍不能直接复现历史 direct parking `I_Wpk` 偶极。
+   下一步应重点检查 `rho0` 是否应改为固定 sigma 面/多 sigma 层，并重新推导
+   `w = c dz/dx + u·grad(z)` 与 `I_Wpk = Dz_rho/Dt` 的观测量对应关系。

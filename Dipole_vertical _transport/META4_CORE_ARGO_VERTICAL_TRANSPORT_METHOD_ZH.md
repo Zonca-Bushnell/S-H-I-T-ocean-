@@ -52,12 +52,22 @@ rebuild_W = -c_x_rel * dz'_rho/dx + (u_pk - c_x_raw, v_pk) · grad(z'_rho)
 - `rho0`：默认取每个纬度带/极性内，匹配 Core Argo 在实际 parking depth
   处 `I_sigma1` 的中位数，作为共同目标等密面。
 - `z_rho`：每条 profile 上共同 `rho0` 对应的等密面深度。
-- 默认 `--z-mode anomaly_farfield_plane`：使用 `2-4R` 远场样本拟合
-  `z_bg = a + b x/R + c y/R`，对 `z'_rho = z_rho - z_bg` 求梯度。
-  旧的 `anomaly_farfield` 只扣一个远场中位数，已证实会残留强南北背景坡度。
+- 默认推荐 `--z-mode anomaly_boa_climatology`：使用
+  `F:\Argo_data\Self_BOA_Argo_PotentialDensity\PDen1000_YYYYMM.mat`
+  构建 BOA 多年同月位密气候态，对每条 profile 的 `lon/lat/month`
+  双线性插值得到背景密度剖面，并在同一 `rho0` 上反插值得到
+  `z_bg`，最终对 `z'_rho = z_rho - z_bg` 求梯度。
+- `anomaly_farfield_plane` 保留为对照：使用 `2-4R` 远场样本拟合
+  `z_bg = a + b x/R + c y/R`。旧的 `anomaly_farfield` 只扣一个远场中位数，
+  已证实会残留强南北背景坡度。
+- BOA `Den` 是约 `1032 kg/m^3` 的位密，而默认 `I_sigma1` 是约
+  `32 kg/m^3` 的 sigma 口径；脚本会自动做 `+/-1000` 单位对齐后再
+  寻找背景 crossing。
 - `z_rho` 反插值只允许显式 bracket crossing，不再 fallback 到全剖面
   `interp1(profile, depth)`；CSV 输出 `rho_crossing_count`、
-  `rho_bracket_dz_m`、`local_drho_dz`。
+  `rho_bracket_dz_m`、`local_drho_dz`，BOA 背景则输出
+  `boa_rho_crossing_count`、`boa_rho_bracket_dz_m`、`boa_local_drho_dz`
+  和 `boa_bg_valid`。
 - `z_rho` 有效窗口：默认只保留 `900-1100 m`，且要求
   `abs(local_drho_dz) >= 1e-5`、bracket 厚度 `<=150 m`。
 
@@ -81,11 +91,16 @@ mapping 生成连续 `z_rho/u/v` composite 场。Cressman 权重为
 `--grid-mapping scattered`。如果使用 `--max-matches-per-group 200` 做 smoke run，
 覆盖和插值支撑都会偏低；正式结果应使用默认 `0` 读取全部匹配样本。
 
+脚本还输出 `gradient_order_comparison.png`：左图是主口径“先 Cressman 合成
+`z'_rho` 后求梯度”，右图是轻量诊断“逐样本局地平面梯度后再合成 W”。
+为避免诊断项拖慢全样本，后者默认最多使用 `--sample-gradient-max-profiles 1000`
+个确定性抽样 profile，不作为主结果。
+
 ## BOA_Argo 假定
 
-BOA_Argo 可作为 gridded 温盐/密度背景产品的科学依据，适合后续估计背景
-密度面或气候态密度结构。第一版不从 BOA_Argo 直接推导背景速度；涡旋相对
-传播速度的背景扣除使用匹配 Core Argo 的 parking drift 纬向均值。
+BOA_Argo / Self_BOA_Argo_PotentialDensity 当前只作为 gridded 密度背景产品使用，
+不从 BOA 直接推导背景速度；涡旋相对传播速度的背景扣除仍使用匹配 Core Argo
+的 parking drift 纬向均值。
 
 ## 运行入口
 
