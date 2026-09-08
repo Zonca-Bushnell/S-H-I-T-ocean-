@@ -265,3 +265,34 @@ E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transp
    单时刻 `z_rho_anom` 坡度公式仍不能直接复现历史 direct parking `I_Wpk` 偶极。
    下一步应重点检查 `rho0` 是否应改为固定 sigma 面/多 sigma 层，并重新推导
    `w = c dz/dx + u·grad(z)` 与 `I_Wpk = Dz_rho/Dt` 的观测量对应关系。
+
+## 2026-09-08 梯度方向错误定位
+
+用户指出 BOA 背景后的正式图像呈南北偶极，和 `I_Wpk` 的东西偶极非常像
+90 度旋转。复查代码后确认正式脚本里 MATLAB `gradient` 输出顺序写反：
+
+```matlab
+% 错误旧写法
+[dzdy, dzdx] = gradient(fillmissing2(grid.z), dy_m, dx_m);
+
+% 修正写法
+[dzdx, dzdy] = gradient(fillmissing2(grid.z), dx_m, dy_m);
+```
+
+MATLAB 对二维矩阵的第一个输出是沿列方向的 `dF/dx`，第二个输出是沿行方向的
+`dF/dy`。旧写法会把东西向等密面坡度当成南北向坡度、把南北向坡度当成东西向坡度，
+足以把 `term1 = -c_x_rel dz'/dx` 的主结构旋转 90 度。
+
+用上一轮 BOA 20N crossing 的同一份 `composite_grid.json` 离线重算梯度后：
+
+| polarity | corr(fixed rebuild_W, I_Wpk) | q95 fixed rebuild |
+| --- | ---: | ---: |
+| cyclonic | -0.7233 | 11.85 |
+| anticyclonic | -0.7132 | 10.81 |
+
+解释：修正梯度方向后，`rebuild_W` 从南北结构转为中心附近东西偶极，说明用户的
+“坐标旋转”判断是对的；但它和 `I_Wpk` 是强负相关，说明剩余问题主要不是
+坐标轴，而是 `term1/term2` 的整体符号、`z` 正向向下定义、或 `I_Wpk`
+正负约定之间仍差一个符号。下一步应优先输出和比较
+`rebuild_W`、`-rebuild_W`、`term1_plus/term1_minus` 与 `I_Wpk` 的相关，
+以锁定垂直速度正负号。

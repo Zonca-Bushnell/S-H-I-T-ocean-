@@ -800,7 +800,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     dx_m = mean(diff(x_vec)) * grid.mean_radius_m;
     dy_m = mean(diff(y_vec)) * grid.mean_radius_m;
     if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
-        [dzdy, dzdx] = gradient(fillmissing2(grid.z), dy_m, dx_m);
+        [dzdx, dzdy] = gradient(fillmissing2(grid.z), dx_m, dy_m);
         support = mapping_support_mask(grid_mapping, grid.mapped_support, grid.count, min_bin_count, cressman_min_obs);
         grid.term1_plus = mask_to_support(grid.cx_rel .* dzdx, support);
         grid.term1_minus = mask_to_support(-grid.cx_rel .* dzdx, support);
