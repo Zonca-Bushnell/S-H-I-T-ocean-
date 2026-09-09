@@ -1,0 +1,15 @@
+name: Origin_eddy_detection
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - netcdf4
+  - matplotlib-base
+  - pyyaml
+  - tqdm
+  - fastparquet
+  - pyarrow
+  - contourpy
