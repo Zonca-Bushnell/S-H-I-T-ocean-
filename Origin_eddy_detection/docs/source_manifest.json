@@ -1,0 +1,100 @@
+{
+  "created_on": "2026-09-09",
+  "origin": "Zhe original eddy detection-to-shape chain",
+  "destination": "D:\\01_Eddy\\01_Vertical_asymmetric\\S-H-I-T-ocean-Origin_eddy\\Origin_eddy_detection",
+  "excluded_by_design": [
+    "Zhe/src/post",
+    "Zhe/src/EP",
+    "Zhe/src/Legacy",
+    "Zhe/vendor",
+    "OFES-specific Detection_for_OFES",
+    "representative-vortex and transport stages"
+  ],
+  "files": [
+    {
+      "target": "src/eddy_pipeline/__init__.py",
+      "source": "Zhe/src/eddy_pipeline/__init__.py",
+      "role": "package marker"
+    },
+    {
+      "target": "src/eddy_pipeline/cli.py",
+      "source": "Zhe/src/eddy_pipeline/cli.py",
+      "role": "main detection-to-shape orchestrator"
+    },
+    {
+      "target": "src/eddy_pipeline/contracts.py",
+      "source": "Zhe/src/eddy_pipeline/contracts.py",
+      "role": "production labels and parameter contracts"
+    },
+    {
+      "target": "src/eddy_pipeline/detection_hybrid.py",
+      "source": "Zhe/src/eddy_pipeline/detection_hybrid.py",
+      "role": "Hua hybrid detection"
+    },
+    {
+      "target": "src/eddy_pipeline/detection.py",
+      "source": "Zhe/src/eddy_pipeline/detection.py",
+      "role": "legacy/basic detection helper retained for compatibility"
+    },
+    {
+      "target": "src/eddy_pipeline/tracking.py",
+      "source": "Zhe/src/eddy_pipeline/tracking.py",
+      "role": "feature and group tracking"
+    },
+    {
+      "target": "src/eddy_pipeline/catalog.py",
+      "source": "Zhe/src/eddy_pipeline/catalog.py",
+      "role": "catalog adapter and shape handoff"
+    },
+    {
+      "target": "src/eddy_pipeline/completion.py",
+      "source": "Zhe/src/eddy_pipeline/completion.py",
+      "role": "complete layer centers"
+    },
+    {
+      "target": "src/eddy_pipeline/shape.py",
+      "source": "Zhe/src/eddy_pipeline/shape.py",
+      "role": "life-thresholded 3-D shape classification"
+    },
+    {
+      "target": "src/eddy_pipeline/utils/common.py",
+      "source": "Zhe/src/eddy_pipeline/utils/common.py",
+      "role": "config/date helpers"
+    },
+    {
+      "target": "src/eddy_pipeline/utils/streaming_cmems.py",
+      "source": "Zhe/src/eddy_pipeline/utils/streaming_cmems.py",
+      "role": "CMEMS streaming I/O"
+    },
+    {
+      "target": "src/eddy_pipeline/utils/table_io.py",
+      "source": "Zhe/src/eddy_pipeline/utils/table_io.py",
+      "role": "parquet/csv table helpers"
+    },
+    {
+      "target": "src/eddy_pipeline/utils/velocity3d_core.py",
+      "source": "Zhe/src/eddy_pipeline/utils/velocity3d_core.py",
+      "role": "velocity-center and layer-detection numerics"
+    },
+    {
+      "target": "config/config_kuroshio_results_cpu.yaml",
+      "source": "Zhe/config/config_kuroshio_results_cpu.yaml",
+      "role": "reference production config"
+    },
+    {
+      "target": "docs/Zhe_README_original.md",
+      "source": "Zhe/README.md",
+      "role": "original project README copy"
+    },
+    {
+      "target": "docs/Zhe_CODEBASE_LAYOUT_original.md",
+      "source": "Zhe/CODEBASE_LAYOUT.md",
+      "role": "original layout notes copy"
+    },
+    {
+      "target": "docs/Zhe_main_pipeline_contract_original.md",
+      "source": "Zhe/docs/main_pipeline_contract.md",
+      "role": "original main pipeline contract copy"
+    }
+  ]
+}
