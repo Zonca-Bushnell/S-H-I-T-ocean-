@@ -56,7 +56,7 @@ argo_v(i) = (lat(i+1) - lat(i-1)) / (time(i+1) - time(i-1))
 
 ### 3. `rho0` 不能只用一个纬度带/极性中位数就结束
 
-当前默认 `rho0_mode = band_median`，即每个 group 用一个共同 `rho0`。这能避免逐 profile `rho0` 导致 `z_rho` 全部贴近 parking depth，但也会把跨流系、跨经度、跨水团的背景密度差强行压到一个面上。
+早期诊断中 `rho0_mode = band_median` 表示每个 group 用一个共同 `rho0`。它能避免逐 profile `rho0` 导致 `z_rho` 全部贴近 parking depth，但也会把跨流系、跨经度、跨水团的背景密度差强行压到一个面上。当前正式入口已删除该公开参数，固定使用 BOA 多年同月局地背景定义 `z'_rho`。
 
 文献路线更常见的是：
 
@@ -141,7 +141,7 @@ omega = (R^2 - r^2) / (R^2 + r^2)
 
 ### 可敏感性测试
 
-1. `rho0_mode`：共同密度面、纬度带中位数、每 profile parking density、以及固定 sigma level。
+1. `rho0` 诊断：共同密度面、早期纬度带中位数、每 profile parking density、以及固定 sigma level 只作为历史问题记录；正式入口不再暴露 `rho0_mode`。
 2. 背景定义：远场 `2-4R`、同纬度带 climatology、BOA/ISAS 背景密度面。
 3. Cressman 参数：`0.3R/0.5R/0.75R`、`min_obs=3/5/10`、是否平滑。
 4. 匹配方式：`nearest` 与 `all` 只作为样本统计敏感性，不作为 W 异常的主要解释。
@@ -193,7 +193,7 @@ E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transp
 补充量化：标量远场背景扣除后，`z_rho_anom` 与 `y/R` 的空间相关很高：
 cyclonic `0.720`、anticyclonic `0.823`、combined `0.826`；而 `I_Wpk` 与
 `y/R` 的相关接近 0。说明 `z_rho` 的南北背景坡度没有被标量背景扣除清掉，
-`term1/term2` 会继承这个背景坡度。因此新增 `--z-mode anomaly_farfield_plane`，
+`term1/term2` 会继承这个背景坡度。因此早期曾加入 farfield plane 对照，
 用 `2-4R` 远场样本拟合平面背景 `z_bg=a+b x/R+c y/R`，作为下一步判断
 “背景变量处理问题”与“公式本身问题”的分界测试。
 

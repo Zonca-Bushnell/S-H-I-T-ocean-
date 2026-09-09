@@ -8,7 +8,6 @@
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --compare-z-geometry-modes `
-  --selection-mode crossing_lat `
   --target-lat 20 `
   --intersect-radius-r 1 `
   --match-mode all `

@@ -23,14 +23,6 @@ DEFAULT_OUTPUT_ROOT = Path(
 )
 DEFAULT_BBOX = "0,360,-60,60"
 DEFAULT_CROSSING_LATS = "-60,-50,-40,-30,-20,-10,0,10,20,30,40,50,60"
-DEFAULT_LAT_BANDS = (
-    "-60:-55,-55:-50,-50:-45,-45:-40,-40:-35,-35:-30,"
-    "-30:-25,-25:-20,-20:-15,-15:-10,-10:-5,-5:0,"
-    "0:5,5:10,10:15,15:20,20:25,25:30,"
-    "30:35,35:40,40:45,45:50,50:55,55:60"
-)
-
-
 def parse_bbox(value: str) -> tuple[float, float, float, float]:
     parts = [float(item.strip()) for item in value.split(",")]
     if len(parts) != 4:
@@ -39,18 +31,6 @@ def parse_bbox(value: str) -> tuple[float, float, float, float]:
     if lon_min >= lon_max or lat_min >= lat_max:
         raise argparse.ArgumentTypeError("--bbox ranges must be increasing")
     return lon_min, lon_max, lat_min, lat_max
-
-
-def parse_lat_bands(value: str) -> list[tuple[float, float]]:
-    bands: list[tuple[float, float]] = []
-    for item in value.split(","):
-        lo_text, hi_text = item.split(":")
-        lo, hi = float(lo_text), float(hi_text)
-        if lo >= hi:
-            raise argparse.ArgumentTypeError("latitude bands must be increasing")
-        bands.append((lo, hi))
-    return bands
-
 
 def parse_crossing_lats(value: str) -> list[float]:
     lats: list[float] = []
@@ -279,7 +259,6 @@ def run_matlab_pipeline(args: argparse.Namespace) -> list[Path]:
 
 def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     bbox = " ".join(f"{item:.12g}" for item in args.bbox)
-    lat_bands = "; ".join(f"{lo:.12g} {hi:.12g}" for lo, hi in args.lat_bands)
     crossing_lats = " ".join(f"{lat:.12g}" for lat in args.crossing_lats)
     depth_levels = " ".join(f"{depth:.12g}" for depth in args.depth_levels)
     sensitivity_configs = " ".join(f"'{name}'" for name in args.sensitivity_configs)
@@ -291,6 +270,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     cache_root = matlab_quote(args.cache_root)
     output_root = matlab_quote(args.output_root)
     manifest = matlab_quote(manifest_path)
+    matlab_module_root = matlab_quote(SCRIPT_DIR / "matlab")
     max_matches = int(args.max_matches_per_group)
     template_path = SCRIPT_DIR / "matlab" / "run_meta4_core_argo_backend.m"
     template = template_path.read_text(encoding="utf-8")
@@ -301,10 +281,9 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@BOA_PDEN_ROOT@", boa_pden_root)
         .replace("@CACHE_ROOT@", cache_root)
         .replace("@OUTPUT_ROOT@", output_root)
+        .replace("@MATLAB_MODULE_ROOT@", matlab_module_root)
         .replace("@BBOX@", bbox)
-        .replace("@LAT_BANDS@", lat_bands)
         .replace("@CROSSING_LATS@", crossing_lats)
-        .replace("@SELECTION_MODE@", str(args.selection_mode).replace("'", "''"))
         .replace("@TARGET_LAT@", f"{float(args.target_lat):.12g}")
         .replace("@INTERSECT_RADIUS_R@", f"{float(args.intersect_radius_r):.12g}")
         .replace("@TARGET_LABEL@", target_label.replace("'", "''"))
@@ -312,13 +291,10 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@GRID_N@", str(int(args.grid_n)))
         .replace("@MIN_BIN_COUNT@", str(int(args.min_bin_count)))
         .replace("@PLOT_FILLED_GRADIENT@", "true" if args.plot_filled_gradient else "false")
-        .replace("@GRID_MAPPING@", str(args.grid_mapping).replace("'", "''"))
         .replace("@SMOOTH_PASSES@", str(int(args.smooth_passes)))
         .replace("@CRESSMAN_RADIUS_R@", f"{float(args.cressman_radius_r):.12g}")
         .replace("@CRESSMAN_MIN_OBS@", str(int(args.cressman_min_obs)))
         .replace("@SAMPLE_GRADIENT_MAX_PROFILES@", str(int(args.sample_gradient_max_profiles)))
-        .replace("@RHO0_MODE@", str(args.rho0_mode).replace("'", "''"))
-        .replace("@Z_MODE@", str(args.z_mode).replace("'", "''"))
         .replace("@VERTICAL_MODE@", str(args.vertical_mode).replace("'", "''"))
         .replace("@FAST_SENSITIVITY_2D@", "true" if args.fast_sensitivity_2d else "false")
         .replace("@SENSITIVITY_WORKERS@", str(int(args.workers)))
@@ -336,7 +312,6 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@SECTION_AXIS@", str(args.section_axis).replace("'", "''"))
         .replace("@SECTION_HALF_WIDTH_R@", f"{float(args.section_half_width_r):.12g}")
         .replace("@BOA_BACKGROUND_MODE@", str(args.boa_background_mode).replace("'", "''"))
-        .replace("@VELOCITY_SOURCE@", str(args.velocity_source).replace("'", "''"))
         .replace("@MATCH_MODE@", str(args.match_mode).replace("'", "''"))
         .replace("@MAX_MATCHES@", str(max_matches))
         .replace("@CORE_MIN_M@", f"{float(args.core_min_m):.12g}")
@@ -359,18 +334,11 @@ def main() -> int:
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
-    parser.add_argument("--lat-bands", type=parse_lat_bands, default=parse_lat_bands(DEFAULT_LAT_BANDS))
     parser.add_argument(
         "--crossing-lats",
         type=parse_crossing_lats,
         default=None,
         help="Comma-separated crossing latitudes. Defaults to -60,-50,...,60 unless --target-lat is explicitly used as a single-lat shortcut.",
-    )
-    parser.add_argument(
-        "--selection-mode",
-        choices=("lat_band", "crossing_lat"),
-        default="crossing_lat",
-        help="Choose standard latitude-band sampling or eddies whose radius crosses a target latitude.",
     )
     parser.add_argument("--target-lat", type=float, default=20.0)
     parser.add_argument("--intersect-radius-r", type=float, default=1.0)
@@ -394,18 +362,12 @@ def main() -> int:
         action="store_true",
         help="Keep the filled-gradient term1 field for diagnostics. By default W terms are masked to sampled cells.",
     )
-    parser.add_argument(
-        "--grid-mapping",
-        choices=("cressman", "scattered", "bin"),
-        default="cressman",
-        help="Map profiles to the composite grid. Cressman is the default objective mapping; scattered is a diagnostic interpolation; bin keeps sampled cells only.",
-    )
     parser.add_argument("--smooth-passes", type=int, default=2)
     parser.add_argument(
         "--cressman-radius-r",
         type=float,
         default=0.5,
-        help="Cressman influence radius in eddy-radius units for --grid-mapping cressman.",
+        help="Cressman influence radius in eddy-radius units.",
     )
     parser.add_argument(
         "--cressman-min-obs",
@@ -418,18 +380,6 @@ def main() -> int:
         type=int,
         default=1000,
         help="Deterministic cap for the sample-gradient-then-composite diagnostic. Use 0 for all profiles.",
-    )
-    parser.add_argument(
-        "--rho0-mode",
-        choices=("band_median", "profile"),
-        default="band_median",
-        help="Choose the target isopycnal. band_median uses one shared rho0 per latitude/polarity group; profile keeps the old per-profile parking-density target.",
-    )
-    parser.add_argument(
-        "--z-mode",
-        choices=("anomaly_boa_climatology", "anomaly_farfield_plane", "anomaly_farfield", "absolute"),
-        default="anomaly_boa_climatology",
-        help="Use BOA monthly climatology, far-field plane/scalar isopycnal displacement anomaly, or absolute z_rho.",
     )
     parser.add_argument(
         "--vertical-mode",
@@ -506,12 +456,6 @@ def main() -> int:
         help="BOA background density mode. monthly_climatology averages PDen1000_YYYYMM files by calendar month.",
     )
     parser.add_argument(
-        "--velocity-source",
-        choices=("argo1000m_match", "profile_diff"),
-        default="argo1000m_match",
-        help="Use matched historical Argo1000m I_Upk/I_Vpk/I_Wpk, or the older profile-position-difference velocity proxy.",
-    )
-    parser.add_argument(
         "--match-mode",
         choices=("nearest", "all"),
         default="nearest",
@@ -558,7 +502,7 @@ def main() -> int:
     args = parser.parse_args(argv)
     target_lat_explicit = any(item == "--target-lat" or item.startswith("--target-lat=") for item in raw_argv)
     if args.crossing_lats is None:
-        if args.selection_mode == "crossing_lat" and target_lat_explicit:
+        if target_lat_explicit:
             args.crossing_lats = [args.target_lat]
         else:
             args.crossing_lats = parse_crossing_lats(DEFAULT_CROSSING_LATS)

@@ -102,7 +102,6 @@ mapped = W' * V / W' * valid
 ```powershell
 D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
-  --selection-mode crossing_lat `
   --crossing-lats -60,-50,-40,-30,-20,-10,0,10,20,30,40,50,60 `
   --intersect-radius-r 1 `
   --bbox 0,360,-60,60 `
