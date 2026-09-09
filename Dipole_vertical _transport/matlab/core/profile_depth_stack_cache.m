@@ -7,8 +7,10 @@ function profile_cache = profile_depth_stack_cache(matches, rho, depth, boa_clim
     n_unique = numel(argo_indices);
     nz = numel(depth_levels);
     depth_tag = sprintf('%gm_%gm_%03dlev', min(depth_levels), max(depth_levels), nz);
-    cache_file = fullfile(cache_root, ['boa_profile_qc_' sanitize_filename(band_label) '_' sanitize_filename(match_mode) '_' depth_tag '.mat']);
-    key = matlab.lang.makeValidName([polarity '_' band_label '_' match_mode '_' depth_tag]);
+    sample_hash = mod(sum(double(argo_indices(:))) + 1000003 * n_unique, 2147483647);
+    sample_tag = sprintf('n%d_h%d', n_unique, sample_hash);
+    cache_file = fullfile(cache_root, ['boa_profile_qc_' sanitize_filename(band_label) '_' sanitize_filename(match_mode) '_' depth_tag '_' sample_tag '.mat']);
+    key = matlab.lang.makeValidName([polarity '_' band_label '_' match_mode '_' depth_tag '_' sample_tag]);
     if exist(cache_file, 'file') == 2
         C = load(cache_file, 'profile_cache_store');
         if isfield(C, 'profile_cache_store') && isfield(C.profile_cache_store, key)

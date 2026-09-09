@@ -1,0 +1,38 @@
+function write_reference_like_reversal_doc(path, result, polarity, band_label, match_count, unique_argo_count)
+    fid = fopen(path, 'w');
+    cleanup = onCleanup(@() fclose(fid));
+    fprintf(fid, '# 20N reference-like W 深层反转诊断\n\n');
+    fprintf(fid, '本诊断不改变正式生产口径，目标是测试：当 `triangle z_rho` 不再来自 BOA 异常等密面起伏，而改用合成总密度场的整体等密面斜率时，W 是否更接近参考图中的深层反相结构。\n\n');
+    fprintf(fid, '## 样本\n\n');
+    fprintf(fid, '- polarity: `%s`\n', polarity);
+    fprintf(fid, '- group: `%s`\n', band_label);
+    fprintf(fid, '- match_count: `%d`\n', match_count);
+    fprintf(fid, '- unique_argo_count: `%d`\n\n', unique_argo_count);
+    fprintf(fid, '## 口径\n\n');
+    fprintf(fid, '1. 先用当前正式流程完成 `20N crossing / match-mode all / recommended` 的匹配、BOA QC、Cressman 合成和热成风速度。\n');
+    fprintf(fid, '2. 对合成后的总密度场 `rho_abs(x/R,y/R,D)` 做水平和垂向平滑。\n');
+    fprintf(fid, '3. 用隐式等密面关系计算整体等密面斜率：\n\n');
+    fprintf(fid, '```text\n');
+    fprintf(fid, 'rho(x, y, D) = const\n');
+    fprintf(fid, 'dD/dx|rho = -rho_x / rho_D\n');
+    fprintf(fid, 'dD/dy|rho = -rho_y / rho_D\n');
+    fprintf(fid, '```\n\n');
+    fprintf(fid, '其中 `D` 为正深度向下。弱层结 `|rho_D| < %.3g` 被剔除，斜率按 %.1f%% 分位封顶。\n\n', result.options.min_abs_rho_D, result.options.slope_cap_quantile * 100);
+    fprintf(fid, '4. 速度仍使用当前正式热成风速度；W 保持向上为正：\n\n');
+    fprintf(fid, '```text\n');
+    fprintf(fid, 'term1 = c_x_rel * dD/dx|rho\n');
+    fprintf(fid, 'term2 = -[(u_tw - c_x_raw) * dD/dx|rho + v_tw * dD/dy|rho]\n');
+    fprintf(fid, 'W = term1 + term2\n');
+    fprintf(fid, '```\n\n');
+    fprintf(fid, '## 指标\n\n');
+    fprintf(fid, '| metric | value |\n');
+    fprintf(fid, '|---|---:|\n');
+    fprintf(fid, '| valid fraction | %.3f |\n', result.stats.valid_fraction);
+    fprintf(fid, '| q95 abs W (10^-6 m/s) | %.3g |\n', result.stats.q95_abs_w_1e6_m_s);
+    fprintf(fid, '| median corr W(z), W(1000m) | %.3g |\n', result.stats.median_corr_w_vs_1000m);
+    fprintf(fid, '| deep reversal score | %.3g |\n', result.stats.deep_reversal_score);
+    fprintf(fid, '| first zero crossing depth (m) | %.3g |\n', result.stats.first_zero_crossing_depth_m);
+    fprintf(fid, '| slope cap | %.3g |\n\n', result.stats.slope_cap);
+    fprintf(fid, '## 解释\n\n');
+    fprintf(fid, '如果这个实验比正式 BOA anomaly geometry 更容易出现深层反相，说明差异主要来自 `triangle z_rho` 的几何定义：正式口径合成的是去背景后的异常等密面起伏，参考式口径保留了合成总密度场中的整体等密面倾斜和垂向结构。\n');
+end

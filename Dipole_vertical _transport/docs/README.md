@@ -5,7 +5,7 @@
 - `method/`：正式生产口径。当前固定为 crossing + BOA anomaly geometry +
   Cressman + thermal-wind W。
 - `diagnostics/`：用于解释和对照的诊断入口，包括参数敏感性、深层反转因子、
-  zgeometry 对照和性能审计。这里的模式不改变正式生产定义。
+  zgeometry 对照、reference-like 深层反转和性能审计。这里的模式不改变正式生产定义。
 - `literature/`：已下载并核验过的文献方法记录。
 - `audit/`：Argo 数据源审计记录。
 

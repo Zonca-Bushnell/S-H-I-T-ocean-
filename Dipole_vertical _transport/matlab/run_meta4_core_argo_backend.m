@@ -25,6 +25,7 @@ compute_device = '@COMPUTE_DEVICE@';
 matlab_profile_enabled = @MATLAB_PROFILE@;
 diagnose_reversal_factors = @DIAGNOSE_REVERSAL_FACTORS@;
 compare_z_geometry_modes = @COMPARE_Z_GEOMETRY_MODES@;
+diagnose_reference_like_reversal = @DIAGNOSE_REFERENCE_LIKE_REVERSAL@;
 z_geometry_mode = '@Z_GEOMETRY_MODE@';
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
@@ -121,6 +122,20 @@ if compare_z_geometry_modes
     grid_files = run_zgeometry_comparison(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
         argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
         time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group, z_geometry_mode);
+    manifest = struct();
+    manifest.grid_files = grid_files;
+    manifest.output_root = output_root;
+    text = jsonencode(manifest);
+    fid = fopen('@MANIFEST@', 'w');
+    fwrite(fid, text, 'char');
+    fclose(fid);
+    return
+end
+
+if diagnose_reference_like_reversal
+    grid_files = run_reference_like_reversal(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
+        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+        time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group);
     manifest = struct();
     manifest.grid_files = grid_files;
     manifest.output_root = output_root;

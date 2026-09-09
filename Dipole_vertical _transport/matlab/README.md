@@ -12,8 +12,8 @@ is split into modules:
 - `mapping/`: Cressman objective mapping, GPU/CPU backends, support counts, and
   smoothing.
 - `output/`: MAT, NetCDF, PNG, and Markdown writers.
-- `diagnostics/`: 2D sensitivity, reversal-factor tests, and z-geometry
-  comparison.
+- `diagnostics/`: 2D sensitivity, reversal-factor tests, z-geometry comparison,
+  and reference-like absolute-density isopycnal-slope experiments.
 
 Formal production is fixed to crossing + BOA anomaly geometry + Cressman +
 thermal-wind W. Early `lat_band`, farfield/absolute background, non-Cressman

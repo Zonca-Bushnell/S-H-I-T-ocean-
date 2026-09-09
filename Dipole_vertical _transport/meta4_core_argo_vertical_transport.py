@@ -303,6 +303,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@MATLAB_PROFILE@", "true" if args.matlab_profile else "false")
         .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
         .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
+        .replace("@DIAGNOSE_REFERENCE_LIKE_REVERSAL@", "true" if args.diagnose_reference_like_reversal else "false")
         .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
@@ -424,6 +425,11 @@ def main() -> int:
         "--compare-z-geometry-modes",
         action="store_true",
         help="Run the controlled 20N comparison between BOA-referenced z_rho anomaly geometry and composite-density isosurface geometry.",
+    )
+    parser.add_argument(
+        "--diagnose-reference-like-reversal",
+        action="store_true",
+        help="Run a controlled 20N reference-like experiment using smoothed absolute composite density and implicit isopycnal slopes.",
     )
     parser.add_argument(
         "--z-geometry-mode",
