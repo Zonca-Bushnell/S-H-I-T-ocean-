@@ -326,6 +326,8 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@COMPUTE_DEVICE@", str(args.compute_device).replace("'", "''"))
         .replace("@MATLAB_PROFILE@", "true" if args.matlab_profile else "false")
         .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
+        .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
+        .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
         .replace("@WRITE_GRID_NC@", "true" if args.write_grid_nc else "false")
@@ -467,6 +469,17 @@ def main() -> int:
         "--diagnose-reversal-factors",
         action="store_true",
         help="Run the 20N-style controlled diagnosis for density-slope, thermal-wind velocity, and term2 choices.",
+    )
+    parser.add_argument(
+        "--compare-z-geometry-modes",
+        action="store_true",
+        help="Run the controlled 20N comparison between BOA-referenced z_rho anomaly geometry and composite-density isosurface geometry.",
+    )
+    parser.add_argument(
+        "--z-geometry-mode",
+        choices=("boa_anomaly", "composite_density_isosurface"),
+        default="boa_anomaly",
+        help="Geometry used for z_rho gradients in diagnostic comparison modes.",
     )
     parser.add_argument(
         "--depth-levels",

@@ -29,6 +29,8 @@ sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
 matlab_profile_enabled = @MATLAB_PROFILE@;
 diagnose_reversal_factors = @DIAGNOSE_REVERSAL_FACTORS@;
+compare_z_geometry_modes = @COMPARE_Z_GEOMETRY_MODES@;
+z_geometry_mode = '@Z_GEOMETRY_MODE@';
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
 write_grid_nc_flag = @WRITE_GRID_NC@;
@@ -127,6 +129,20 @@ if diagnose_reversal_factors
     grid_files = run_reversal_factor_diagnosis(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
         argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
         time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group);
+    manifest = struct();
+    manifest.grid_files = grid_files;
+    manifest.output_root = output_root;
+    text = jsonencode(manifest);
+    fid = fopen('@MANIFEST@', 'w');
+    fwrite(fid, text, 'char');
+    fclose(fid);
+    return
+end
+
+if compare_z_geometry_modes
+    grid_files = run_zgeometry_comparison(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
+        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+        time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group, z_geometry_mode);
     manifest = struct();
     manifest.grid_files = grid_files;
     manifest.output_root = output_root;
@@ -395,6 +411,195 @@ function grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, cross
         writecell([summary_header; summary_rows], fullfile(output_root, 'SENSITIVITY_SUMMARY.csv'));
     end
     write_best_sensitivity_doc(fullfile(output_root, 'BEST_PARAMETER_RECOMMENDATION_ZH.md'), summary_rows);
+end
+
+function grid_files = run_zgeometry_comparison(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
+    argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+    time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group, z_geometry_mode)
+
+    grid_files = {};
+    polarities = {'cyclonic','anticyclonic'};
+    band_label = crossing_label(target_lat, intersect_radius_r);
+    summary_header = {'polarity','panel','z_geometry_mode','match_count','unique_argo_count','median_corr_w_vs_1000m','deep_reversal_score','first_zero_crossing_depth_m','q95_abs_w_1e6_m_s','output_dir'};
+    summary_rows = {};
+    grid_n_diag = 61;
+    min_bin_count_diag = 1;
+    grid_mapping_diag = 'cressman';
+    smooth_passes_diag = 4;
+    cressman_radius_r_diag = 1.0;
+    cressman_min_obs_diag = 8;
+    match_mode_diag = 'all';
+    vertical_mode_diag = 'thermal_wind_depth_stack';
+    section_axis_diag = 'x';
+    section_half_width_r_diag = 0.25;
+
+    for p = 1:numel(polarities)
+        polarity = polarities{p};
+        meta_file = find_meta_file(meta_dir, polarity);
+        log_step(sprintf('Z-geometry comparison loading META %s from %s', polarity, meta_file));
+        M = load(meta_file, 'final_lon', 'final_lat', 'final_time', 'final_track', 'final_radius');
+        meta_lon = double(M.final_lon);
+        meta_lon(meta_lon < 0) = meta_lon(meta_lon < 0) + 360;
+        meta_lat = double(M.final_lat);
+        meta_time = double(M.final_time);
+        meta_track = double(M.final_track);
+        meta_radius = double(M.final_radius);
+        meta_cx = track_cx(meta_lon, meta_lat, meta_time, meta_track, deg_m);
+        cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+        meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & isfinite(meta_radius) & meta_radius > 0 & ...
+            cross_distance_m <= meta_radius * intersect_radius_r);
+        if isempty(meta_band)
+            argo_band = [];
+        else
+            argo_lat_window_m = (intersect_radius_r + 4) * max(meta_radius(meta_band));
+            argo_band = find(argo_base_mask & abs(argo_lat - target_lat) * deg_m <= argo_lat_window_m);
+        end
+        log_step(sprintf('%s %s z-geometry comparison candidates: %d Argo profiles, %d META snapshots', polarity, band_label, numel(argo_band), numel(meta_band)));
+        [matches, grid3d] = build_group_3d(argo_band, meta_band, polarity, band_label, ...
+            argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+            meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+            time_window_days, grid_n_diag, min_bin_count_diag, grid_mapping_diag, smooth_passes_diag, cressman_radius_r_diag, cressman_min_obs_diag, ...
+            'anomaly_boa_climatology', boa_clim, depth_levels, 1e-5, 150, match_mode_diag, max_matches_per_group, deg_m, section_axis_diag, section_half_width_r_diag, vertical_mode_diag, cache_root);
+        comparison = zgeometry_comparison_terms(grid3d, z_geometry_mode);
+        group_dir = fullfile(output_root, polarity, band_label);
+        if exist(group_dir, 'dir') ~= 7
+            mkdir(group_dir);
+        end
+        save(fullfile(group_dir, 'zgeometry_comparison_terms.mat'), 'comparison', 'grid3d', 'matches', '-v7.3');
+        plot_zgeometry_4panel(fullfile(group_dir, 'zgeometry_w_4panel.png'), comparison, polarity, band_label);
+        write_zgeometry_comparison_doc(fullfile(group_dir, 'ZGEOMETRY_COMPARISON_ZH.md'), comparison, polarity, band_label, size(matches,1), count_unique_argo(matches));
+        grid_files{end+1} = fullfile(group_dir, 'zgeometry_comparison_terms.mat'); %#ok<AGROW>
+        for vv = 1:numel(comparison.panel_names)
+            stats = comparison.panel_stats(vv);
+            summary_rows(end+1,:) = {polarity, comparison.panel_names{vv}, comparison.panels(vv).z_geometry_mode, size(matches,1), count_unique_argo(matches), ...
+                stats.median_corr_w_vs_1000m, stats.deep_reversal_score, stats.first_zero_crossing_depth_m, stats.q95_abs_w_1e6_m_s, group_dir}; %#ok<AGROW>
+        end
+    end
+    write_summary_table_mat(fullfile(output_root, 'ZGEOMETRY_COMPARISON_SUMMARY.mat'), summary_header, summary_rows);
+    write_zgeometry_summary_doc(fullfile(output_root, 'ZGEOMETRY_COMPARISON_SUMMARY_ZH.md'), summary_rows);
+end
+
+function comparison = zgeometry_comparison_terms(grid3d, requested_mode)
+    diag = reversal_factor_terms(grid3d);
+    source_names = {'A_current','B_comp_isoslope','C_comp_isoslope_comp_tw','D_predecessor_like'};
+    panel_names = {'A_boa_anomaly','B_composite_density_isosurface','C_isosurface_composite_density_tw','D_isosurface_predecessor_term2'};
+    panel_modes = {'boa_anomaly','composite_density_isosurface','composite_density_isosurface','composite_density_isosurface'};
+    panel_titles = {'A current BOA z''_\rho anomaly', 'B composite rho isosurface', ...
+        'C isosurface + composite-density TW', 'D isosurface + predecessor term2'};
+    panel_descriptions = { ...
+        '当前正式口径：BOA monthly climatology 给定 rho0，先合成 z''_\rho，再求梯度并重建向上为正 W。', ...
+        '只替换几何：从合成后的 rho(x,y,z) 反插整体等密面集合，再求 dz_\rho/dx 和 dz_\rho/dy。', ...
+        '在整体等密面几何基础上，热成风速度也改用 composite density 的水平密度梯度积分。', ...
+        '尽量接近前辈程序：整体等密面几何、composite-density 热成风、绝对速度形式 term2。'};
+
+    panels = struct('name', {}, 'title', {}, 'description', {}, 'z_geometry_mode', {}, ...
+        'term1', {}, 'term2', {}, 'w', {}, 'section_w', {}, 'stats', {});
+    for ii = 1:numel(source_names)
+        src = find(strcmp(diag.variant_names, source_names{ii}), 1);
+        if isempty(src)
+            error('Missing z-geometry source variant: %s', source_names{ii});
+        end
+        v = diag.variants(src);
+        panels(ii).name = panel_names{ii}; %#ok<AGROW>
+        panels(ii).title = panel_titles{ii};
+        panels(ii).description = panel_descriptions{ii};
+        panels(ii).z_geometry_mode = panel_modes{ii};
+        panels(ii).term1 = v.term1;
+        panels(ii).term2 = v.term2;
+        panels(ii).w = v.w;
+        panels(ii).section_w = v.section_w;
+        panels(ii).stats = v.stats;
+    end
+
+    comparison = struct();
+    comparison.requested_z_geometry_mode = requested_mode;
+    comparison.x = diag.x;
+    comparison.y = diag.y;
+    comparison.depth_levels = diag.depth_levels;
+    comparison.section_axis = diag.section_axis;
+    comparison.section_half_width_r = diag.section_half_width_r;
+    comparison.z_rho_anom = diag.z_rho_anom;
+    comparison.rho_abs = diag.rho_abs;
+    comparison.rho_anom = diag.rho_anom;
+    comparison.dzdx_boa_anomaly = diag.dzdx_current;
+    comparison.dzdy_boa_anomaly = diag.dzdy_current;
+    comparison.dzdx_composite_density_down = diag.dzdx_comp_density_down;
+    comparison.dzdy_composite_density_down = diag.dzdy_comp_density_down;
+    comparison.dzdx_composite_density_up = diag.dzdx_comp_density_up;
+    comparison.dzdy_composite_density_up = diag.dzdy_comp_density_up;
+    comparison.u_tw_current = diag.u_tw_current;
+    comparison.v_tw_current = diag.v_tw_current;
+    comparison.u_tw_comp_density = diag.u_tw_comp_density;
+    comparison.v_tw_comp_density = diag.v_tw_comp_density;
+    comparison.panel_names = {panels.name};
+    comparison.panel_descriptions = {panels.description};
+    comparison.panels = panels;
+    comparison.panel_stats = [panels.stats];
+end
+
+function plot_zgeometry_4panel(path, comparison, polarity, band_label)
+    vals = [];
+    for ii = 1:numel(comparison.panels)
+        vals = [vals; comparison.panels(ii).section_w(:) * 1e6]; %#ok<AGROW>
+    end
+    lim = q95_abs(vals);
+    if ~isfinite(lim) || lim <= 0
+        lim = 2.5;
+    end
+    fig = figure('Visible','off','Color','w','Position',[100 100 1500 1000]);
+    tl = tiledlayout(fig, 2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+    x = comparison.x(1,:);
+    depth_plot = comparison.depth_levels(:);
+    for ii = 1:numel(comparison.panels)
+        ax = nexttile(tl);
+        data = comparison.panels(ii).section_w * 1e6;
+        contourf(ax, x, depth_plot, data, 28, 'LineStyle', 'none');
+        set(ax, 'YDir', 'reverse');
+        colormap(ax, redblue_colormap());
+        clim(ax, [-lim lim]);
+        cb = colorbar(ax);
+        ylabel(cb, '10^{-6} m s^{-1}');
+        xlabel(ax, 'x/R');
+        ylabel(ax, 'Depth (m)');
+        title(ax, comparison.panels(ii).title, 'Interpreter', 'none');
+    end
+    sgtitle(tl, [polarity ' ' band_label ' z_\rho geometry comparison'], 'Interpreter', 'none');
+    exportgraphics(fig, path, 'Resolution', 180);
+    close(fig);
+end
+
+function write_zgeometry_comparison_doc(path, comparison, polarity, band_label, match_count, unique_argo_count)
+    fid = fopen(path, 'w');
+    fprintf(fid, '# %s %s 等密面几何口径对照\n\n', polarity, band_label);
+    fprintf(fid, '本输出从 matched Argo 重新计算三维 W，而不是只对已有 MAT 做后处理。匹配口径固定为 `20N crossing / 1R / match-mode all / recommended`，不生成 combined。\n\n');
+    fprintf(fid, '- 匹配记录数：`%d`\n', match_count);
+    fprintf(fid, '- 唯一 Argo profile：`%d`\n', unique_argo_count);
+    fprintf(fid, '- 请求的 z_geometry_mode：`%s`\n', comparison.requested_z_geometry_mode);
+    fprintf(fid, '- W 符号：向上为正；深度显示：正深度向下。\n\n');
+    fprintf(fid, '| panel | 几何/速度/term2 口径 | median corr W/1000m | deep reversal score | first zero depth m | q95 W |\n');
+    fprintf(fid, '|---|---|---:|---:|---:|---:|\n');
+    for ii = 1:numel(comparison.panels)
+        s = comparison.panel_stats(ii);
+        fprintf(fid, '| %s | %s | %.3g | %.3g | %.3g | %.3g |\n', comparison.panel_names{ii}, ...
+            comparison.panel_descriptions{ii}, s.median_corr_w_vs_1000m, s.deep_reversal_score, ...
+            s.first_zero_crossing_depth_m, s.q95_abs_w_1e6_m_s);
+    end
+    fprintf(fid, '\n判读规则：如果 B 相对 A 明显出现深层反转，主因就是 `z_rho` 从 BOA 相对异常几何换成整体等密面集合；如果 B 不明显而 C/D 改变明显，则分别指向热成风速度口径或 term2 速度/符号组合。\n');
+    fclose(fid);
+end
+
+function write_zgeometry_summary_doc(path, summary_rows)
+    fid = fopen(path, 'w');
+    fprintf(fid, '# 20N 等密面几何口径对照汇总\n\n');
+    fprintf(fid, '| polarity | panel | z geometry | matches | unique Argo | median corr W/1000m | deep reversal score | first zero depth m | q95 W | output |\n');
+    fprintf(fid, '|---|---|---|---:|---:|---:|---:|---:|---:|---|\n');
+    for ii = 1:size(summary_rows,1)
+        fprintf(fid, '| %s | %s | %s | %d | %d | %.3g | %.3g | %.3g | %.3g | `%s` |\n', ...
+            summary_rows{ii,1}, summary_rows{ii,2}, summary_rows{ii,3}, summary_rows{ii,4}, summary_rows{ii,5}, ...
+            summary_rows{ii,6}, summary_rows{ii,7}, summary_rows{ii,8}, summary_rows{ii,9}, summary_rows{ii,10});
+    end
+    fprintf(fid, '\nA 是当前 BOA `z''_rho` 相对异常几何；B/C/D 逐步替换为前辈式整体等密面集合、composite-density 热成风和前辈式 term2。\n');
+    fclose(fid);
 end
 
 function grid_files = run_reversal_factor_diagnosis(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
