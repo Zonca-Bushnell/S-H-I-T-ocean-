@@ -94,25 +94,29 @@ bprime = -9.81 .* rho_anom ./ double(opt.RhoRef);
 
 Rxz = Uprime .* W;
 Rxy = Uprime .* Vprime;
+Rxx = Uprime .* Uprime;
 Bz_heat = W .* Tprime;
 Bz_buoy = W .* bprime;
 
 [dRxy_dy, ~, ~] = gradient(Rxy, dy_m, dx_m, dD_m);
+[~, dRxx_dx, ~] = gradient(Rxx, dy_m, dx_m, dD_m);
 [~, ~, dRxz_dD] = gradient(Rxz, dy_m, dx_m, dD_m);
 
 % z is positive upward, D is positive downward: d/dz = -d/dD.
-% This proxy omits dRxx/dx because the current 3D products do not store U'U'.
 AxR_partial = -dRxy_dy + dRxz_dD;
+AxR_full = -dRxx_dx - dRxy_dy + dRxz_dD;
 
-[beta_heat, residual_heat, corr_heat, ci_heat] = regress_field(AxR_partial, Bz_heat, inside, opt.BootstrapN);
-[beta_buoy, residual_buoy, corr_buoy, ci_buoy] = regress_field(AxR_partial, Bz_buoy, inside, opt.BootstrapN);
+[beta_heat_partial, residual_heat_partial, corr_heat_partial, ci_heat_partial] = regress_field(AxR_partial, Bz_heat, inside, opt.BootstrapN);
+[beta_buoy_partial, residual_buoy_partial, corr_buoy_partial, ci_buoy_partial] = regress_field(AxR_partial, Bz_buoy, inside, opt.BootstrapN);
+[beta_heat_full, residual_heat_full, corr_heat_full, ci_heat_full] = regress_field(AxR_full, Bz_heat, inside, opt.BootstrapN);
+[beta_buoy_full, residual_buoy_full, corr_buoy_full, ci_buoy_full] = regress_field(AxR_full, Bz_buoy, inside, opt.BootstrapN);
 
 out_dir = fullfile(opt.OutputRoot, polarity, 'cross_20N_1R');
 if ~exist(out_dir, 'dir')
     mkdir(out_dir);
 end
 
-section = make_sections(X, Y, depths, Rxz, AxR_partial, Bz_heat, residual_heat);
+section = make_sections(X, Y, depths, Rxz, AxR_full, Bz_heat, residual_heat_full);
 fig_path = fullfile(out_dir, 'epflux_20n_validation_4panel.png');
 plot_four_panel(section, polarity, fig_path);
 
@@ -128,19 +132,28 @@ diagnostics.Tprime_C_proxy = Tprime;
 diagnostics.bprime_m_s2 = bprime;
 diagnostics.Rxz_m2_s2 = Rxz;
 diagnostics.Rxy_m2_s2 = Rxy;
+diagnostics.Rxx_m2_s2 = Rxx;
 diagnostics.Bz_heat_K_m_s = Bz_heat;
 diagnostics.Bz_buoy_m3_s4 = Bz_buoy;
 diagnostics.AxR_partial_m_s2 = AxR_partial;
-diagnostics.beta_heat_to_AxR = beta_heat;
-diagnostics.residual_heat_m_s2 = residual_heat;
-diagnostics.beta_buoy_to_AxR = beta_buoy;
-diagnostics.residual_buoy_m_s2 = residual_buoy;
+diagnostics.AxR_full_m_s2 = AxR_full;
+diagnostics.beta_heat_to_AxR_partial = beta_heat_partial;
+diagnostics.residual_heat_partial_m_s2 = residual_heat_partial;
+diagnostics.beta_buoy_to_AxR_partial = beta_buoy_partial;
+diagnostics.residual_buoy_partial_m_s2 = residual_buoy_partial;
+diagnostics.beta_heat_to_AxR_full = beta_heat_full;
+diagnostics.residual_heat_full_m_s2 = residual_heat_full;
+diagnostics.beta_buoy_to_AxR_full = beta_buoy_full;
+diagnostics.residual_buoy_full_m_s2 = residual_buoy_full;
 diagnostics.source_grid_file = grid_file;
-diagnostics.notes = 'AxR_partial = -dRxy/dy + dRxz/dD; dRxx/dx, Gx and nonlocal LxB are not available in this first check.';
+diagnostics.notes = 'AxR_full = -dRxx/dx - dRxy/dy + dRxz/dD. Gx and nonlocal LxB are not available in this check.';
 save(mat_path, 'diagnostics', '-v7.3');
 
-write_polarity_markdown(out_dir, polarity, grid_file, fig_path, corr_heat, ci_heat, ...
-    corr_buoy, ci_buoy, beta_heat, beta_buoy, AxR_partial, Bz_heat, residual_heat, inside);
+write_polarity_markdown(out_dir, polarity, grid_file, fig_path, ...
+    corr_heat_partial, ci_heat_partial, corr_buoy_partial, ci_buoy_partial, ...
+    beta_heat_partial, beta_buoy_partial, AxR_partial, residual_heat_partial, ...
+    corr_heat_full, ci_heat_full, corr_buoy_full, ci_buoy_full, ...
+    beta_heat_full, beta_buoy_full, AxR_full, Bz_heat, residual_heat_full, inside);
 
 out = struct();
 out.polarity = string(polarity);
@@ -149,12 +162,18 @@ out.match_count = get_optional_scalar(G, 'match_count');
 out.unique_argo_count = get_optional_scalar(G, 'unique_argo_count');
 out.duplicate_match_count = get_optional_scalar(G, 'duplicate_match_count');
 out.valid_fraction = nnz(isfinite(W) & repmat(inside, 1, 1, numel(depths))) / nnz(repmat(inside, 1, 1, numel(depths)));
-out.corr_AxR_WT = corr_heat;
-out.corr_AxR_Wb = corr_buoy;
-out.beta_WT_to_AxR = beta_heat;
-out.residual_heat_q95_over_AxR_q95 = q95_abs(residual_heat, inside) / max(q95_abs(AxR_partial, inside), eps);
+out.corr_AxR_partial_WT = corr_heat_partial;
+out.corr_AxR_partial_Wb = corr_buoy_partial;
+out.beta_WT_to_AxR_partial = beta_heat_partial;
+out.residual_partial_heat_q95_over_AxR_q95 = q95_abs(residual_heat_partial, inside) / max(q95_abs(AxR_partial, inside), eps);
+out.corr_AxR_full_WT = corr_heat_full;
+out.corr_AxR_full_Wb = corr_buoy_full;
+out.beta_WT_to_AxR_full = beta_heat_full;
+out.residual_full_heat_q95_over_AxR_q95 = q95_abs(residual_heat_full, inside) / max(q95_abs(AxR_full, inside), eps);
 out.Rxz_q95_m2_s2 = q95_abs(Rxz, inside);
-out.AxR_q95_m_s2 = q95_abs(AxR_partial, inside);
+out.Rxx_q95_m2_s2 = q95_abs(Rxx, inside);
+out.AxR_partial_q95_m_s2 = q95_abs(AxR_partial, inside);
+out.AxR_full_q95_m_s2 = q95_abs(AxR_full, inside);
 out.WT_q95_K_m_s = q95_abs(Bz_heat, inside);
 out.figure = string(fig_path);
 out.mat_file = string(mat_path);
@@ -253,7 +272,7 @@ function plot_four_panel(section, polarity, fig_path)
 fig = figure('Visible', 'off', 'Color', 'w', 'Position', [100, 100, 1500, 820]);
 tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
 plot_one(section, section.Rxz, 'R_{xz}=u''W (m^2 s^{-2})');
-plot_one(section, section.AxR, 'A_x^R partial (m s^{-2})');
+plot_one(section, section.AxR, 'A_x^R full (m s^{-2})');
 plot_one(section, section.WT, 'W T'' (K m s^{-1})');
 plot_one(section, section.residual, 'A_x^R - \beta WT'' (m s^{-2})');
 sgtitle(sprintf('%s 20N EP-flux validation proxy', polarity), 'Interpreter', 'none');
@@ -315,30 +334,36 @@ else
 end
 end
 
-function write_polarity_markdown(out_dir, polarity, grid_file, fig_path, corr_heat, ci_heat, ...
-    corr_buoy, ci_buoy, beta_heat, beta_buoy, AxR, Bz_heat, residual, inside)
+function write_polarity_markdown(out_dir, polarity, grid_file, fig_path, ...
+    corr_heat_partial, ci_heat_partial, corr_buoy_partial, ci_buoy_partial, ...
+    beta_heat_partial, beta_buoy_partial, AxR_partial, residual_heat_partial, ...
+    corr_heat_full, ci_heat_full, corr_buoy_full, ci_buoy_full, ...
+    beta_heat_full, beta_buoy_full, AxR_full, Bz_heat, residual_heat_full, inside)
 fid = fopen(fullfile(out_dir, 'EP_FLUX_20N_VALIDATION_ZH.md'), 'w');
 cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '# EP-flux 20N 数值验证：%s\n\n', polarity);
 fprintf(fid, '输入三维网格：`%s`\n\n', grid_file);
-fprintf(fid, '本轮是第一阶段局地代理预算验证，不把 `W T''` 等同为传统 EP flux 垂向分量，也不声称已经完成 `G_x = A_x^R + L_x^B + residual` 的闭合。\n\n');
+fprintf(fid, '本轮补入了完整可解析 Reynolds stress 强迫 `A_x^R = -partial_x R_xx - partial_y R_xy + partial_D R_xz`。但它仍然不是完整闭合验证，因为 `G_x` 和非局地 `L_x^B` 尚未定义和求解。\n\n');
 fprintf(fid, '## 已计算量\n\n');
 fprintf(fid, '- `R_xz = u''W`，其中 `u''` 为热成风延拓速度去除 2-4R 远场中位数后的异常。\n');
-fprintf(fid, '- `R_xy = u''v''`，用于构造水平 Reynolds stress 散度的一部分。\n');
-fprintf(fid, '- `A_x^R(partial) = -partial_y R_xy + partial_D R_xz`。这里 `D` 为正深度向下；该式省略了当前产品未保存的 `partial_x R_xx`。\n');
+fprintf(fid, '- `R_xx = u''u''`，`R_xy = u''v''`，`R_xz = u''W`。\n');
+fprintf(fid, '- `A_x^R(full) = -partial_x R_xx - partial_y R_xy + partial_D R_xz`。这里 `D` 为正深度向下，因 `z=-D`，所以垂向通量项写作 `+partial_D R_xz`。\n');
+fprintf(fid, '- 同时保留 `A_x^R(partial) = -partial_y R_xy + partial_D R_xz`，用于比较补入 `-partial_x R_xx` 前后的变化。\n');
 fprintf(fid, '- `T'' = -rho''/(rho_ref alpha)`，线性 EOS 反推温度异常；`W T''` 作为垂直热输运诊断量。\n');
-fprintf(fid, '- `residual_proxy = A_x^R(partial) - beta W T''`，其中 beta 为最小二乘回归系数。它只是热输运解释动量强迫代理量的残差，不是真正的 QG 反演残差。\n\n');
+fprintf(fid, '- `residual_proxy = A_x^R(full) - beta W T''`，其中 beta 为最小二乘回归系数。它只是热输运解释动量强迫的代理残差，不是真正的 QG 反演残差。\n\n');
 fprintf(fid, '## 指标\n\n');
-fprintf(fid, '- `corr(A_x^R, W T'') = %.4g`，grid-point bootstrap 95%% CI `[%.4g, %.4g]`。\n', corr_heat, ci_heat(1), ci_heat(2));
-fprintf(fid, '- `corr(A_x^R, W b'') = %.4g`，grid-point bootstrap 95%% CI `[%.4g, %.4g]`。\n', corr_buoy, ci_buoy(1), ci_buoy(2));
-fprintf(fid, '- `beta(WT -> A_x^R) = %.4g`。\n', beta_heat);
-fprintf(fid, '- `beta(Wb -> A_x^R) = %.4g`。\n', beta_buoy);
-fprintf(fid, '- `q95(|residual_proxy|) / q95(|A_x^R|) = %.4g`。\n\n', q95_abs(residual, inside) / max(q95_abs(AxR, inside), eps));
+fprintf(fid, '- partial: `corr(A_x^R, W T'') = %.4g`，bootstrap 95%% CI `[%.4g, %.4g]`，`beta=%.4g`，`residual_q95/AxR_q95=%.4g`。\n', ...
+    corr_heat_partial, ci_heat_partial(1), ci_heat_partial(2), beta_heat_partial, q95_abs(residual_heat_partial, inside) / max(q95_abs(AxR_partial, inside), eps));
+fprintf(fid, '- full: `corr(A_x^R, W T'') = %.4g`，bootstrap 95%% CI `[%.4g, %.4g]`，`beta=%.4g`，`residual_q95/AxR_q95=%.4g`。\n', ...
+    corr_heat_full, ci_heat_full(1), ci_heat_full(2), beta_heat_full, q95_abs(residual_heat_full, inside) / max(q95_abs(AxR_full, inside), eps));
+fprintf(fid, '- partial: `corr(A_x^R, W b'') = %.4g`，bootstrap 95%% CI `[%.4g, %.4g]`，`beta=%.4g`。\n', corr_buoy_partial, ci_buoy_partial(1), ci_buoy_partial(2), beta_buoy_partial);
+fprintf(fid, '- full: `corr(A_x^R, W b'') = %.4g`，bootstrap 95%% CI `[%.4g, %.4g]`，`beta=%.4g`。\n', corr_buoy_full, ci_buoy_full(1), ci_buoy_full(2), beta_buoy_full);
+fprintf(fid, '\n');
 fprintf(fid, '- `q95(|W T''|) = %.4g K m s^-1`。\n\n', q95_abs(Bz_heat, inside));
 fprintf(fid, '## 图像\n\n');
 fprintf(fid, '![EP-flux 20N validation](%s)\n\n', fig_path);
 fprintf(fid, '## 解释限制\n\n');
-fprintf(fid, '如果 `W T''` 与 `A_x^R(partial)` 的相关稳定，只能说明垂直热输运与可解析 Reynolds stress 强迫存在同位相/反位相关系。要验证理论闭合，还需要下一步定义 `G_x` 和非局地响应算子 `L_x^B=M^{-1}S_B`。\n');
+fprintf(fid, '如果 `W T''` 与完整 `A_x^R` 的相关稳定，只能说明垂直热输运与可解析 Reynolds stress 强迫存在同位相/反位相关系。要验证理论闭合，还需要下一步定义 `G_x` 和非局地响应算子 `L_x^B=M^{-1}S_B`。\n');
 end
 
 function write_root_markdown(output_root, T, opt)
@@ -347,14 +372,14 @@ cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '# EP-flux 新理论 20N 数值验证汇总\n\n');
 fprintf(fid, '本次使用已有 `20N crossing / 1R / match-mode all / recommended` 三维热成风 W 产品，只输出 cyclonic 和 anticyclonic，不生成 combined。\n\n');
 fprintf(fid, '## 理论定位\n\n');
-fprintf(fid, '验证目标不是证明 `W T''` 与水平动量通量简单相等，而是检查它们是否能在同一材料体预算中呈现稳定关系。当前第一版没有 `G_x` 目标量，也没有真正求解 QG/PV 非局地反演 `L_x^B`，因此输出的是 `A_x^R(partial)` 与 `W T''` 的代理关系。\n\n');
+fprintf(fid, '验证目标不是证明 `W T''` 与水平动量通量简单相等，而是检查它们是否能在同一材料体预算中呈现稳定关系。本版已补入 `R_xx` 并计算完整可解析 `A_x^R`，但仍没有 `G_x` 目标量，也没有真正求解 QG/PV 非局地反演 `L_x^B`。\n\n');
 fprintf(fid, '线性 EOS 采用 `T'' = -rho''/(rho_ref alpha)`，其中 `rho_ref = %.1f kg m^-3`，`alpha = %.3g K^-1`。\n\n', opt.RhoRef, opt.Alpha);
 fprintf(fid, '## 数值结果\n\n');
 for i = 1:height(T)
-    fprintf(fid, '- %s: match=%g, unique=%g, corr(AxR,WT)=%.4g, residual_q95/AxR_q95=%.4g, figure=`%s`\n', ...
-        T.polarity(i), T.match_count(i), T.unique_argo_count(i), T.corr_AxR_WT(i), ...
-        T.residual_heat_q95_over_AxR_q95(i), T.figure(i));
+    fprintf(fid, '- %s: match=%g, unique=%g, corr(AxR_full,WT)=%.4g, residual_q95/AxR_q95=%.4g, figure=`%s`\n', ...
+        T.polarity(i), T.match_count(i), T.unique_argo_count(i), T.corr_AxR_full_WT(i), ...
+        T.residual_full_heat_q95_over_AxR_q95(i), T.figure(i));
 end
 fprintf(fid, '\n## 下一步\n\n');
-fprintf(fid, '若要把这一步升级为理论闭合验证，需要补三件事：保存或重构 `R_xx` 以得到完整 `A_x^R`；定义材料体动量变化 `G_x`；实现 `L_x^B=M^{-1}S_B` 的 QG/PV 反演，而不是用 `W T''` 的线性回归代理它。\n');
+fprintf(fid, '若要把这一步升级为理论闭合验证，还需要补两件事：定义材料体动量变化 `G_x`；实现 `L_x^B=M^{-1}S_B` 的 QG/PV 反演，而不是用 `W T''` 的线性回归代理它。\n');
 end
