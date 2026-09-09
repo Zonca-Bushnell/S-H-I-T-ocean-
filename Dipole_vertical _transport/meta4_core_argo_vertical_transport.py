@@ -325,6 +325,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@SENSITIVITY_CONFIGS@", sensitivity_configs)
         .replace("@COMPUTE_DEVICE@", str(args.compute_device).replace("'", "''"))
         .replace("@MATLAB_PROFILE@", "true" if args.matlab_profile else "false")
+        .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
         .replace("@WRITE_GRID_NC@", "true" if args.write_grid_nc else "false")
@@ -461,6 +462,11 @@ def main() -> int:
         "--matlab-profile",
         action="store_true",
         help="Save MATLAB profiler output under the output root for performance audits.",
+    )
+    parser.add_argument(
+        "--diagnose-reversal-factors",
+        action="store_true",
+        help="Run the 20N-style controlled diagnosis for density-slope, thermal-wind velocity, and term2 choices.",
     )
     parser.add_argument(
         "--depth-levels",

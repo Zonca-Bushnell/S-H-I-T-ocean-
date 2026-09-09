@@ -28,6 +28,7 @@ sensitivity_workers = @SENSITIVITY_WORKERS@;
 sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
 matlab_profile_enabled = @MATLAB_PROFILE@;
+diagnose_reversal_factors = @DIAGNOSE_REVERSAL_FACTORS@;
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
 write_grid_nc_flag = @WRITE_GRID_NC@;
@@ -121,6 +122,20 @@ end
 
 argo_base_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3) & argo_lat <= bbox(4) & ...
     argo_park >= core_min_m & argo_park <= core_max_m & isfinite(argo_u) & isfinite(argo_v);
+
+if diagnose_reversal_factors
+    grid_files = run_reversal_factor_diagnosis(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
+        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+        time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group);
+    manifest = struct();
+    manifest.grid_files = grid_files;
+    manifest.output_root = output_root;
+    text = jsonencode(manifest);
+    fid = fopen('@MANIFEST@', 'w');
+    fwrite(fid, text, 'char');
+    fclose(fid);
+    return
+end
 
 if fast_sensitivity_2d
     grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
@@ -380,6 +395,378 @@ function grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, cross
         writecell([summary_header; summary_rows], fullfile(output_root, 'SENSITIVITY_SUMMARY.csv'));
     end
     write_best_sensitivity_doc(fullfile(output_root, 'BEST_PARAMETER_RECOMMENDATION_ZH.md'), summary_rows);
+end
+
+function grid_files = run_reversal_factor_diagnosis(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
+    argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+    time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group)
+
+    grid_files = {};
+    polarities = {'cyclonic','anticyclonic'};
+    band_label = crossing_label(target_lat, intersect_radius_r);
+    summary_header = {'polarity','variant','match_count','unique_argo_count','median_corr_w_vs_1000m','deep_reversal_score','first_zero_crossing_depth_m','q95_abs_w_1e6_m_s','output_dir'};
+    summary_rows = {};
+    grid_n_diag = 61;
+    min_bin_count_diag = 1;
+    grid_mapping_diag = 'cressman';
+    smooth_passes_diag = 4;
+    cressman_radius_r_diag = 1.0;
+    cressman_min_obs_diag = 8;
+    match_mode_diag = 'all';
+    vertical_mode_diag = 'thermal_wind_depth_stack';
+    section_axis_diag = 'x';
+    section_half_width_r_diag = 0.25;
+    max_matches_diag = max_matches_per_group;
+
+    for p = 1:numel(polarities)
+        polarity = polarities{p};
+        meta_file = find_meta_file(meta_dir, polarity);
+        log_step(sprintf('Reversal diagnosis loading META %s from %s', polarity, meta_file));
+        M = load(meta_file, 'final_lon', 'final_lat', 'final_time', 'final_track', 'final_radius');
+        meta_lon = double(M.final_lon);
+        meta_lon(meta_lon < 0) = meta_lon(meta_lon < 0) + 360;
+        meta_lat = double(M.final_lat);
+        meta_time = double(M.final_time);
+        meta_track = double(M.final_track);
+        meta_radius = double(M.final_radius);
+        meta_cx = track_cx(meta_lon, meta_lat, meta_time, meta_track, deg_m);
+        cross_distance_m = abs(meta_lat - target_lat) * deg_m;
+        meta_band = find(meta_lon >= bbox(1) & meta_lon <= bbox(2) & isfinite(meta_radius) & meta_radius > 0 & ...
+            cross_distance_m <= meta_radius * intersect_radius_r);
+        if isempty(meta_band)
+            argo_band = [];
+        else
+            argo_lat_window_m = (intersect_radius_r + 4) * max(meta_radius(meta_band));
+            argo_band = find(argo_base_mask & abs(argo_lat - target_lat) * deg_m <= argo_lat_window_m);
+        end
+        log_step(sprintf('%s %s reversal diagnosis candidates: %d Argo profiles, %d META snapshots', polarity, band_label, numel(argo_band), numel(meta_band)));
+        [matches, grid3d] = build_group_3d(argo_band, meta_band, polarity, band_label, ...
+            argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+            meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
+            time_window_days, grid_n_diag, min_bin_count_diag, grid_mapping_diag, smooth_passes_diag, cressman_radius_r_diag, cressman_min_obs_diag, ...
+            'anomaly_boa_climatology', boa_clim, depth_levels, 1e-5, 150, match_mode_diag, max_matches_diag, deg_m, section_axis_diag, section_half_width_r_diag, vertical_mode_diag, cache_root);
+        diag = reversal_factor_terms(grid3d);
+        group_dir = fullfile(output_root, polarity, band_label);
+        if exist(group_dir, 'dir') ~= 7
+            mkdir(group_dir);
+        end
+        save(fullfile(group_dir, 'reversal_factor_terms.mat'), 'diag', 'grid3d', 'matches', '-v7.3');
+        plot_reversal_factor_4panel(fullfile(group_dir, 'reversal_factor_4panel.png'), diag, polarity, band_label);
+        write_reversal_factor_doc(fullfile(group_dir, 'REVERSION_FACTOR_DIAGNOSIS_ZH.md'), diag, polarity, band_label);
+        grid_files{end+1} = fullfile(group_dir, 'reversal_factor_terms.mat'); %#ok<AGROW>
+        match_count = size(matches, 1);
+        unique_argo_count = count_unique_argo(matches);
+        for vv = 1:numel(diag.variant_names)
+            stats = diag.variant_stats(vv);
+            summary_rows(end+1,:) = {polarity, diag.variant_names{vv}, match_count, unique_argo_count, ...
+                stats.median_corr_w_vs_1000m, stats.deep_reversal_score, stats.first_zero_crossing_depth_m, stats.q95_abs_w_1e6_m_s, group_dir}; %#ok<AGROW>
+        end
+    end
+    write_summary_table_mat(fullfile(output_root, 'REVERSAL_FACTOR_SUMMARY.mat'), summary_header, summary_rows);
+    write_reversal_factor_summary_doc(fullfile(output_root, 'REVERSAL_FACTOR_SUMMARY_ZH.md'), summary_rows);
+end
+
+function diag = reversal_factor_terms(grid3d)
+    rho_abs = grid3d.rho_abs;
+    if ~isfield(grid3d, 'rho_abs') || ~any(isfinite(rho_abs(:)))
+        rho_abs = grid3d.rho_anom;
+    end
+    support3 = isfinite(grid3d.z_anom) & isfinite(grid3d.rho_anom);
+    radius_m = double(grid3d.mean_radius_m);
+    x_vec = grid3d.x(1,:);
+    y_vec = grid3d.y(:,1);
+    dx_m = median(diff(x_vec), 'omitnan') * radius_m;
+    dy_m = median(diff(y_vec), 'omitnan') * radius_m;
+    depth_levels = grid3d.depth_levels(:);
+    [dzdx_current, dzdy_current] = gradient_stack_depth_positive(grid3d.z_anom, dx_m, dy_m);
+    [dzdx_comp_down, dzdy_comp_down] = predecessor_isopycnal_slope(rho_abs, depth_levels, dx_m, dy_m, false);
+    [dzdx_comp_up, dzdy_comp_up] = predecessor_isopycnal_slope(rho_abs, depth_levels, dx_m, dy_m, true);
+    [u_tw_comp, v_tw_comp] = thermal_wind_velocity_stack(rho_abs, support3, grid3d.u_tw(:,:,nearest_depth_index(depth_levels, 1000)), ...
+        grid3d.v_tw(:,:,nearest_depth_index(depth_levels, 1000)), isfinite(grid3d.u_tw(:,:,nearest_depth_index(depth_levels, 1000))) & isfinite(grid3d.v_tw(:,:,nearest_depth_index(depth_levels, 1000))), ...
+        depth_levels, dx_m, dy_m, grid3d.thermal_wind_f_s_1);
+
+    variants = struct('name', {}, 'description', {}, 'term1', {}, 'term2', {}, 'w', {}, 'section_w', {}, 'stats', {});
+    variants(1) = make_reversal_variant_from_factors('A_current', '当前：BOA z''_rho anomaly 梯度 + rho_anom 热成风 + 当前相对速度 term2', ...
+        dzdx_current, dzdy_current, -dzdx_current, -dzdy_current, grid3d.u_tw, grid3d.v_tw, 'current', support3, grid3d);
+    variants(2) = make_reversal_variant_from_factors('B_comp_isoslope', '只换前辈式：composite rho 反插得到等密面斜率；速度和 term2 仍用当前口径', ...
+        dzdx_comp_down, dzdy_comp_down, dzdx_comp_up, dzdy_comp_up, grid3d.u_tw, grid3d.v_tw, 'current', support3, grid3d);
+    variants(3) = make_reversal_variant_from_factors('C_comp_isoslope_comp_tw', '前辈式等密面斜率 + 用 composite density 梯度积分热成风；term2 仍用当前相对速度符号', ...
+        dzdx_comp_down, dzdy_comp_down, dzdx_comp_up, dzdy_comp_up, u_tw_comp, v_tw_comp, 'current', support3, grid3d);
+    variants(4) = make_reversal_variant_from_factors('D_predecessor_like', '尽量接近前辈：composite rho 等密面斜率 + composite density 热成风 + c0/绝对速度 term2', ...
+        dzdx_comp_down, dzdy_comp_down, dzdx_comp_up, dzdy_comp_up, u_tw_comp, v_tw_comp, 'predecessor', support3, grid3d);
+    variants(5) = make_reversal_variant_from_factors('E_current_slope_comp_tw', '当前 z''_rho 梯度 + composite density 热成风 + 当前 term2', ...
+        dzdx_current, dzdy_current, -dzdx_current, -dzdy_current, u_tw_comp, v_tw_comp, 'current', support3, grid3d);
+    variants(6) = make_reversal_variant_from_factors('F_current_slope_pred_term2', '当前 z''_rho 梯度 + 当前热成风 + 前辈式 c0/绝对速度 term2', ...
+        dzdx_current, dzdy_current, -dzdx_current, -dzdy_current, grid3d.u_tw, grid3d.v_tw, 'predecessor', support3, grid3d);
+    variants(7) = make_reversal_variant_from_factors('G_comp_isoslope_pred_term2', '前辈式等密面斜率 + 当前热成风 + 前辈式 c0/绝对速度 term2', ...
+        dzdx_comp_down, dzdy_comp_down, dzdx_comp_up, dzdy_comp_up, grid3d.u_tw, grid3d.v_tw, 'predecessor', support3, grid3d);
+    variants(8) = make_reversal_variant_from_factors('H_current_slope_comp_tw_pred_term2', '当前 z''_rho 梯度 + composite density 热成风 + 前辈式 c0/绝对速度 term2', ...
+        dzdx_current, dzdy_current, -dzdx_current, -dzdy_current, u_tw_comp, v_tw_comp, 'predecessor', support3, grid3d);
+
+    diag = struct();
+    diag.x = grid3d.x;
+    diag.y = grid3d.y;
+    diag.depth_levels = depth_levels;
+    diag.section_axis = grid3d.section_axis;
+    diag.section_half_width_r = grid3d.section_half_width_r;
+    diag.dzdx_current = dzdx_current;
+    diag.dzdy_current = dzdy_current;
+    diag.dzdx_comp_density_down = dzdx_comp_down;
+    diag.dzdy_comp_density_down = dzdy_comp_down;
+    diag.dzdx_comp_density_up = dzdx_comp_up;
+    diag.dzdy_comp_density_up = dzdy_comp_up;
+    diag.u_tw_current = grid3d.u_tw;
+    diag.v_tw_current = grid3d.v_tw;
+    diag.u_tw_comp_density = u_tw_comp;
+    diag.v_tw_comp_density = v_tw_comp;
+    diag.z_rho_anom = grid3d.z_anom;
+    diag.rho_abs = rho_abs;
+    diag.rho_anom = grid3d.rho_anom;
+    diag.variant_names = {variants.name};
+    diag.variant_descriptions = {variants.description};
+    diag.variants = variants;
+    diag.variant_stats = [variants.stats];
+end
+
+function variant = make_reversal_variant(name, description, term1, term2, support3, grid3d)
+    term1 = mask_stack(term1, support3);
+    term2 = mask_stack(term2, support3);
+    w = mask_stack(term1 + term2, support3);
+    section_w = section_stack(w, grid3d.y(:,1), grid3d.section_half_width_r);
+    stats = reversal_section_stats(section_w, grid3d.depth_levels(:));
+    stats.q95_abs_w_1e6_m_s = q95_abs(w(:) * 1e6);
+    variant = struct('name', name, 'description', description, 'term1', term1, 'term2', term2, 'w', w, 'section_w', section_w, 'stats', stats);
+end
+
+function variant = make_reversal_variant_from_factors(name, description, dzdx_down, dzdy_down, dzdx_up, dzdy_up, u_field, v_field, term2_mode, support3, grid3d)
+    if strcmp(term2_mode, 'predecessor')
+        c0 = abs(grid3d.mean_cx_raw);
+        term1 = c0 .* dzdx_up;
+        term2 = u_field .* dzdx_up + v_field .* dzdy_up;
+    else
+        term1 = grid3d.cx_rel .* dzdx_down;
+        term2 = -((u_field - grid3d.mean_cx_raw) .* dzdx_down + v_field .* dzdy_down);
+    end
+    variant = make_reversal_variant(name, description, term1, term2, support3, grid3d);
+end
+
+function [dzdx_stack, dzdy_stack] = gradient_stack_depth_positive(z_stack, dx_m, dy_m)
+    [ny, nx, nz] = size(z_stack);
+    dzdx_stack = nan(ny, nx, nz);
+    dzdy_stack = nan(ny, nx, nz);
+    for zz = 1:nz
+        z_grid = fillmissing2(z_stack(:,:,zz));
+        [dzdx, dzdy] = gradient(z_grid, dx_m, dy_m);
+        dzdx_stack(:,:,zz) = dzdx;
+        dzdy_stack(:,:,zz) = dzdy;
+    end
+end
+
+function [dzdx_stack, dzdy_stack] = predecessor_isopycnal_slope(rho_stack, depth_levels, dx_m, dy_m, upward_coordinate)
+    [ny, nx, nz] = size(rho_stack);
+    rho_clean = rho_stack;
+    for ii = 1:ny
+        for jj = 1:nx
+            rho_clean(ii,jj,:) = monotonic_density_profile(squeeze(rho_clean(ii,jj,:)));
+        end
+    end
+    z_axis = depth_levels(:);
+    if upward_coordinate
+        z_axis = -z_axis;
+    end
+    dzdx_stack = nan(ny, nx, nz);
+    dzdy_stack = nan(ny, nx, nz);
+    for ii = 1:ny
+        for jj = 1:nx
+            center = squeeze(rho_clean(ii,jj,:));
+            if nnz(isfinite(center)) < 3
+                continue
+            end
+            if jj == 1
+                left = squeeze(rho_clean(ii,jj,:));
+                right = squeeze(rho_clean(ii,jj+1,:));
+                scale_x = 1 / dx_m;
+            elseif jj == nx
+                left = squeeze(rho_clean(ii,jj-1,:));
+                right = squeeze(rho_clean(ii,jj,:));
+                scale_x = 1 / dx_m;
+            else
+                left = squeeze(rho_clean(ii,jj-1,:));
+                right = squeeze(rho_clean(ii,jj+1,:));
+                scale_x = 0.5 / dx_m;
+            end
+            z_left = interp_density_to_depth(left, z_axis, center);
+            z_right = interp_density_to_depth(right, z_axis, center);
+            dzdx_stack(ii,jj,:) = (z_right - z_left) .* scale_x;
+            if ii == 1
+                south = squeeze(rho_clean(ii,jj,:));
+                north = squeeze(rho_clean(ii+1,jj,:));
+                scale_y = 1 / dy_m;
+            elseif ii == ny
+                south = squeeze(rho_clean(ii-1,jj,:));
+                north = squeeze(rho_clean(ii,jj,:));
+                scale_y = 1 / dy_m;
+            else
+                south = squeeze(rho_clean(ii-1,jj,:));
+                north = squeeze(rho_clean(ii+1,jj,:));
+                scale_y = 0.5 / dy_m;
+            end
+            z_south = interp_density_to_depth(south, z_axis, center);
+            z_north = interp_density_to_depth(north, z_axis, center);
+            dzdy_stack(ii,jj,:) = (z_north - z_south) .* scale_y;
+        end
+    end
+end
+
+function profile = monotonic_density_profile(profile)
+    profile = profile(:);
+    for kk = 2:numel(profile)
+        if isfinite(profile(kk-1)) && isfinite(profile(kk)) && profile(kk) <= profile(kk-1)
+            profile(kk) = profile(kk-1) + max(abs(profile(kk-1)) * 1e-9, 1e-6);
+        end
+    end
+end
+
+function z = interp_density_to_depth(profile, z_axis, rho_targets)
+    z = nan(size(rho_targets));
+    good = isfinite(profile) & isfinite(z_axis);
+    if nnz(good) < 3
+        return
+    end
+    p = profile(good);
+    z_good = z_axis(good);
+    [p, ia] = unique(p, 'stable');
+    z_good = z_good(ia);
+    if numel(p) < 3
+        return
+    end
+    z = interp1(p, z_good, rho_targets, 'linear', NaN);
+end
+
+function idx = nearest_depth_index(depth_levels, target_depth)
+    [~, idx] = min(abs(depth_levels(:) - target_depth));
+end
+
+function A = mask_stack(A, support3)
+    A(~support3) = NaN;
+end
+
+function section = section_stack(field3d, y_vec, half_width_r)
+    if ~isfinite(half_width_r) || half_width_r <= 0
+        half_width_r = 0.25;
+    end
+    y_mask = abs(y_vec) <= half_width_r;
+    tmp = field3d(y_mask,:,:);
+    section = squeeze(median(tmp, 1, 'omitnan'))';
+end
+
+function stats = reversal_section_stats(section_w, depth_levels)
+    anchor = nearest_depth_index(depth_levels, 1000);
+    base = section_w(anchor,:);
+    corr_by_depth = nan(numel(depth_levels), 1);
+    for kk = 1:numel(depth_levels)
+        a = section_w(kk,:);
+        good = isfinite(a) & isfinite(base);
+        if nnz(good) >= 5
+            C = corrcoef(a(good), base(good));
+            corr_by_depth(kk) = C(1,2);
+        end
+    end
+    shallow_mask = depth_levels <= 700;
+    deep_mask = depth_levels >= 1200;
+    shallow_pattern = median(section_w(shallow_mask,:), 1, 'omitnan');
+    deep_pattern = median(section_w(deep_mask,:), 1, 'omitnan');
+    good = isfinite(shallow_pattern) & isfinite(deep_pattern);
+    if nnz(good) >= 5
+        C = corrcoef(shallow_pattern(good), deep_pattern(good));
+        deep_reversal_score = -C(1,2);
+    else
+        deep_reversal_score = NaN;
+    end
+    profile = median(section_w, 2, 'omitnan');
+    first_zero = NaN;
+    for kk = 2:numel(profile)
+        if isfinite(profile(kk-1)) && isfinite(profile(kk)) && profile(kk-1) * profile(kk) < 0
+            first_zero = 0.5 * (depth_levels(kk-1) + depth_levels(kk));
+            break
+        end
+    end
+    stats = struct('corr_w_vs_1000m', corr_by_depth, ...
+        'median_corr_w_vs_1000m', median(corr_by_depth, 'omitnan'), ...
+        'deep_reversal_score', deep_reversal_score, ...
+        'first_zero_crossing_depth_m', first_zero, ...
+        'q95_abs_w_1e6_m_s', NaN);
+end
+
+function q = q95_abs(values)
+    values = abs(values(isfinite(values)));
+    if isempty(values)
+        q = NaN;
+    else
+        q = quantile(values, 0.95);
+    end
+end
+
+function plot_reversal_factor_4panel(path, diag, polarity, band_label)
+    panel_names = {'A_current','B_comp_isoslope','C_comp_isoslope_comp_tw','D_predecessor_like'};
+    idx = zeros(1, numel(panel_names));
+    vals = [];
+    for i = 1:numel(panel_names)
+        idx(i) = find(strcmp(diag.variant_names, panel_names{i}), 1);
+        vals = [vals; diag.variants(idx(i)).section_w(:) * 1e6]; %#ok<AGROW>
+    end
+    lim = q95_abs(vals);
+    if ~isfinite(lim) || lim <= 0
+        lim = 2.5;
+    end
+    fig = figure('Visible','off','Color','w','Position',[100 100 1500 1000]);
+    tl = tiledlayout(fig, 2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+    x = diag.x(1,:);
+    depth = diag.depth_levels(:);
+    titles = {'A current', 'B comp-rho isoslope', 'C comp-rho isoslope + TW', 'D predecessor-like'};
+    for i = 1:numel(idx)
+        ax = nexttile(tl);
+        data = diag.variants(idx(i)).section_w * 1e6;
+        contourf(ax, x, depth, data, 28, 'LineStyle', 'none');
+        set(ax, 'YDir', 'reverse');
+        colormap(ax, redblue_colormap());
+        clim(ax, [-lim lim]);
+        cb = colorbar(ax);
+        ylabel(cb, '10^{-6} m s^{-1}');
+        xlabel(ax, 'x/R');
+        ylabel(ax, 'Depth (m)');
+        title(ax, titles{i}, 'Interpreter', 'none');
+    end
+    sgtitle(tl, [polarity ' ' band_label ' reversal factor W sections'], 'Interpreter', 'none');
+    exportgraphics(fig, path, 'Resolution', 180);
+    close(fig);
+end
+
+function write_reversal_factor_doc(path, diag, polarity, band_label)
+    fid = fopen(path, 'w');
+    fprintf(fid, '# %s %s 三因素反转诊断\n\n', polarity, band_label);
+    fprintf(fid, '本诊断用于判断深层 W 反转是否由 `等密面斜率`、`热成风速度` 或 `term2` 组合方式造成。\n\n');
+    fprintf(fid, '| variant | 口径 | median corr W/1000m | deep reversal score | first zero depth m | q95 W |\n');
+    fprintf(fid, '|---|---|---:|---:|---:|---:|\n');
+    for i = 1:numel(diag.variant_names)
+        s = diag.variant_stats(i);
+        fprintf(fid, '| %s | %s | %.3g | %.3g | %.3g | %.3g |\n', diag.variant_names{i}, diag.variant_descriptions{i}, ...
+            s.median_corr_w_vs_1000m, s.deep_reversal_score, s.first_zero_crossing_depth_m, s.q95_abs_w_1e6_m_s);
+    end
+    fprintf(fid, '\n判读：如果 B 开始反转，主因是 `composite rho -> isopycnal slope`；如果 C 开始反转，主因偏热成风速度；如果 D 开始反转，主因偏 term2 的符号/速度/斜率组合。\n');
+    fclose(fid);
+end
+
+function write_reversal_factor_summary_doc(path, summary_rows)
+    fid = fopen(path, 'w');
+    fprintf(fid, '# 20N 三因素反转诊断汇总\n\n');
+    fprintf(fid, '| polarity | variant | matches | unique Argo | median corr W/1000m | deep reversal score | first zero depth m | q95 W | output |\n');
+    fprintf(fid, '|---|---|---:|---:|---:|---:|---:|---:|---|\n');
+    for i = 1:size(summary_rows,1)
+        fprintf(fid, '| %s | %s | %d | %d | %.3g | %.3g | %.3g | %.3g | `%s` |\n', ...
+            summary_rows{i,1}, summary_rows{i,2}, summary_rows{i,3}, summary_rows{i,4}, summary_rows{i,5}, summary_rows{i,6}, summary_rows{i,7}, summary_rows{i,8}, summary_rows{i,9});
+    end
+    fclose(fid);
 end
 
 function configs = sensitivity_configs()
@@ -1349,7 +1736,7 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     nan3 = nan(grid_n, grid_n, nz);
     count3 = zeros(grid_n, grid_n, nz);
     grid3d = struct('x', X, 'y', Y, 'depth_levels', depth_levels(:), 'w', nan3, 'term1', nan3, 'term2', nan3, ...
-        'z_anom', nan3, 'rho_anom', nan3, 'u_tw', nan3, 'v_tw', nan3, 'count', count3, 'mapped_support', count3, 'valid_profile_count', zeros(nz,1), ...
+        'z_anom', nan3, 'rho_anom', nan3, 'rho_abs', nan3, 'u_tw', nan3, 'v_tw', nan3, 'count', count3, 'mapped_support', count3, 'valid_profile_count', zeros(nz,1), ...
         'boa_bg_valid_count', zeros(nz,1), 'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, ...
         'mean_radius_m', NaN, 'section_axis', section_axis, 'section_half_width_r', section_half_width_r, ...
         'section_coord', [], 'section_w', [], 'match_count', 0, 'unique_argo_count', 0, 'duplicate_match_count', 0, ...
@@ -1391,17 +1778,23 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     support3 = false(grid_n, grid_n, nz);
     z_samples = nan(numel(x), nz);
     rho_samples = nan(numel(x), nz);
+    rho_abs_samples = nan(numel(x), nz);
     z_samples(finite_unique,:) = profile_cache.z_anom(unique_pos(finite_unique), :);
     rho_samples(finite_unique,:) = profile_cache.rho_anom(unique_pos(finite_unique), :);
+    if isfield(profile_cache, 'rho_abs')
+        rho_abs_samples(finite_unique,:) = profile_cache.rho_abs(unique_pos(finite_unique), :);
+    end
     base_good = isfinite(x) & isfinite(y) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & hypot(x, y) <= 4;
     z_samples(~base_good,:) = NaN;
     rho_samples(~base_good,:) = NaN;
+    rho_abs_samples(~base_good,:) = NaN;
     valid_pair = isfinite(z_samples) & isfinite(rho_samples);
     z_samples(~valid_pair) = NaN;
     rho_samples(~valid_pair) = NaN;
+    rho_abs_samples(~valid_pair) = NaN;
     map_timer = tic;
     if strcmp(grid_mapping, 'cressman')
-        [mapped_stack, support_stack] = cressman_map_multi_missing(x, y, [z_samples, rho_samples], X, Y, cressman_radius_r, cressman_min_obs);
+        [mapped_stack, support_stack] = cressman_map_multi_missing(x, y, [z_samples, rho_samples, rho_abs_samples], X, Y, cressman_radius_r, cressman_min_obs);
         for zz = 1:nz
             grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
             grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
@@ -1415,14 +1808,17 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
             end
             z_grid = mapped_stack(:,:,zz);
             rho_grid = mapped_stack(:,:,nz+zz);
-            support = support_stack(:,:,zz) >= cressman_min_obs & support_stack(:,:,nz+zz) >= cressman_min_obs;
-            grid3d.mapped_support(:,:,zz) = min(support_stack(:,:,zz), support_stack(:,:,nz+zz));
+            rho_abs_grid = mapped_stack(:,:,2*nz+zz);
+            support = support_stack(:,:,zz) >= cressman_min_obs & support_stack(:,:,nz+zz) >= cressman_min_obs & support_stack(:,:,2*nz+zz) >= cressman_min_obs;
+            grid3d.mapped_support(:,:,zz) = min(min(support_stack(:,:,zz), support_stack(:,:,nz+zz)), support_stack(:,:,2*nz+zz));
             if smooth_passes > 0
                 z_grid = smooth2_supported(z_grid, support, smooth_passes);
                 rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
+                rho_abs_grid = smooth2_supported(rho_abs_grid, support, smooth_passes);
             end
             grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
             grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
+            grid3d.rho_abs(:,:,zz) = mask_to_support(rho_abs_grid, support);
             rho_grids(:,:,zz) = rho_grid;
             support3(:,:,zz) = support;
         end
@@ -1430,6 +1826,7 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
         for zz = 1:nz
             z_anom_sample = z_samples(:,zz);
             rho_anom_sample = rho_samples(:,zz);
+            rho_abs_sample = rho_abs_samples(:,zz);
             good = base_good & valid_pair(:,zz);
             grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
             grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
@@ -1443,15 +1840,17 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
             if strcmp(grid_mapping, 'scattered')
                 z_grid = scattered_map(x(good), y(good), z_anom_sample(good), X, Y);
                 rho_grid = scattered_map(x(good), y(good), rho_anom_sample(good), X, Y);
-                support = isfinite(z_grid) & isfinite(rho_grid) & hypot(X, Y) <= 4;
+                rho_abs_grid = scattered_map(x(good), y(good), rho_abs_sample(good), X, Y);
+                support = isfinite(z_grid) & isfinite(rho_grid) & isfinite(rho_abs_grid) & hypot(X, Y) <= 4;
                 grid3d.mapped_support(:,:,zz) = double(support);
             else
-                z_grid = nan(size(X)); rho_grid = nan(size(X));
+                z_grid = nan(size(X)); rho_grid = nan(size(X)); rho_abs_grid = nan(size(X));
                 if any(bin_ok)
                     subs = [yb(bin_ok), xb(bin_ok)];
-                    z_vals = z_anom_sample(good); rho_vals = rho_anom_sample(good);
+                    z_vals = z_anom_sample(good); rho_vals = rho_anom_sample(good); rho_abs_vals = rho_abs_sample(good);
                     z_grid = accumarray(subs, z_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
                     rho_grid = accumarray(subs, rho_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
+                    rho_abs_grid = accumarray(subs, rho_abs_vals(bin_ok), [grid_n grid_n], @(q) median(q, 'omitnan'), NaN);
                 end
                 support = grid3d.count(:,:,zz) >= min_bin_count;
                 grid3d.mapped_support(:,:,zz) = grid3d.count(:,:,zz);
@@ -1459,9 +1858,11 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
             if smooth_passes > 0
                 z_grid = smooth2_supported(z_grid, support, smooth_passes);
                 rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
+                rho_abs_grid = smooth2_supported(rho_abs_grid, support, smooth_passes);
             end
             grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
             grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
+            grid3d.rho_abs(:,:,zz) = mask_to_support(rho_abs_grid, support);
             rho_grids(:,:,zz) = rho_grid;
             support3(:,:,zz) = support;
         end
@@ -1507,7 +1908,7 @@ function profile_cache = profile_depth_stack_cache(matches, rho, depth, boa_clim
         C = load(cache_file, 'profile_cache_store');
         if isfield(C, 'profile_cache_store') && isfield(C.profile_cache_store, key)
             cached = C.profile_cache_store.(key);
-            if isequal(cached.argo_indices(:), argo_indices(:)) && isequal(cached.depth_levels(:), depth_levels(:))
+            if isequal(cached.argo_indices(:), argo_indices(:)) && isequal(cached.depth_levels(:), depth_levels(:)) && isfield(cached, 'rho_abs')
                 profile_cache = cached;
                 log_step(sprintf('3D profile BOA/QC cache hit: %s [%s]', cache_file, key));
                 return
@@ -1517,29 +1918,35 @@ function profile_cache = profile_depth_stack_cache(matches, rho, depth, boa_clim
     log_step(sprintf('3D profile BOA/QC cache build: %d unique Argo x %d depths', n_unique, nz));
     z_anom = nan(n_unique, nz);
     rho_anom = nan(n_unique, nz);
+    rho_abs = nan(n_unique, nz);
+    boa_rho = nan(n_unique, nz);
     profile_valid = false(n_unique, nz);
     boa_valid = false(n_unique, nz);
     global QC_WORKERS;
     use_parallel = maybe_start_parallel_pool(QC_WORKERS);
     if use_parallel
         parfor uu = 1:n_unique
-            [z_row, rho_row, pv_row, bv_row] = profile_depth_stack_one(argo_indices(uu), lon(uu), lat(uu), time(uu), rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m);
+            [z_row, rho_row, rho_abs_row, boa_rho_row, pv_row, bv_row] = profile_depth_stack_one(argo_indices(uu), lon(uu), lat(uu), time(uu), rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m);
             z_anom(uu,:) = z_row;
             rho_anom(uu,:) = rho_row;
+            rho_abs(uu,:) = rho_abs_row;
+            boa_rho(uu,:) = boa_rho_row;
             profile_valid(uu,:) = pv_row;
             boa_valid(uu,:) = bv_row;
         end
     else
         for uu = 1:n_unique
-            [z_row, rho_row, pv_row, bv_row] = profile_depth_stack_one(argo_indices(uu), lon(uu), lat(uu), time(uu), rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m);
+            [z_row, rho_row, rho_abs_row, boa_rho_row, pv_row, bv_row] = profile_depth_stack_one(argo_indices(uu), lon(uu), lat(uu), time(uu), rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m);
             z_anom(uu,:) = z_row;
             rho_anom(uu,:) = rho_row;
+            rho_abs(uu,:) = rho_abs_row;
+            boa_rho(uu,:) = boa_rho_row;
             profile_valid(uu,:) = pv_row;
             boa_valid(uu,:) = bv_row;
         end
     end
     profile_cache = struct('argo_indices', argo_indices(:), 'depth_levels', depth_levels(:), ...
-        'z_anom', z_anom, 'rho_anom', rho_anom, 'profile_valid', profile_valid, 'boa_valid', boa_valid);
+        'z_anom', z_anom, 'rho_anom', rho_anom, 'rho_abs', rho_abs, 'boa_rho', boa_rho, 'profile_valid', profile_valid, 'boa_valid', boa_valid);
     if exist(cache_file, 'file') == 2
         C = load(cache_file, 'profile_cache_store');
         if isfield(C, 'profile_cache_store')
@@ -1555,10 +1962,12 @@ function profile_cache = profile_depth_stack_cache(matches, rho, depth, boa_clim
     log_step(sprintf('3D profile BOA/QC cache saved: %s [%s]', cache_file, key));
 end
 
-function [z_row, rho_row, profile_valid, boa_valid] = profile_depth_stack_one(argo_index, lon, lat, time_value, rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m)
+function [z_row, rho_row, rho_abs_row, boa_rho_row, profile_valid, boa_valid] = profile_depth_stack_one(argo_index, lon, lat, time_value, rho, depth, boa_clim, depth_levels, min_drho_dz, max_rho_bracket_dz_m)
     nz = numel(depth_levels);
     z_row = nan(1, nz);
     rho_row = nan(1, nz);
+    rho_abs_row = nan(1, nz);
+    boa_rho_row = nan(1, nz);
     profile_valid = false(1, nz);
     boa_valid = false(1, nz);
     [~, month_id, ~] = datevec(time_value);
@@ -1570,10 +1979,12 @@ function [z_row, rho_row, profile_valid, boa_valid] = profile_depth_stack_one(ar
         if ~isfinite(rho0)
             continue
         end
+        boa_rho_row(zz) = rho0;
         target_profile = align_density_units(target_profile_raw, rho0);
         boa_profile_aligned = align_density_units(boa_profile, rho0);
         rho_profile_z0 = interp1(depth, target_profile, z0, 'linear', NaN);
         if isfinite(rho_profile_z0)
+            rho_abs_row(zz) = rho_profile_z0;
             rho_row(zz) = rho_profile_z0 - rho0;
         end
         [z_rho, ~, bracket_dz, local_drho_dz] = isopycnal_depth_qc(depth, target_profile, rho0, z0);
@@ -2409,6 +2820,9 @@ function write_grid_json_3d(path, grid3d, polarity, band_label)
     G.term2_3d_m_s = permute(grid3d.term2, [3 1 2]);
     G.z_rho_anom_3d_m = permute(grid3d.z_anom, [3 1 2]);
     G.rho_anom_3d = permute(grid3d.rho_anom, [3 1 2]);
+    if isfield(grid3d, 'rho_abs')
+        G.rho_abs_3d = permute(grid3d.rho_abs, [3 1 2]);
+    end
     G.u_thermal_wind_3d_m_s = permute(grid3d.u_tw, [3 1 2]);
     G.v_thermal_wind_3d_m_s = permute(grid3d.v_tw, [3 1 2]);
     G.sample_count_3d = permute(grid3d.count, [3 1 2]);
