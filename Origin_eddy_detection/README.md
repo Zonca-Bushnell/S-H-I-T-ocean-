@@ -156,6 +156,128 @@ empty product state. It writes empty `eligible_tracks`, `shape_daily_metrics`,
 and `shape_tracks` tables plus thresholds metadata instead of failing the whole
 pipeline. This matters for short smoke windows and strict life/radius filters.
 
+## ACC Bandpass Stage
+
+The original `Zhe` chain includes a legacy ACC filter builder. It is mirrored
+here as:
+
+```text
+tools/build_acc_bandpass_filter.py
+```
+
+This stage should be used when the raw ACC annual NetCDF files exist but the
+30-180 day `Filter` files do not. It preserves the Zhe filter definition:
+
+```text
+scipy.signal.butter(order=4, output="sos") + scipy.signal.sosfiltfilt
+variables: uo_glor, vo_glor, zos_glor
+output: global_phy_YYYY_bandpass_30_180d.nc
+```
+
+Local ACC defaults point to:
+
+```text
+raw ACC root: E/F local data under F:\Global Ocean Ensemble Physics Reanalysis  ACC
+ACC result root: E:\DATA\01_Eddy_correspond\03_Original_detection\ACC
+ACC filter root: E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\Filter
+```
+
+Example filter command:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\condabin\mamba.bat' run -n eddy_detection python `
+  tools\build_acc_bandpass_filter.py `
+  --input-root 'F:\Global Ocean Ensemble Physics Reanalysis  ACC' `
+  --output-dir 'E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\Filter' `
+  --temp-dir 'E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\_filter_work' `
+  --start 2018-01-01 `
+  --end 2019-12-31 `
+  --variables uo_glor,vo_glor,zos_glor `
+  --depth-block 4 `
+  --lat-block 81 `
+  --lon-block 96 `
+  --workers 8 `
+  --max-in-flight 8
+```
+
+Then run detection-to-shape with:
+
+```powershell
+& 'D:\Util\lever\02_miniforge\condabin\mamba.bat' run -n eddy_detection python `
+  run_origin_eddy_pipeline.py run-detection-to-shape `
+  --region-name ACC `
+  --project-name acc_hua_b3_start2 `
+  --bbox=-179,180,-65,-45 `
+  --raw-root 'F:\Global Ocean Ensemble Physics Reanalysis  ACC' `
+  --filter-root 'E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\Filter' `
+  --filter-template 'global_phy_{year}_bandpass_30_180d.nc' `
+  --output-root 'E:\DATA\01_Eddy_correspond\03_Original_detection\ACC' `
+  --start 2018-01-01 `
+  --end 2019-12-31 `
+  --candidate-selection tile_topn `
+  --tile-lon-deg 10 `
+  --tile-lat-deg 10 `
+  --tile-top-n 15
+```
+
+## Original Eddy Panel-Family
+
+The original object-day panel-family from `Zhe/src/post/original_eddy_panels.py`
+is mirrored under `src/post/` and exposed through the main launcher:
+
+```text
+run_origin_eddy_pipeline.py plot-original-eddy-panels
+```
+
+It is a diagnostic for one original object-day, not a representative composite.
+The figure checks vertical center offsets, first/second abrupt jump layers,
+upper/lower velocity and pressure-proxy fields, section diagnostics, and the
+selected track's surface-center lifecycle trajectory.
+
+Use `mamba run` on Windows so the conda DLL paths for NumPy/Matplotlib are
+activated correctly:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\condabin\mamba.bat' run -n eddy_detection python `
+  run_origin_eddy_pipeline.py plot-original-eddy-panels `
+  --results-root E:\DATA\01_Eddy_correspond\03_Original_detection\ACC `
+  --shape-dir-name shape_classification_2018_2019_hua_b3_start2_life30 `
+  --raw-root 'F:\Global Ocean Ensemble Physics Reanalysis  ACC' `
+  --filter-root E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\Filter `
+  --output-dir E:\DATA\01_Eddy_correspond\03_Original_detection\ACC\panel_family `
+  --max-examples 1 `
+  --right-panel-mode normal_horizontal_velocity
+```
+
+The right-side panels support the original modes:
+
+```text
+omega_w
+normal_horizontal_velocity
+horizontal_speed
+signed_horizontal_speed
+```
+
+`omega_w` follows the original density-based omega diagnostic and requires
+`gsw`. If `gsw` is not installed, use one of the horizontal-velocity modes or
+install `gsw` in the dedicated `eddy_detection` environment before running that
+mode.
+
+When `--w-section-mode axis_curved` is used, the panel-family expands the
+layout with two extra 3-D geometry panels on the far right:
+
+```text
+12  J1 axis-curved geometry
+13  J2 axis-curved geometry
+```
+
+These panels show the interpolated vertical eddy-center axis, discrete layer
+centers, the upper/from and lower/to jump layers, the jump segment, and the
+local normal section lines used to sample the curved sections. They are visual
+diagnostics only; they do not change detection, tracking, or shape results.
+
 ## Included Files
 
 Core package:
@@ -179,6 +301,9 @@ src/
       streaming_cmems.py
       table_io.py
       velocity3d_core.py
+  post/
+    __init__.py
+    original_eddy_panels.py
 ```
 
 Configuration and provenance:
@@ -201,10 +326,12 @@ docs/source_manifest.json
 | Catalog + Shape | `src.eddy_pipeline.catalog` | Adapts detections/tracks into catalog tables and calls shape classification. |
 | Completion | `src.eddy_pipeline.completion` | Completes speed-leading layer centers needed by shape diagnostics. |
 | Shape | `src.eddy_pipeline.shape` | Builds life-thresholded 3-D shape classes. |
+| Original Panel-Family | `src.post.original_eddy_panels` | Recreates the Zhe original object-day discontinuity diagnostic panels. |
 
 ## Important Differences From Full `Zhe`
 
-- No `src.post`, `src.EP`, `src.Legacy`, or `vendor` code is copied.
+- Only the original object-day panel-family from `src.post` is copied; other
+  post-processing, `src.EP`, `src.Legacy`, and `vendor` code are excluded.
 - No OFES-specific `.ctl/.dta` reader or native/rebuild-W diagnostics are copied.
 - Representative-vortex and transport stages are excluded even though the
   original CLI can describe them.

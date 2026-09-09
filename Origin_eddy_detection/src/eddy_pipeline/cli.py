@@ -768,6 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if argv and argv[0] == "plot-original-eddy-panels":
+        from src.post.original_eddy_panels import main as plot_original_eddy_panels_main
+
+        sys.argv = [f"{Path(sys.argv[0]).name} plot-original-eddy-panels", *argv[1:]]
+        plot_original_eddy_panels_main()
+        return
     command_aliases = {
         "run-detection-to-shape": "detect,tracking,catalog_shape",
         "run-all": "detect,tracking,catalog_shape",
