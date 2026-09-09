@@ -37,6 +37,10 @@ SCIENCE_TAG = "raw_minus_jan_mean_diagnostic"
 class HuaParams:
     ssh_window_cells: int = 7
     max_candidates_per_day: int = 80
+    candidate_selection: str = "global_topn"
+    tile_lon_deg: float = 10.0
+    tile_lat_deg: float = 10.0
+    tile_top_n: int = 10
     surface_search_cells: int = 8
     deep_search_cells: int = 6
     start_radius_cells: int = 3
@@ -65,6 +69,10 @@ def main() -> None:
     params = HuaParams(
         ssh_window_cells=args.ssh_window_cells,
         max_candidates_per_day=args.max_candidates_per_day,
+        candidate_selection=args.candidate_selection,
+        tile_lon_deg=args.tile_lon_deg,
+        tile_lat_deg=args.tile_lat_deg,
+        tile_top_n=args.tile_top_n,
         surface_search_cells=args.surface_search_cells,
         deep_search_cells=args.deep_search_cells,
         start_radius_cells=args.start_radius_cells,
@@ -95,7 +103,7 @@ def main() -> None:
             bool(args.force),
         )
     if "detect" in stages:
-        detect_month(Path(args.data_root), paths, days, params, int(args.max_depth_layers), bool(args.resume))
+        detect_month(Path(args.data_root), paths, days, params, int(args.max_depth_layers), bool(args.resume), args.mean_cache_root)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,6 +140,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ssh-window-cells", type=int, default=7)
     parser.add_argument("--max-candidates-per-day", type=int, default=80)
+    parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="global_topn")
+    parser.add_argument("--tile-lon-deg", type=float, default=10.0)
+    parser.add_argument("--tile-lat-deg", type=float, default=10.0)
+    parser.add_argument("--tile-top-n", type=int, default=10)
+    parser.add_argument(
+        "--mean-cache-root",
+        type=Path,
+        default=None,
+        help="Optional root containing anomaly_jan1991. If omitted, the runner uses the output root, then the baseline refined OFES-grid cache when present.",
+    )
     parser.add_argument("--surface-search-cells", type=int, default=8)
     parser.add_argument("--deep-search-cells", type=int, default=6)
     parser.add_argument("--start-radius-cells", type=int, default=3)
@@ -180,6 +198,7 @@ def write_run_config(args: argparse.Namespace, params: HuaParams, days: list[dat
         "mean_strategy": str(args.mean_strategy),
         "extract_workers": int(args.extract_workers),
         "mean_io_chunk_mb": int(args.mean_io_chunk_mb),
+        "mean_cache_root": str(args.mean_cache_root) if args.mean_cache_root else "",
         "method": "OFES2 Hua hybrid: SSH seed + velocity minimum + circular velocity checks + boundary monotonic + strict contiguous",
         "anomaly_policy": "Daily fields minus Jan 1991 monthly mean; not 30-180 day bandpass.",
         "parameters": asdict(params),
@@ -364,7 +383,7 @@ def accumulate_volume_mean(
     mean_mm.flush()
 
 
-def detect_month(root: Path, paths: dict[str, Path], days: list[date], params: HuaParams, max_depth_layers: int, resume: bool) -> None:
+def detect_month(root: Path, paths: dict[str, Path], days: list[date], params: HuaParams, max_depth_layers: int, resume: bool, mean_cache_root: Path | None) -> None:
     detection_dir = paths["detection"]
     parts_dir = detection_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -378,9 +397,10 @@ def detect_month(root: Path, paths: dict[str, Path], days: list[date], params: H
     lat_uv = u_meta.y.values
     nlev = min(max_depth_layers, u_meta.z.count, v_meta.z.count)
     depth = u_meta.z.values[:nlev]
-    ssh_mean = np.load(paths["anomaly"] / "ssh_jan1991_mean_cm.npy")
-    u_mean = np.memmap(paths["anomaly"] / "u_jan1991_mean_cms.dat", dtype="float32", mode="r", shape=(u_meta.x.count, u_meta.y.count, nlev), order="F")
-    v_mean = np.memmap(paths["anomaly"] / "v_jan1991_mean_cms.dat", dtype="float32", mode="r", shape=(v_meta.x.count, v_meta.y.count, nlev), order="F")
+    anomaly_dir = resolve_anomaly_dir(paths["root"], paths["anomaly"], mean_cache_root)
+    ssh_mean = np.load(anomaly_dir / "ssh_jan1991_mean_cm.npy")
+    u_mean = np.memmap(anomaly_dir / "u_jan1991_mean_cms.dat", dtype="float32", mode="r", shape=(u_meta.x.count, u_meta.y.count, nlev), order="F")
+    v_mean = np.memmap(anomaly_dir / "v_jan1991_mean_cms.dat", dtype="float32", mode="r", shape=(v_meta.x.count, v_meta.y.count, nlev), order="F")
 
     all_centers: list[pd.DataFrame] = []
     all_circle: list[pd.DataFrame] = []
@@ -428,6 +448,22 @@ def detect_month(root: Path, paths: dict[str, Path], days: list[date], params: H
     write_detection_summary(detection_dir, centers, circle, structures, params, days, nlev)
 
 
+def resolve_anomaly_dir(output_root: Path, default_anomaly_dir: Path, mean_cache_root: Path | None) -> Path:
+    candidates = [default_anomaly_dir]
+    if mean_cache_root is not None:
+        explicit = mean_cache_root / "anomaly_jan1991" if (mean_cache_root / "anomaly_jan1991").exists() else mean_cache_root
+        candidates.insert(0, explicit)
+    baseline = output_root.parent / "available_jan01_jan19_refined_ofes_grid" / "anomaly_jan1991"
+    if baseline not in candidates:
+        candidates.append(baseline)
+    required = ["ssh_jan1991_mean_cm.npy", "u_jan1991_mean_cms.dat", "v_jan1991_mean_cms.dat"]
+    for candidate in candidates:
+        if all((candidate / name).exists() for name in required):
+            print(f"[mean-cache] using {candidate}", flush=True)
+            return candidate
+    raise FileNotFoundError("Missing Jan 1991 mean cache. Checked: " + ", ".join(str(path) for path in candidates))
+
+
 def detect_day(
     root: Path,
     cache_dir: Path,
@@ -446,7 +482,7 @@ def detect_day(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ssh = read_ssh_latlon_daily_only(root, day)
     ssh_anom = ssh - ssh_mean
-    extrema = local_extrema(ssh_anom, params.ssh_window_cells, params.max_candidates_per_day)
+    extrema = local_extrema(ssh_anom, params.ssh_window_cells, params, lon_scalar, lat_scalar)
     if not extrema:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -500,6 +536,12 @@ def detect_day(
                 "hua_object_id": object_id,
                 "seed_order": seed_order,
                 "ssh_extremum_type": seed["kind"],
+                "candidate_selection": str(seed.get("candidate_selection", params.candidate_selection)),
+                "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
+                "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
+                "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
+                "tile_lat_max": float(seed.get("tile_lat_max", np.nan)),
+                "tile_rank": int(seed.get("tile_rank", seed_order + 1)),
                 "polarity": polarity,
                 "depth_index": depth_index,
                 "depth_m": float(depth_m),
@@ -540,6 +582,12 @@ def detect_day(
                         "science_tag": SCIENCE_TAG,
                         "date": day.isoformat(),
                         "hua_object_id": object_id,
+                        "candidate_selection": str(seed.get("candidate_selection", params.candidate_selection)),
+                        "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
+                        "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
+                        "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
+                        "tile_lat_max": float(seed.get("tile_lat_max", np.nan)),
+                        "tile_rank": int(seed.get("tile_rank", seed_order + 1)),
                         "depth_index": depth_index,
                         "depth_m": float(depth_m),
                         "center_lon": float(lon_uv[center_i]),
@@ -566,7 +614,7 @@ def uv_anomaly_layer(raw: np.memmap, mean: np.ndarray, level_index: int) -> np.n
     return (layer_cms - np.asarray(mean[:, :, level_index].T, dtype=np.float32)) / 100.0
 
 
-def local_extrema(field: np.ndarray, window: int, max_candidates: int) -> list[dict[str, object]]:
+def local_extrema(field: np.ndarray, window: int, params: HuaParams, lon: np.ndarray, lat: np.ndarray) -> list[dict[str, object]]:
     finite = np.isfinite(field)
     if finite.sum() == 0:
         return []
@@ -587,8 +635,56 @@ def local_extrema(field: np.ndarray, window: int, max_candidates: int) -> list[d
             value = float(field[j, i])
             if np.isfinite(value):
                 candidates.append({"kind": kind, "i": int(i), "j": int(j), "value": value, "abs_value": abs(value)})
+    return select_extrema_candidates(candidates, params, lon, lat)
+
+
+def select_extrema_candidates(candidates: list[dict[str, object]], params: HuaParams, lon: np.ndarray, lat: np.ndarray) -> list[dict[str, object]]:
     candidates.sort(key=lambda item: item["abs_value"], reverse=True)
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    if params.candidate_selection == "global_topn":
+        selected = candidates[: params.max_candidates_per_day] if params.max_candidates_per_day > 0 else candidates
+        for rank, item in enumerate(selected, start=1):
+            item.update(
+                {
+                    "candidate_selection": "global_topn",
+                    "tile_lon_min": np.nan,
+                    "tile_lon_max": np.nan,
+                    "tile_lat_min": np.nan,
+                    "tile_lat_max": np.nan,
+                    "tile_rank": rank,
+                }
+            )
+        return selected
+
+    if params.tile_lon_deg <= 0.0 or params.tile_lat_deg <= 0.0 or params.tile_top_n <= 0:
+        raise ValueError("tile_topn requires positive tile-lon-deg, tile-lat-deg, and tile-top-n")
+
+    tile_groups: dict[tuple[int, int], list[dict[str, object]]] = {}
+    for item in candidates:
+        item_lon = float(lon[int(item["i"])]) % 360.0
+        item_lat = float(lat[int(item["j"])])
+        lon_bin = int(math.floor(item_lon / params.tile_lon_deg))
+        lat_bin = int(math.floor((item_lat + 90.0) / params.tile_lat_deg))
+        tile_groups.setdefault((lon_bin, lat_bin), []).append(item)
+
+    selected: list[dict[str, object]] = []
+    for (lon_bin, lat_bin), group in sorted(tile_groups.items()):
+        group.sort(key=lambda item: item["abs_value"], reverse=True)
+        tile_lon_min = lon_bin * params.tile_lon_deg
+        tile_lat_min = lat_bin * params.tile_lat_deg - 90.0
+        for rank, item in enumerate(group[: params.tile_top_n], start=1):
+            item.update(
+                {
+                    "candidate_selection": "tile_topn",
+                    "tile_lon_min": float(tile_lon_min),
+                    "tile_lon_max": float(min(tile_lon_min + params.tile_lon_deg, 360.0)),
+                    "tile_lat_min": float(tile_lat_min),
+                    "tile_lat_max": float(min(tile_lat_min + params.tile_lat_deg, 90.0)),
+                    "tile_rank": int(rank),
+                }
+            )
+            selected.append(item)
+    selected.sort(key=lambda item: (item["tile_lon_min"], item["tile_lat_min"], item["tile_rank"], -item["abs_value"]))
+    return selected
 
 
 def shifted_with_lon_wrap(field: np.ndarray, di: int, dj: int) -> tuple[np.ndarray, np.ndarray]:
@@ -957,6 +1053,11 @@ def write_detection_summary(detection_dir: Path, centers: pd.DataFrame, circle: 
         "pass_fraction": float(centers["hua_pass"].mean()) if not centers.empty else 0.0,
         "parameters": asdict(params),
     }
+    summary["daily_surface_candidate_count"] = daily_surface_counts(centers)
+    summary["daily_hua_pass_layer_count"] = daily_pass_layer_counts(centers)
+    summary["daily_structure_object_count"] = daily_structure_object_counts(structures)
+    summary["strict_1r_crossing_counts"] = strict_crossing_counts(structures, [20.0, 40.0])
+    summary["baseline_global_top80_comparison"] = baseline_comparison(detection_dir, centers, structures)
     if not centers.empty and "refined_ok" in centers.columns:
         passed = centers[centers["hua_pass"].astype(bool)].copy()
         offsets = passed["refined_offset_km"].to_numpy(dtype="f8") if "refined_offset_km" in passed.columns else np.array([])
@@ -990,6 +1091,96 @@ def write_detection_summary(detection_dir: Path, centers: pd.DataFrame, circle: 
         for row in rejection.to_dict("records"):
             lines.append(f"- `{row['failure_reason']}`: `{row['count']}`")
     (detection_dir / "method_alignment_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def daily_surface_counts(centers: pd.DataFrame) -> dict[str, int]:
+    if centers.empty:
+        return {}
+    surface = centers[centers["depth_index"].eq(0)]
+    return {str(day): int(count) for day, count in surface.groupby("date")["hua_object_id"].nunique().items()}
+
+
+def daily_pass_layer_counts(centers: pd.DataFrame) -> dict[str, int]:
+    if centers.empty:
+        return {}
+    passed = centers[centers["hua_pass"].astype(bool)]
+    return {str(day): int(count) for day, count in passed.groupby("date").size().items()}
+
+
+def daily_structure_object_counts(structures: pd.DataFrame) -> dict[str, int]:
+    if structures.empty:
+        return {}
+    return {str(day): int(count) for day, count in structures.groupby("date")["hua_object_id"].nunique().items()}
+
+
+def strict_crossing_counts(structures: pd.DataFrame, target_lats: list[float]) -> dict[str, dict[str, object]]:
+    objects = representative_structure_objects(structures)
+    out: dict[str, dict[str, object]] = {}
+    for target_lat in target_lats:
+        hits = 0
+        nearest = None
+        for row in objects:
+            distance_km = abs(float(row["center_lat"]) - target_lat) * math.pi * EARTH_RADIUS_M / 180_000.0
+            distance_over_r = distance_km / float(row["radius_km"]) if float(row["radius_km"]) > 0 else math.inf
+            candidate = row | {"distance_over_r": distance_over_r}
+            if distance_over_r <= 1.0:
+                hits += 1
+            if nearest is None or distance_over_r < float(nearest["distance_over_r"]):
+                nearest = candidate
+        out[f"{target_lat:g}N"] = {
+            "strict_1r_count": int(hits),
+            "nearest_hua_object_id": str(nearest["hua_object_id"]) if nearest else "",
+            "nearest_center_lat": float(nearest["center_lat"]) if nearest else math.nan,
+            "nearest_distance_over_r": float(nearest["distance_over_r"]) if nearest else math.nan,
+        }
+    return out
+
+
+def representative_structure_objects(structures: pd.DataFrame) -> list[dict[str, object]]:
+    if structures.empty:
+        return []
+    lon_col = "center_lon_refined" if "center_lon_refined" in structures.columns else "center_lon"
+    lat_col = "center_lat_refined" if "center_lat_refined" in structures.columns else "center_lat"
+    rows = []
+    for object_id, part in structures.groupby("hua_object_id", sort=False):
+        part = part.sort_values("depth_index")
+        surface = part.iloc[0]
+        rows.append(
+            {
+                "hua_object_id": str(object_id),
+                "date": str(surface["date"]),
+                "polarity": str(surface["polarity"]),
+                "center_lon": float(surface[lon_col]),
+                "center_lat": float(surface[lat_col]),
+                "radius_km": float(np.nanmedian(part["radius_km"].to_numpy(dtype="f8"))),
+                "pass_layers": int(len(part)),
+            }
+        )
+    return rows
+
+
+def baseline_comparison(detection_dir: Path, centers: pd.DataFrame, structures: pd.DataFrame) -> dict[str, object]:
+    baseline_dir = detection_dir.parents[1] / "available_jan01_jan19_refined_ofes_grid" / "detection_hua_global_jan1991"
+    current = {
+        "n_surface_candidates": int(centers[centers["depth_index"].eq(0)]["hua_object_id"].nunique()) if not centers.empty else 0,
+        "n_structure_objects": int(structures["hua_object_id"].nunique()) if not structures.empty else 0,
+    }
+    if not baseline_dir.exists():
+        return {"baseline_dir": str(baseline_dir), "baseline_found": False, "current": current}
+    baseline_summary_path = baseline_dir / "run_summary.json"
+    baseline = {}
+    if baseline_summary_path.exists():
+        try:
+            baseline = json.loads(baseline_summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            baseline = {}
+    return {
+        "baseline_dir": str(baseline_dir),
+        "baseline_found": True,
+        "baseline_n_surface_candidates": int(baseline.get("n_surface_candidates", 0)),
+        "baseline_n_structure_objects": int(pd.read_csv(baseline_dir / "structures_hua_style.csv")["hua_object_id"].nunique()) if (baseline_dir / "structures_hua_style.csv").exists() else 0,
+        "current": current,
+    }
 
 
 def write_day_figure(centers: pd.DataFrame, day: date, figure_dir: Path) -> None:

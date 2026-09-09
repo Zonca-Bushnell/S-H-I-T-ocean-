@@ -1,0 +1,504 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+\usepackage{amsmath,amssymb,bm,booktabs,caption,enumitem,fancyhdr,float,geometry,hyperref,tcolorbox}
+
+\geometry{left=25mm,right=25mm,top=25mm,bottom=25mm}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Full Material-Volume EP Flux}
+\rhead{\thepage}
+
+\newcommand{\p}{\partial}
+\newcommand{\dd}{\,\mathrm d}
+\newcommand{\D}{\mathrm D}
+\newcommand{\meanV}[1]{\left\langle #1\right\rangle_{\mathcal V}}
+\newcommand{\meanL}[1]{\left\langle #1\right\rangle_{\ell}}
+\newcommand{\fluc}[1]{#1^{\dagger}}
+\newcommand{\flucV}[1]{\left(#1\right)^{\dagger}_{V}}
+\newcommand{\flucL}[1]{\left(#1\right)^{\dagger}_{\ell}}
+\newcommand{\bx}{\boldsymbol x}
+\newcommand{\by}{\boldsymbol y}
+\newcommand{\bu}{\boldsymbol u}
+\newcommand{\bU}{\boldsymbol U}
+\newcommand{\bR}{\boldsymbol R}
+\newcommand{\bV}{\boldsymbol V}
+\newcommand{\bt}{\boldsymbol t}
+\newcommand{\bn}{\boldsymbol n}
+\newcommand{\PP}{\boldsymbol{\mathsf P}_{\perp}}
+\newcommand{\II}{\boldsymbol{\mathsf I}}
+\newcommand{\GG}{\mathcal G}
+\newcommand{\LL}{\mathcal L}
+\newcommand{\RR}{\mathcal R}
+\newcommand{\VV}{\mathcal V_c}
+\newcommand{\SSS}{\partial\mathcal V_c}
+\newcommand{\MM}{\mathcal M}
+\newcommand{\UU}{\mathcal U}
+\newcommand{\KK}{\mathcal K}
+\newcommand{\SSrc}{\mathcal S}
+
+\title{\bfseries 大曲率 Material-Volume EP Flux 完整推广：\\局地通量、非局地平衡响应与材料体预算}
+\author{ZONCA-EP-FLUX-TEST}
+\date{2026 年 9 月 9 日}
+
+\begin{document}
+\maketitle
+
+本文档是对 \texttt{large\_curvature\_material\_volume\_ep\_flux.tex} 的独立修正版推广。
+原有理论转向是正确的：当 $\kappa r\sim 10\text{--}35$ 且 metric valid fraction 的中位数为 $0$ 时，
+当前中尺度涡不能再被当作小曲率细涡管处理，必须改用全局 Cartesian 坐标中的 coherent 材料体
+$\VV(t)\subset\mathbb R^3$。本修正版处理两个会破坏闭合逻辑的关键点：
+\begin{enumerate}[label=\arabic*.]
+  \item 非局地 QG/PV 平衡反演不能默认写成局地通量散度；
+  \item 全材料体平均量不能再被当作空间场取散度。
+\end{enumerate}
+本版新增一节，专门说明热/浮力通量与水平动量通量在大曲率材料体中的关系。
+
+\begin{tcolorbox}[colback=blue!3,colframe=blue!65!black,title={修正后的核心口径},fonttitle=\bfseries]
+大曲率 Material-Volume EP Flux 的主对象不是一个单一的局地 EP 通量向量，
+而是由三部分共同组成的诊断预算：
+\[
+  \boxed{
+  \GG_i(\bx,t)
+  =
+  -\rho_0^{-1}\p_j\!\left(\rho_0 R_{ij}^{\ell}(\bx,t)\right)
+  +
+  L_i(\bx,t)
+  +
+  \RR_i(\bx,t)
+  }.
+\]
+其中 $R_{ij}^{\ell}$ 是局地粗粒化 Reynolds stress 场，可以取散度；
+$L_i=\LL_i[B^{\ell},P^{\ell},q_c;\VV,\mathcal D,\mathcal B]$ 是由 QG/Boussinesq PV 反演、
+热成风约束和边界条件共同定义的非局地平衡响应；$\RR_i$ 收集年龄转、混合、
+非保守 PV、边界识别误差和尺度截断残差。
+\end{tcolorbox}
+
+\section{问题诊断与修正原则}
+
+传统 TEM/E-P flux 的紧凑形式
+\[
+  \p_t\overline u-f_0v^*
+  =
+  \rho_0^{-1}\nabla\cdot\boldsymbol F+\overline X
+\]
+成立在明确的平均、坐标和准地转尺度假设下。把它推广到大曲率 coherent 涡旋时，
+不能只把纬向平均换成材料体平均、再把二维散度换成三维散度。
+
+第一，全体平均
+\[
+  \meanV{\phi}(t)
+  =
+  |\VV(t)|^{-1}\int_{\VV(t)}\phi(\bx,t)\,\dd V
+\]
+是材料体上的整体统计量。它没有内部空间坐标依赖，因此 $\p_j\meanV{\phi}$ 不是 coherent 体内部的
+局地散度。它只能用于总预算、质心速度、生命周期合成和统计检验。
+
+第二，QG/PV 反演是边值问题。给定 PV、浮力通量或热成风约束后的速度响应依赖整个区域的源项、
+边界条件、背景稳定度和 $f_0,\beta$ 等参数。除非已经构造并验证局地化近似核，否则不能把该响应写成
+某个未验证的局地映射通量散度
+\[
+  \p_j\left(\rho_0 H_{ij}^{\mathrm{loc}}\right)
+\]
+并进一步用 Gauss 定理变成边界通量。正确做法是把它保留为非局地响应算子。
+
+\section{材料体、全体平均与局地粗粒化场}
+
+令 coherent 材料体为
+\[
+  \VV(t)=
+  \{\bx:\ q_c(\bx,t)\in Q_c,\ \bx\ \hbox{属于同一 coherent 连通核}\}.
+\]
+边界 $\SSS(t)$ 可以是严格材料面，也可以是由离散阈值、生命周期合成或目标追踪算法给出的诊断边界。
+若边界不是严格材料面，穿透误差必须保留为显式残差。
+
+全体平均定义为
+\[
+  \meanV{\phi}(t)
+  =
+  \frac{1}{|\VV(t)|}\int_{\VV(t)}\phi(\bx,t)\,\dd V,
+  \qquad
+  \flucV{\phi}(\bx,t)=\phi(\bx,t)-\meanV{\phi}(t).
+\]
+它适用于整体量：
+\[
+  M_q(t)=\int_{\VV(t)}q_c\,\dd V,\qquad
+  \bR_c(t)=M_q^{-1}\int_{\VV(t)}\bx q_c\,\dd V.
+\]
+这些量不构成材料体内部的空间通量场，因此不进入 $\p_j(\cdot)$。
+
+为了定义可取散度的 EP 型局地强迫，引入局地粗粒化平均：
+\[
+  \meanL{\phi}(\bx,t)
+  =
+  \frac{\int_{\VV(t)}W_\ell(\bx,\by)\phi(\by,t)\,\dd V_{\by}}
+       {\int_{\VV(t)}W_\ell(\bx,\by)\,\dd V_{\by}},
+  \qquad
+  \flucL{\phi}(\bx,t)=\phi(\bx,t)-\meanL{\phi}(\bx,t).
+\]
+只有依赖 $\bx$ 的 $\meanL{\cdot}$ 才能生成可取散度的局地通量场。
+
+\section{Cartesian 局地通量场}
+
+在全局 Cartesian 坐标 $x_i=(x,y,z)$ 中定义局地粗粒化通量：
+\[
+  R_{ij}^{\ell}(\bx,t)
+  =
+  \meanL{\flucL{u_i}\flucL{u_j}},
+  \qquad
+  B_i^{\ell}(\bx,t)
+  =
+  \meanL{\flucL{u_i}\flucL{b}},
+  \qquad
+  P_i^{\ell}(\bx,t)
+  =
+  \meanL{\flucL{u_i}\flucL{q}}.
+\]
+这里 $R_{ij}^{\ell}$、$B_i^{\ell}$、$P_i^{\ell}$ 是材料体内的局地场，而不是整个材料体上的单一数值。
+因此应力散度
+\[
+  A_i^{R}(\bx,t)
+  =
+  -\rho_0^{-1}\p_j\!\left(\rho_0 R_{ij}^{\ell}(\bx,t)\right)
+\]
+是合法的局地动量强迫诊断。
+
+\section{热通量与水平动量通量的关系}
+
+先把被比较的对象写清楚。水平动量通量是 Reynolds stress 的水平分量，例如
+\[
+  R_{xy}^{\ell}=\meanL{\flucL{u}\flucL{v}},
+  \qquad
+  R_{xz}^{\ell}=\meanL{\flucL{u}\flucL{w}},
+\]
+其中 $R_{xy}^{\ell}$ 表示扰动经向输送纬向动量，$R_{xz}^{\ell}$ 表示扰动垂向输送纬向动量。
+热通量在 Boussinesq/QG 口径下写成浮力通量
+\[
+  B_y^{\ell}=\meanL{\flucL{v}\flucL{b}},
+  \qquad
+  B_z^{\ell}=\meanL{\flucL{w}\flucL{b}}.
+\]
+若使用位温 $\theta$，可通过 $b=g\theta'/\theta_0$ 或等价线性状态方程把 $\theta$ 通量换成
+浮力通量。
+
+在传统近直轴 TEM 极限中，二者可以组成局地 EP 通量：
+\[
+  F_y=-\rho_0\overline{u'v'},
+  \qquad
+  F_z=\rho_0\frac{f_0}{N^2}\overline{v'b'}.
+\]
+于是平均纬向动量强迫为
+\[
+  \rho_0^{-1}\nabla\cdot\boldsymbol F
+  =
+  -\rho_0^{-1}\p_y\left(\rho_0\overline{u'v'}\right)
+  +
+  \rho_0^{-1}\p_z
+  \left(\rho_0\frac{f_0}{N^2}\overline{v'b'}\right).
+\]
+这说明传统 EP flux 中热通量不是普通垂直动量通量，而是经由热成风和平衡关系折算成
+对纬向动量的垂向波活动通量分量。
+
+在大曲率材料体中，这个局地相加关系不再是基本闭合式。水平动量通量仍然给出局地应力散度：
+\[
+  A_x^{R}
+  =
+  -\rho_0^{-1}
+  \left[
+    \p_x(\rho_0R_{xx}^{\ell})
+    +
+    \p_y(\rho_0R_{xy}^{\ell})
+    +
+    \p_z(\rho_0R_{xz}^{\ell})
+  \right].
+\]
+其中与水平动量输送最直接相关的是 $\p_y(\rho_0R_{xy}^{\ell})$ 和 $\p_z(\rho_0R_{xz}^{\ell})$。
+
+热/浮力通量的作用则进入非局地平衡响应。形式上令
+\[
+  \MM[\psi^{\mathrm{resp}}]
+  =
+  \SSrc_B[B^{\ell}]
+  +
+  \SSrc_P[P^{\ell}]
+  +
+  \SSrc_c[q_c]
+  \quad \hbox{in } \mathcal D,
+  \qquad
+  \psi^{\mathrm{resp}}\big|_{\partial\mathcal D}\in\mathcal B.
+\]
+解为
+\[
+  \psi^{\mathrm{resp}}
+  =
+  \MM^{-1}
+  \left(
+    \SSrc_B[B^{\ell}]
+    +
+    \SSrc_P[P^{\ell}]
+    +
+    \SSrc_c[q_c]
+  \right).
+\]
+由流函数到速度的平衡映射记为 $\UU_i$，则热通量对第 $i$ 个动量或速度响应分量的贡献为
+\[
+  L_i^{B}(\bx,t)
+  =
+  \UU_i\MM^{-1}\SSrc_B[B^{\ell}](\bx,t).
+\]
+PV 通量和 coherent PV anomaly 的响应类似：
+\[
+  L_i^{P}=\UU_i\MM^{-1}\SSrc_P[P^{\ell}],
+  \qquad
+  L_i^{c}=\UU_i\MM^{-1}\SSrc_c[q_c],
+\]
+因此
+\[
+  L_i=L_i^B+L_i^P+L_i^c .
+\]
+
+于是水平动量通量与热通量在大曲率材料体中的关系是
+\[
+  \boxed{
+  \GG_x
+  =
+  A_x^R
+  +
+  L_x^B
+  +
+  L_x^P
+  +
+  L_x^c
+  +
+  \RR_x
+  }.
+\]
+它们仍然共同决定同一个平均/材料体强迫，但关系不再是
+``一个水平动量通量项加一个热通量局地散度项''，而是
+\[
+  \boxed{
+  \begin{aligned}
+  \hbox{水平动量通量}
+  &\longrightarrow
+  A_x^R\ \hbox{局地散度},\\
+  \hbox{热/浮力通量}
+  &\longrightarrow
+  L_x^B=\UU_x\MM^{-1}\SSrc_B[B^{\ell}]\ \hbox{非局地响应}.
+  \end{aligned}
+  }
+\]
+
+若要恢复类似传统 EP flux 的局地关系，必须额外满足尺度分离和局地化条件。即存在局地响应通量
+$H_{ij}^B$，使得
+\[
+  L_i^B
+  =
+  \rho_0^{-1}\p_j(\rho_0H_{ij}^{B})
+  +
+  \epsilon_i^{B},
+  \qquad
+  |\epsilon_i^{B}|\ll |L_i^B|.
+\]
+只有此时才可把热通量写回某种 EP 型局地通量分量。否则最诚实的关系就是非局地算子关系：
+\[
+  B^{\ell}
+  \ \xrightarrow{\ \SSrc_B\ }\ 
+  \hbox{PV/thermal source}
+  \ \xrightarrow{\ \MM^{-1}\ }\ 
+  \psi^{\mathrm{resp}}
+  \ \xrightarrow{\ \UU_i\ }\ 
+  L_i^B .
+\]
+
+物理上，水平动量通量直接描述扰动把水平动量搬到哪里；热/浮力通量先改变密度和热成风剪切，
+再通过 PV 反演调整速度场和 PV 分布。两者不是孤立诊断量，而是在
+\[
+  \GG_i=A_i^R+L_i+\RR_i
+\]
+中共同闭合到材料体强迫。
+
+\section{非局地 QG/PV 平衡响应算子}
+
+令 $\mathcal D$ 为包含 $\VV(t)$ 的计算域，$\mathcal B$ 为边界条件集合。QG/Boussinesq 层级下，
+平衡响应可抽象为如下边值问题：
+\[
+  \MM[\psi^{\mathrm{resp}}]
+  =
+  \SSrc\!\left[B^{\ell},P^{\ell},q_c,\overline q,N^2,f_0,\beta\right]
+  \quad \hbox{in } \mathcal D,
+  \qquad
+  \psi^{\mathrm{resp}}\big|_{\partial\mathcal D}\in\mathcal B.
+\]
+速度响应写为
+\[
+  u_i^{\mathrm{resp}}(\bx,t)
+  =
+  \UU_i[\psi^{\mathrm{resp}}](\bx,t),
+\]
+于是非局地平衡强迫定义为
+\[
+  L_i(\bx,t)
+  =
+  \LL_i\!\left[B^{\ell},P^{\ell},q_c;\VV,\mathcal D,\mathcal B\right](\bx,t).
+\]
+$L_i$ 的值依赖整个源场和边界条件，而不只依赖 $\bx$ 附近的 $B_i^{\ell}$。因此完整
+Material-Volume EP 型局地诊断为
+\[
+  \boxed{
+  \GG_i(\bx,t)
+  =
+  A_i^{R}(\bx,t)
+  +
+  L_i(\bx,t)
+  +
+  \RR_i(\bx,t)
+  }.
+\]
+其中 $\RR_i$ 至少包含年龄转或非 QG 残差、混合和摩擦、非保守 PV 源、粗粒化截断误差、
+非材料边界穿透误差，以及三维 coherent 体投影成分层或壳层时的几何误差。
+
+\section{正确的体积分与边界积分预算}
+
+对材料体积分得到总强迫预算：
+\[
+  \int_{\VV}\GG_i\,\dd V
+  =
+  \int_{\VV}A_i^{R}\,\dd V
+  +
+  \int_{\VV}L_i\,\dd V
+  +
+  \int_{\VV}\RR_i\,\dd V.
+\]
+其中只有 Reynolds stress 散度项可直接应用 Gauss 定理：
+\[
+  \int_{\VV}A_i^{R}\,\dd V
+  =
+  -\int_{\SSS}R_{ij}^{\ell}n_j\,\dd S
+  -
+  \int_{\VV}R_{ij}^{\ell}\p_j(\ln\rho_0)\,\dd V.
+\]
+若 $\rho_0$ 在所用坐标中近似常数，则
+\[
+  \int_{\VV}A_i^{R}\,\dd V
+  \simeq
+  -\int_{\SSS}R_{ij}^{\ell}n_j\,\dd S.
+\]
+平衡响应项必须保留为 $\int_{\VV}L_i\,\dd V$，除非独立构造并验证局地通量 $H_{ij}$。此时才可写
+\[
+  \int_{\VV}L_i\,\dd V
+  =
+  \int_{\SSS}H_{ij}n_j\,\dd S
+  +
+  \int_{\VV}\epsilon_i^{H}\,\dd V.
+\]
+若边界不是严格材料面，还需显式保留穿透项
+\[
+  \mathcal E_{\partial V}[\phi]
+  =
+  \int_{\SSS}\phi\left(\bu-\bU_{\SSS}\right)\cdot\bn\,\dd S.
+\]
+
+\section{PV 质心速度与 coherent tilt/bend 诊断}
+
+PV 质心定义为
+\[
+  \bR_c(t)=
+  \frac{\int_{\VV}\bx q_c\,\dd V}{\int_{\VV}q_c\,\dd V}.
+\]
+对其求导得到
+\[
+  \bV_c
+  =
+  \frac{1}{M_q}\int_{\VV}\bu q_c\,\dd V
+  +
+  \frac{1}{M_q}\int_{\VV}(\bx-\bR_c)S_q\,\dd V
+  +
+  \bV_{\partial V}.
+\]
+分解为
+\[
+  V_{c,i}
+  =
+  \meanV{u_i}
+  +
+  \frac{|\VV|}{M_q}\meanV{\flucV{u_i}\flucV{q_c}}
+  +
+  V_{\mathrm{src},i}
+  +
+  V_{\partial V,i}.
+\]
+这条式子使用的是全体平均，因而只用于质心速度本身，不对其内部通量项取空间散度。
+
+若用分层 PV 质心构造 axis skeleton，令弧长参数为 $s$，切向量为
+\[
+  \bt=\p_s\bR_c(s,t),\qquad |\bt|=1.
+\]
+轴线形态演化满足
+\[
+  \D_t\bt
+  =
+  \p_s\bV_c
+  -
+  \left(\bt\cdot\p_s\bV_c\right)\bt
+  =
+  \PP\,\p_s\bV_c,
+  \qquad
+  \PP=\II-\bt\bt.
+\]
+因此 $ \PP\,\p_s\bV_c $ 是形态响应，不是 EP 强迫本身；EP/PV 诊断通过 $\bV_c$ 的非局地响应进入该式。
+
+\section{传统 EP flux 与 curved-tube 的极限对应}
+
+当以下条件同时满足时，大曲率材料体框架可退化到 curved-tube 或传统 TEM/E-P flux：
+\begin{enumerate}[label=\arabic*.]
+  \item coherent 体可由单一小曲率细管坐标覆盖，$\kappa r\ll1$ 且 $J=1-\kappa_\alpha x^\alpha>0$；
+  \item 局地截面平均可稳定替代全局 Cartesian 粗粒化；
+  \item 平衡响应算子 $L_i$ 在所研究尺度上可局地化，且局地化残差已被量化；
+  \item 只关心一个平均动量分量，并且几何联络项在小曲率展开内可控。
+\end{enumerate}
+此时可近似恢复
+\[
+  \nabla_aF_{\mathrm{CT}}^{ai}
+  =
+  J^{-1}\p_a(JF_{\mathrm{CT}}^{ai})
+  +
+  \Gamma^i{}_{ka}F_{\mathrm{CT}}^{ak}.
+\]
+但对于当前验证样本，$\kappa r$ 的中位数约为 $10$ 到 $35$，metric valid fraction 的中位数为 $0$。
+因此 curved-tube 几何项只能作为尺度风险审计，不能作为已经闭合的动力 forcing。
+
+\section{数值实现路线和验证标准}
+
+第一版数值实现应按以下顺序推进：
+\begin{enumerate}[label=\arabic*.]
+  \item 用 coherent PV anomaly 或流函数核识别三维连通材料体 $\VV(t)$；
+  \item 同时输出全体平均量和局地粗粒化场，不混用二者；
+  \item 在 Cartesian 网格或分层壳上计算 $R_{ij}^{\ell}$、$B_i^{\ell}$、$P_i^{\ell}$；
+  \item 只对 $R_{ij}^{\ell}$ 的局地散度计算 $A_i^R$；
+  \item 使用 QG/Boussinesq PV 反演求解非局地响应 $L_i$，并记录边界条件与源项定义；
+  \item 对 $\GG_i=A_i^R+L_i+\RR_i$ 做体积分预算，边界通量只用于已经散度化的部分；
+  \item 计算 PV 质心速度 $\bV_c$ 与 $\PP\,\p_s\bV_c$，诊断 tilt、bend 和 coherent 失稳；
+  \item 用 track-level accumulator 做 bootstrap/jackknife，避免从最终均值代表涡伪造置信区间。
+\end{enumerate}
+
+最低验证标准为：
+\begin{enumerate}[label=\arabic*.]
+  \item 局地场 $R_{ij}^{\ell},B_i^{\ell},P_i^{\ell}$ 与全体平均 $\meanV{\cdot}$ 在代码和报告中分开命名；
+  \item 不出现把浮力响应默认写成局地散度闭合的公式；
+  \item 不对全体平均 Reynolds stress 取空间散度；
+  \item 报告 $\int_{\VV}L_i\,\dd V$、$\int_{\VV}\RR_i\,\dd V$ 和边界穿透项的量级；
+  \item curved-tube 项只在小曲率审计通过时进入动力解释。
+\end{enumerate}
+
+\section{一句话总结}
+
+大曲率 coherent 涡旋的 EP-flux 推广不是把传统 EP 向量机械改写成三维局地散度，而是把可散度化的
+局地 Reynolds stress、非局地 QG/PV 平衡响应、PV 质心动力和真实边界残差放进同一个材料体预算。
+热/浮力通量与水平动量通量仍然共同决定同一个材料体强迫，但前者主要通过非局地平衡反演进入，
+后者则通过局地 Reynolds stress 散度进入。这样既保留了 E-P 理论中合成解释的核心精神，也避免了
+把非局地反演误写成局地边界通量、以及对全体平均量取空间散度这两个闭合错误。
+
+\end{document}
