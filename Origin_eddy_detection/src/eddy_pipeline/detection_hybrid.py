@@ -120,6 +120,12 @@ def _load_cached_extrema(cache_dir: str | Path | None, day: date, max_candidates
     if "abs_ssh_value_m" not in out.columns:
         out["abs_ssh_value_m"] = out["ssh_value_m"].abs()
     out = out.sort_values("abs_ssh_value_m", ascending=False).reset_index(drop=True)
+    out["candidate_selection"] = "candidate_cache"
+    out["tile_lon_min"] = np.nan
+    out["tile_lon_max"] = np.nan
+    out["tile_lat_min"] = np.nan
+    out["tile_lat_max"] = np.nan
+    out["tile_rank"] = np.arange(1, len(out) + 1, dtype=int)
     if max_candidates > 0:
         out = out.head(max_candidates).copy()
     return out
@@ -132,7 +138,72 @@ def _grid_spacing_km(lon: np.ndarray, lat: np.ndarray) -> tuple[float, float]:
     return abs(dx), abs(dy)
 
 
-def _local_extrema(zos: np.ndarray, window: int, *, max_candidates: int) -> pd.DataFrame:
+def _select_extrema_candidates(
+    extrema: pd.DataFrame,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    *,
+    selection: str,
+    max_candidates: int,
+    tile_lon_deg: float,
+    tile_lat_deg: float,
+    tile_top_n: int,
+) -> pd.DataFrame:
+    if extrema.empty:
+        return extrema
+    selection = str(selection).lower().strip()
+    out = extrema.sort_values("abs_ssh_value_m", ascending=False).reset_index(drop=True)
+    if selection == "global_topn":
+        out["candidate_selection"] = "global_topn"
+        out["tile_lon_min"] = np.nan
+        out["tile_lon_max"] = np.nan
+        out["tile_lat_min"] = np.nan
+        out["tile_lat_max"] = np.nan
+        out["tile_rank"] = np.arange(1, len(out) + 1, dtype=int)
+        if max_candidates > 0:
+            out = out.head(max_candidates).copy()
+        return out.reset_index(drop=True)
+    if selection != "tile_topn":
+        raise ValueError(f"Unsupported candidate selection mode: {selection}")
+    if tile_lon_deg <= 0 or tile_lat_deg <= 0 or tile_top_n <= 0:
+        raise ValueError("tile_topn requires positive tile_lon_deg, tile_lat_deg, and tile_top_n")
+
+    seed_i = out["seed_i"].astype(int).to_numpy()
+    seed_j = out["seed_j"].astype(int).to_numpy()
+    seed_lon = np.asarray(lon[seed_i], dtype="float64")
+    seed_lat = np.asarray(lat[seed_j], dtype="float64")
+    tile_lon_min = np.floor(seed_lon / float(tile_lon_deg)) * float(tile_lon_deg)
+    tile_lat_min = np.floor(seed_lat / float(tile_lat_deg)) * float(tile_lat_deg)
+    out["tile_lon_min"] = tile_lon_min
+    out["tile_lon_max"] = tile_lon_min + float(tile_lon_deg)
+    out["tile_lat_min"] = tile_lat_min
+    out["tile_lat_max"] = tile_lat_min + float(tile_lat_deg)
+    out["candidate_selection"] = "tile_topn"
+    selected_parts = []
+    group_cols = ["tile_lon_min", "tile_lat_min"]
+    for _, part in out.groupby(group_cols, sort=True, dropna=False):
+        part = part.sort_values("abs_ssh_value_m", ascending=False).head(int(tile_top_n)).copy()
+        part["tile_rank"] = np.arange(1, len(part) + 1, dtype=int)
+        selected_parts.append(part)
+    if not selected_parts:
+        return out.iloc[0:0].copy()
+    selected = pd.concat(selected_parts, ignore_index=True)
+    selected = selected.sort_values(["tile_lon_min", "tile_lat_min", "tile_rank", "abs_ssh_value_m"], ascending=[True, True, True, False])
+    return selected.reset_index(drop=True)
+
+
+def _local_extrema(
+    zos: np.ndarray,
+    window: int,
+    *,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    selection: str,
+    max_candidates: int,
+    tile_lon_deg: float,
+    tile_lat_deg: float,
+    tile_top_n: int,
+) -> pd.DataFrame:
     finite = np.isfinite(zos)
     fill_max = np.where(finite, zos, -np.inf)
     fill_min = np.where(finite, zos, np.inf)
@@ -165,10 +236,16 @@ def _local_extrema(zos: np.ndarray, window: int, *, max_candidates: int) -> pd.D
     if out.empty:
         return out
     out["abs_ssh_value_m"] = out["ssh_value_m"].abs()
-    out = out.sort_values("abs_ssh_value_m", ascending=False).reset_index(drop=True)
-    if max_candidates > 0:
-        out = out.head(max_candidates).copy()
-    return out
+    return _select_extrema_candidates(
+        out,
+        lon,
+        lat,
+        selection=selection,
+        max_candidates=max_candidates,
+        tile_lon_deg=tile_lon_deg,
+        tile_lat_deg=tile_lat_deg,
+        tile_top_n=tile_top_n,
+    )
 
 
 def _circle_offsets(radius_cells: int) -> list[tuple[int, int]]:
@@ -696,12 +773,29 @@ def _detect_day(
     time_index = _time_lookup(filt)[day]
     zos = np.asarray(filt.variables["zos_glor"][time_index, :, :], dtype="float64")
     cached_extrema = _load_cached_extrema(args.candidate_cache_dir, day, args.max_candidates_per_day)
-    extrema = cached_extrema if cached_extrema is not None else _local_extrema(zos, params.ssh_window_cells, max_candidates=args.max_candidates_per_day)
+    extrema = (
+        cached_extrema
+        if cached_extrema is not None
+        else _local_extrema(
+            zos,
+            params.ssh_window_cells,
+            lon=lon,
+            lat=lat,
+            selection=args.candidate_selection,
+            max_candidates=args.max_candidates_per_day,
+            tile_lon_deg=args.tile_lon_deg,
+            tile_lat_deg=args.tile_lat_deg,
+            tile_top_n=args.tile_top_n,
+        )
+    )
     if extrema.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(columns=OBJECT_VOXEL_COLUMNS)
 
-    max_depth_idx = int(np.searchsorted(depth, args.max_depth_m, side="right"))
-    max_depth_idx = min(max_depth_idx, len(depth))
+    if float(args.max_depth_m) <= 0.0 or not np.isfinite(float(args.max_depth_m)):
+        max_depth_idx = len(depth)
+    else:
+        max_depth_idx = int(np.searchsorted(depth, args.max_depth_m, side="right"))
+        max_depth_idx = min(max_depth_idx, len(depth))
     depth_indices = np.arange(max_depth_idx, dtype=int)
     dx_km, dy_km = _grid_spacing_km(lon, lat)
     centers_rows: list[dict[str, object]] = []
@@ -788,6 +882,12 @@ def _detect_day(
                 "ssh_extremum_type": str(seed["ssh_extremum_type"]),
                 "polarity": polarity,
                 "time_index": int(time_index),
+                "candidate_selection": str(seed.get("candidate_selection", args.candidate_selection)),
+                "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
+                "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
+                "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
+                "tile_lat_max": float(seed.get("tile_lat_max", np.nan)),
+                "tile_rank": int(seed.get("tile_rank", seed_order + 1)) if pd.notna(seed.get("tile_rank", np.nan)) else int(seed_order + 1),
                 "depth_index": int(depth_index),
                 "depth_m": float(depth[depth_index]),
                 "seed_i": seed_i,
@@ -1239,9 +1339,13 @@ def main() -> None:
     parser.add_argument("--output-dir", default="/root/autodl-fs/2020_2022_acc/hua_paper_replication/smoke_20200101_20200107")
     parser.add_argument("--start", default="2020-01-01")
     parser.add_argument("--end", default="2020-01-07")
-    parser.add_argument("--max-depth-m", type=float, default=3000.0)
+    parser.add_argument("--max-depth-m", type=float, default=0.0, help="Maximum depth in meters. Use <=0 for all source depth levels.")
     parser.add_argument("--ssh-window-cells", type=int, default=7)
     parser.add_argument("--max-candidates-per-day", type=int, default=0)
+    parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="tile_topn")
+    parser.add_argument("--tile-lon-deg", type=float, default=10.0)
+    parser.add_argument("--tile-lat-deg", type=float, default=10.0)
+    parser.add_argument("--tile-top-n", type=int, default=15)
     parser.add_argument("--surface-search-cells", type=int, default=8)
     parser.add_argument("--deep-search-cells", type=int, default=6)
     parser.add_argument("--start-radius-cells", type=int, default=3)
@@ -1292,7 +1396,7 @@ def main() -> None:
         "--candidate-cache-dir",
         type=Path,
         default=None,
-        help="Optional directory containing MATLAB/Python precomputed candidates_YYYYMMDD.csv files.",
+        help="Optional directory containing MATLAB/Python precomputed candidates_YYYYMMDD.csv files. Cache rows bypass live candidate selection.",
     )
     parser.add_argument(
         "--netcdf-chunk-cache-mb",

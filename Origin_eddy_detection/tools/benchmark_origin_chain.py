@@ -50,8 +50,13 @@ def main() -> None:
     parser.add_argument("--filter-root", type=Path, default=Path(r"F:\Global Ocean Ensemble Physics Reanalysis Kuroshio Current\FILTER"))
     parser.add_argument("--start", default="1993-01-01")
     parser.add_argument("--end", default="1993-01-03")
-    parser.add_argument("--max-depth-m", type=float, default=1000.0)
-    parser.add_argument("--max-candidates-per-day", type=int, default=20)
+    parser.add_argument("--max-depth-m", type=float, default=0.0, help="Use <=0 for all source depth levels.")
+    parser.add_argument("--max-candidates-per-day", type=int, default=0)
+    parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="tile_topn")
+    parser.add_argument("--tile-lon-deg", type=float, default=10.0)
+    parser.add_argument("--tile-lat-deg", type=float, default=10.0)
+    parser.add_argument("--tile-top-n", type=int, default=15)
+    parser.add_argument("--detect-parallel", type=int, default=12)
     parser.add_argument("--lifetime-min-days", type=int, default=1)
     parser.add_argument("--radius-min-m", type=float, default=10_000.0)
     parser.add_argument("--min-valid-layers", type=int, default=1)
@@ -87,9 +92,17 @@ def main() -> None:
         "--max-candidates-per-day",
         str(args.max_candidates_per_day),
         "--detect-parallel",
-        "1",
+        str(args.detect_parallel),
         "--detect-shard-mode",
         "year",
+        "--candidate-selection",
+        str(args.candidate_selection),
+        "--tile-lon-deg",
+        str(args.tile_lon_deg),
+        "--tile-lat-deg",
+        str(args.tile_lat_deg),
+        "--tile-top-n",
+        str(args.tile_top_n),
         "--lifetime-min-days",
         str(args.lifetime_min_days),
         "--radius-min-m",
@@ -99,25 +112,29 @@ def main() -> None:
     ]
 
     matlab_cache_dir = output_root / ("matlab_candidate_cache_gpu" if args.matlab_use_gpu else "matlab_candidate_cache_cpu")
-    matlab_code = (
-        "addpath('" + str(project_root / "matlab").replace("'", "''") + "'); "
-        "origin_precompute_candidates("
-        "'" + str(args.filter_root).replace("'", "''") + "',"
-        "'" + str(matlab_cache_dir).replace("'", "''") + "',"
-        "'" + args.start + "',"
-        "'" + args.end + "',"
-        "7,"
-        + str(int(args.max_candidates_per_day))
-        + ","
-        + str(bool(args.matlab_use_gpu)).lower()
-        + ");"
-    )
-    matlab_run = run_command(
-        [str(args.matlab_exe), "-batch", matlab_code],
-        project_root,
-        output_root / "logs" / ("matlab_candidate_gpu.log" if args.matlab_use_gpu else "matlab_candidate_cpu.log"),
-    )
-    results["runs"].append({"name": "matlab_candidate_precompute_gpu" if args.matlab_use_gpu else "matlab_candidate_precompute_cpu", **matlab_run})
+    matlab_run = None
+    if args.candidate_selection == "global_topn":
+        matlab_code = (
+            "addpath('" + str(project_root / "matlab").replace("'", "''") + "'); "
+            "origin_precompute_candidates("
+            "'" + str(args.filter_root).replace("'", "''") + "',"
+            "'" + str(matlab_cache_dir).replace("'", "''") + "',"
+            "'" + args.start + "',"
+            "'" + args.end + "',"
+            "7,"
+            + str(int(args.max_candidates_per_day))
+            + ","
+            + str(bool(args.matlab_use_gpu)).lower()
+            + ");"
+        )
+        matlab_run = run_command(
+            [str(args.matlab_exe), "-batch", matlab_code],
+            project_root,
+            output_root / "logs" / ("matlab_candidate_gpu.log" if args.matlab_use_gpu else "matlab_candidate_cpu.log"),
+        )
+        results["runs"].append({"name": "matlab_candidate_precompute_gpu" if args.matlab_use_gpu else "matlab_candidate_precompute_cpu", **matlab_run})
+    else:
+        results["matlab_candidate_precompute_skipped"] = "tile_topn is the default production candidate selector; current MATLAB cache writer is global_topn only."
 
     if not args.skip_python_runs and all(dependency_state[name] for name in ["numpy", "scipy", "pandas", "netCDF4", "matplotlib", "tqdm"]):
         no_cache_dir = output_root / "python_year_cache_smoke"
@@ -129,16 +146,19 @@ def main() -> None:
         )
         results["runs"].append({"name": "python_year_shard_no_candidate_cache", **run})
 
-        with_cache_dir = output_root / "python_with_matlab_candidate_cache_smoke"
-        cmd = [
-            *base_cmd,
-            "--output-root",
-            str(with_cache_dir),
-            "--candidate-cache-dir",
-            str(matlab_cache_dir),
-        ]
-        run = run_command(cmd, project_root, output_root / "logs" / "python_with_matlab_candidate_cache_smoke.log", env)
-        results["runs"].append({"name": "python_year_shard_with_matlab_candidate_cache", **run})
+        if matlab_run is not None and int(matlab_run["returncode"]) == 0:
+            with_cache_dir = output_root / "python_with_matlab_candidate_cache_smoke"
+            cmd = [
+                *base_cmd,
+                "--candidate-selection",
+                "global_topn",
+                "--output-root",
+                str(with_cache_dir),
+                "--candidate-cache-dir",
+                str(matlab_cache_dir),
+            ]
+            run = run_command(cmd, project_root, output_root / "logs" / "python_with_matlab_candidate_cache_smoke.log", env)
+            results["runs"].append({"name": "python_year_shard_with_matlab_candidate_cache", **run})
     else:
         results["skipped_python_runs"] = True
         results["skip_reason"] = "Missing required Python modules or --skip-python-runs was set."

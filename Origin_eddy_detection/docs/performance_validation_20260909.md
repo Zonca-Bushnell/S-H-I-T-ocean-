@@ -17,6 +17,10 @@ The extraction keeps the original Hua detection-to-shape scientific chain, but
 uses local execution optimizations:
 
 - year-sharded detection workers, matching the yearly NetCDF file layout;
+- default `10 deg x 10 deg` tile-top15 surface seed selection;
+- source-depth default via `max_depth_m <= 0`, which uses all NetCDF depth
+  levels;
+- default 12-way detection-worker concurrency for multi-year runs;
 - 512 MB NetCDF chunk cache per detection worker;
 - default skip of nonessential detection/tracking QA plots;
 - fast parquet engine auto-selection;
@@ -180,12 +184,75 @@ Counts:
 This verifies that the final shape stage is functional on the extracted chain;
 the empty life30 output is a data/threshold outcome, not a pipeline failure.
 
+## Current Default Validation: Tile10 Top15 Full Source Depth
+
+Output root:
+
+```text
+E:\DATA\01_Eddy_correspond\03_Original_detection\tile10_top15_full_depth_1993_life20
+```
+
+Settings:
+
+```text
+candidate_selection = tile_topn
+tile_lon_deg = 10
+tile_lat_deg = 10
+tile_top_n = 15
+max_depth_m = 0
+lifetime_min_days = 20
+radius_min_m = 10000
+min_valid_layers = 1
+detect_parallel = 12
+detect_shard_mode = year
+```
+
+The current source file has 51 depth levels, down to about 1516 m. The output
+center table may have a shallower maximum accepted layer because strict
+contiguous extension stops an object at its first failed layer; this is separate
+from the source-depth cap.
+
+Counts:
+
+| Product | Count |
+| --- | ---: |
+| Days | 365 |
+| Surface candidates | 27961 |
+| Center rows | 71894 |
+| Pass layers | 44002 |
+| Vertical frame objects | 1956 |
+| Feature tracks | 695 |
+| Tracks with length >= 2 | 393 |
+| Tracks with length >= 3 | 229 |
+| Eligible shape tracks | 2 |
+| Shape class `mixed` | 2 |
+
+Stage timing from file timestamps:
+
+| Stage | Approximate Time |
+| --- | ---: |
+| Detection | 81 s |
+| Feature/group tracking | 22 s |
+| Catalog + shape adapter | 3 s |
+| End-to-end log window | 127 s |
+
+Because this validation covers one year, `detect_parallel = 12` cannot show its
+multi-year benefit. A 30-year run will create one shard per year, so annual
+workers can run concurrently until either CPU or F: drive NetCDF I/O becomes the
+limiting factor.
+
 ## Current Recommendation
 
 For this local Kuroshio dataset, the default fast path should remain pure Python
 with:
 
 ```text
+--candidate-selection tile_topn
+--tile-lon-deg 10
+--tile-lat-deg 10
+--tile-top-n 15
+--max-depth-m 0
+--detect-parallel 12
 --detect-shard-mode year
 --netcdf-chunk-cache-mb 512
 --skip-axis-examples

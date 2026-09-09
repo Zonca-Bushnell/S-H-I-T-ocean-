@@ -75,14 +75,32 @@ python run_origin_eddy_pipeline.py run-detection-to-shape `
 The launcher keeps the original internal module names (`src.eddy_pipeline.*`)
 working without requiring files outside this folder.
 
+Current production defaults are:
+
+```text
+candidate_selection = tile_topn
+tile_lon_deg = 10
+tile_lat_deg = 10
+tile_top_n = 15
+max_depth_m = 0        # use every depth level in the source NetCDF file
+detect_parallel = 12   # year shards run concurrently when multiple years exist
+```
+
 ## Acceleration Notes
 
 This extraction keeps the Python scientific checks as the authority, but adds
-two local speed-oriented changes:
+local speed-oriented changes:
 
 - Detection sharding defaults to `--detect-shard-mode year`. This keeps one
   process scanning one yearly NetCDF file sequentially, reducing repeated file
   opens and HDF5 chunk-cache churn compared with quarterly sharding.
+- Surface seed selection defaults to `10 deg x 10 deg` spatial tiles with at
+  most 15 candidates per tile. This avoids a global top-N bottleneck while
+  preserving geographically distributed candidates.
+- `--max-depth-m 0` means all source depth levels. For the current local
+  `global_phy_1993.nc` files this is 51 levels down to about 1516 m.
+- `--detect-parallel 12` is the default launcher concurrency. With year
+  sharding, a 30-year run can execute multiple annual workers at once.
 - `--netcdf-chunk-cache-mb 512` is passed to detection workers by default, so
   repeated daily reads can reuse NetCDF chunks inside each yearly worker.
 - Detection and tracking skip nonessential QA plots in the default launcher
@@ -97,16 +115,19 @@ There is also an optional MATLAB backend, isolated under `matlab/`:
 
 ```powershell
 python run_origin_eddy_pipeline.py run-detection-to-shape `
+  --candidate-selection global_topn `
+  --max-candidates-per-day 80 `
   --matlab-candidate-precompute `
   --matlab-use-gpu `
   --output-root E:\DATA\01_Eddy_correspond\03_Original_detection\run_full
 ```
 
-The MATLAB backend currently precomputes only surface SSH extrema candidates
-from `zos_glor` and writes `candidates_YYYYMMDD.csv` files. Python still owns
-the Hua velocity-center search, circular checks, strict-contiguous extension,
-tracking, catalog, and shape classification. This keeps the physical decision
-chain unchanged while moving the easiest matrix stage toward MATLAB/GPU.
+The MATLAB backend currently precomputes only global top-N surface SSH extrema
+candidates from `zos_glor` and writes `candidates_YYYYMMDD.csv` files. It does
+not yet write tile-topN caches. Python still owns the Hua velocity-center
+search, circular checks, strict-contiguous extension, tracking, catalog, and
+shape classification. This keeps the physical decision chain unchanged while
+moving the easiest matrix stage toward MATLAB/GPU.
 
 Benchmark helper:
 

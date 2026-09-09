@@ -296,6 +296,11 @@ def write_runtime_config(args: argparse.Namespace, paths: Paths) -> None:
             "detect_shard_mode": str(args.detect_shard_mode),
             "detect_parallel": int(args.detect_parallel),
             "netcdf_chunk_cache_mb": int(args.netcdf_chunk_cache_mb),
+            "candidate_selection": str(args.candidate_selection),
+            "max_candidates_per_day": int(args.max_candidates_per_day),
+            "tile_lon_deg": float(args.tile_lon_deg),
+            "tile_lat_deg": float(args.tile_lat_deg),
+            "tile_top_n": int(args.tile_top_n),
             "production_science_mouthful": ORIGIN_DETECTION_TO_SHAPE_MOUTHFUL,
             "source_contract_mouthful": PRODUCTION_SCIENCE_MOUTHFUL,
         },
@@ -340,6 +345,14 @@ def detection_command(args: argparse.Namespace, paths: Paths, start: str, end: s
         str(args.ssh_window_cells),
         "--max-candidates-per-day",
         str(args.max_candidates_per_day),
+        "--candidate-selection",
+        str(args.candidate_selection),
+        "--tile-lon-deg",
+        str(args.tile_lon_deg),
+        "--tile-lat-deg",
+        str(args.tile_lat_deg),
+        "--tile-top-n",
+        str(args.tile_top_n),
         "--surface-search-cells",
         str(params["surface_search_cells"]),
         "--deep-search-cells",
@@ -406,6 +419,12 @@ def run_pipeline(args: argparse.Namespace, paths: Paths) -> None:
     if not DRY_RUN:
         paths.logs_dir.mkdir(parents=True, exist_ok=True)
     write_runtime_config(args, paths)
+    if bool(args.matlab_candidate_precompute) and str(args.candidate_selection) != "global_topn":
+        raise SystemExit(
+            "MATLAB candidate precompute currently writes global top-N candidate caches. "
+            "Use --candidate-selection global_topn with --matlab-candidate-precompute, "
+            "or omit MATLAB precompute for the default tile_topn production path."
+        )
     if bool(args.matlab_candidate_precompute):
         if not DRY_RUN:
             paths.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -678,10 +697,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--representative-composite-method", choices=["me_liutex", "radial"], default="me_liutex", help=argparse.SUPPRESS)
     parser.add_argument("--start", default="1993-01-01")
     parser.add_argument("--end", default="2022-12-31")
-    parser.add_argument("--max-depth-m", type=float, default=2000.0)
+    parser.add_argument("--max-depth-m", type=float, default=0.0, help="Maximum depth in meters. Use <=0 for all source depth levels.")
     parser.add_argument("--ssh-window-cells", type=int, default=7)
-    parser.add_argument("--max-candidates-per-day", type=int, default=80)
-    parser.add_argument("--detect-parallel", type=int, default=6)
+    parser.add_argument("--max-candidates-per-day", type=int, default=0, help="Global cap used by global_topn or candidate-cache modes. The default tile_topn path uses --tile-top-n per tile.")
+    parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="tile_topn")
+    parser.add_argument("--tile-lon-deg", type=float, default=10.0)
+    parser.add_argument("--tile-lat-deg", type=float, default=10.0)
+    parser.add_argument("--tile-top-n", type=int, default=15)
+    parser.add_argument("--detect-parallel", type=int, default=12)
     parser.add_argument(
         "--netcdf-chunk-cache-mb",
         type=int,
