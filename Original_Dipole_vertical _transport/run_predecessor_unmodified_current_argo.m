@@ -290,11 +290,16 @@ end
 end
 
 function cmap = redblue_colormap(n)
-x = linspace(-1, 1, n)';
-r = min(1, max(0, 1.5 + 1.5*x));
-b = min(1, max(0, 1.5 - 1.5*x));
-g = 0.92 * max(0, 1 - abs(x));
-cmap = [r, g, b];
+if nargin < 1
+    n = 256;
+end
+if mod(n, 2) ~= 0
+    n = n + 1;
+end
+r = [(0:(n/2-1))/(n/2), ones(1,n/2)];
+g = [(0:(n/2-1))/(n/2), (n/2-1:-1:0)/(n/2)];
+b = [ones(1,n/2), (n/2-1:-1:0)/(n/2)];
+cmap = [r(:), g(:), b(:)];
 end
 
 function write_doc(out_dir, polarity, S)
