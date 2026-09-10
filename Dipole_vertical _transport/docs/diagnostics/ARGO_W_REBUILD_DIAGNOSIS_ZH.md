@@ -275,12 +275,14 @@ E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transp
 % 错误旧写法
 [dzdy, dzdx] = gradient(fillmissing2(grid.z), dy_m, dx_m);
 
-% 修正写法
-[dzdx, dzdy] = gradient(fillmissing2(grid.z), dx_m, dy_m);
+% 当前统一写法
+[dzdx, dzdy] = gradient_xy(fillmissing2(grid.z), dx_m, dy_m);
 ```
 
-MATLAB 对二维矩阵的第一个输出是沿列方向的 `dF/dx`，第二个输出是沿行方向的
-`dF/dy`。旧写法会把东西向等密面坡度当成南北向坡度、把南北向坡度当成东西向坡度，
+当前正式程序把所有水平梯度收口到 `gradient_xy(F, dx_m, dy_m)`。该函数显式约定
+矩阵列方向是 `x/R`（东西向），矩阵行方向是 `y/R`（南北向），内部按
+`[dfdx, dfdy] = gradient(F, dx_m, dy_m)` 调用 MATLAB，并已用线性场
+`F=2x+3y` 做方向 smoke test。旧写法会把东西向等密面坡度当成南北向坡度、把南北向坡度当成东西向坡度，
 足以把 `term1 = -c_x_rel dz'/dx` 的主结构旋转 90 度。
 
 用上一轮 BOA 20N crossing 的同一份 `composite_grid.json` 离线重算梯度后：

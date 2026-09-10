@@ -11,7 +11,7 @@ function [u_tw, v_tw] = thermal_wind_velocity_stack(rho_grids, support3, u_base,
     dv_dD = nan(ny, nx, nz);
     for zz = 1:nz
         rho_grid = fillmissing2(rho_grids(:,:,zz));
-        [drhodx, drhody] = gradient(rho_grid, dx_m, dy_m);
+        [drhodx, drhody] = gradient_xy(rho_grid, dx_m, dy_m);
         du_dD(:,:,zz) = mask_to_support(g ./ (f * rho_ref) .* drhody, support3(:,:,zz));
         dv_dD(:,:,zz) = mask_to_support(-g ./ (f * rho_ref) .* drhodx, support3(:,:,zz));
     end
