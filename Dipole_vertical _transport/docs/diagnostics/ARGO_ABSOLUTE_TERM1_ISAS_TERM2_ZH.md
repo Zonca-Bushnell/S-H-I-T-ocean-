@@ -4,6 +4,8 @@
 
 - `term1` 使用 Argo 合成 absolute density 场，经整体等密面集合反插得到
   `dD_rho/dx`。
+- 热成风速度以 1000 m Argo parking drift 为锚点，使用 Argo 合成
+  absolute density 的水平密度梯度积分得到。
 - `term2` 使用 ISAS/background density 场，经同样的整体等密面集合反插得到
   背景 `dD_rho/dx, dD_rho/dy`。
 - `D_rho` 为正深度向下；`W` 为向上为正。
@@ -32,7 +34,7 @@ D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
 `D'_rho = D_rho(profile) - D_rho(BOA)`。它只把 Argo profile density 直接插值到
 目标深度层并合成 absolute density，再用前辈式等密面斜率算法计算 `term1`。
 
-ISAS 背景只进入 `term2` 的背景等密面斜率和背景热成风速度。若找不到极性专属
+ISAS 背景只进入 `term2` 的背景等密面斜率。若找不到极性专属
 ISAS 文件，背景场会回退到用户提供的通用 ISAS density MAT；这是因为背景场本身
 不是涡旋极性量。
 

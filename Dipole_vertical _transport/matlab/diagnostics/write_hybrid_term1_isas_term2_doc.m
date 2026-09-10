@@ -15,12 +15,17 @@ function write_hybrid_term1_isas_term2_doc(path, hybrid, polarity, band_label, m
     fprintf(fid, '## 口径\n\n');
     fprintf(fid, '本诊断按前辈程序思路重组，但不改变正式默认生产流程：\n\n');
     fprintf(fid, '- `term1`：使用 Argo 合成 absolute density 场，通过整条相邻密度柱反插同一 `rho0` 得到整体等密面斜率，再计算 `+ c_x^{rel} dD_rho/dx`。\n');
+    fprintf(fid, '- 热成风速度：以 1000 m Argo parking drift 为锚点，使用 Argo composite absolute density 的水平密度梯度积分得到 `u(z),v(z)`。\n');
     fprintf(fid, '- `term2`：使用 ISAS/background density 场，通过同样的整体等密面反插法得到背景 `dD_rho/dx, dD_rho/dy`，再计算 `-[(u-u_bg)dD_rho/dx + v dD_rho/dy]`。\n');
     fprintf(fid, '- `W`：`term1 + term2`，单位 `m s^-1`，图中用 `10^-6 m s^-1`。\n\n');
     fprintf(fid, '## ISAS 状态\n\n');
     fprintf(fid, '- available：`%d`\n', hybrid.isas_info.available);
     fprintf(fid, '- path：`%s`\n', hybrid.isas_info.path);
     fprintf(fid, '- message：%s\n\n', hybrid.isas_info.message);
+    if isfield(hybrid, 'thermal_wind_source')
+        fprintf(fid, '## 热成风速度来源\n\n');
+        fprintf(fid, '`%s`\n\n', hybrid.thermal_wind_source);
+    end
     fprintf(fid, '## 指标\n\n');
     fprintf(fid, '| 指标 | 数值 |\n');
     fprintf(fid, '|---|---:|\n');

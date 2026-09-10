@@ -29,12 +29,12 @@ function hybrid = argo_absolute_term1_isas_term2_terms(grid3d, polarity, isas_de
     base_v = grid3d.v_tw(:,:,anchor);
     base_support = isfinite(base_u) & isfinite(base_v);
     t = tic;
-    [u_isas, v_isas] = thermal_wind_velocity_stack(rho_isas, support_isas, base_u, base_v, base_support, depth_levels, dx_m, dy_m, grid3d.thermal_wind_f_s_1);
-    log_step(sprintf('hybrid ISAS background thermal wind ready in %.1f s', toc(t)));
+    [u_tw, v_tw] = thermal_wind_velocity_stack(grid3d.rho_abs, support_abs, base_u, base_v, base_support, depth_levels, dx_m, dy_m, grid3d.thermal_wind_f_s_1);
+    log_step(sprintf('hybrid Argo absolute thermal wind ready in %.1f s', toc(t)));
 
-    support = support_abs & support_isas & isfinite(u_isas) & isfinite(v_isas);
-    [term1, ~] = w_terms_from_depth_geometry(dzdx_abs, dzdy_abs, u_isas, v_isas, grid3d.cx_rel, grid3d.mean_u_bg, support);
-    [~, term2] = w_terms_from_depth_geometry(dzdx_isas, dzdy_isas, u_isas, v_isas, grid3d.cx_rel, grid3d.mean_u_bg, support);
+    support = support_abs & support_isas & isfinite(u_tw) & isfinite(v_tw);
+    [term1, ~] = w_terms_from_depth_geometry(dzdx_abs, dzdy_abs, u_tw, v_tw, grid3d.cx_rel, grid3d.mean_u_bg, support);
+    [~, term2] = w_terms_from_depth_geometry(dzdx_isas, dzdy_isas, u_tw, v_tw, grid3d.cx_rel, grid3d.mean_u_bg, support);
     w = mask_stack(term1 + term2, support);
 
     section_w = section_stack(w, grid3d.y(:,1), grid3d.section_half_width_r);
@@ -63,8 +63,8 @@ function hybrid = argo_absolute_term1_isas_term2_terms(grid3d, polarity, isas_de
     hybrid.dzdy_abs_argo = dzdy_abs;
     hybrid.dzdx_isas = dzdx_isas;
     hybrid.dzdy_isas = dzdy_isas;
-    hybrid.u_isas = u_isas;
-    hybrid.v_isas = v_isas;
+    hybrid.u_tw = u_tw;
+    hybrid.v_tw = v_tw;
     hybrid.rho_abs_argo = grid3d.rho_abs;
     hybrid.rho_isas = rho_isas;
     hybrid.isas_info = isas_info;
@@ -76,4 +76,5 @@ function hybrid = argo_absolute_term1_isas_term2_terms(grid3d, polarity, isas_de
     hybrid.coordinate_convention = 'D_rho positive downward; W positive upward; matrix columns are east-west x/R and rows are north-south y/R.';
     hybrid.term1_geometry = 'Argo composite absolute density isosurface slope';
     hybrid.term2_geometry = 'ISAS/background density isosurface slope';
+    hybrid.thermal_wind_source = 'Argo composite absolute density';
 end
