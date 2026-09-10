@@ -58,6 +58,8 @@ function grid_files = run_argo_absolute_term1_isas_term2_diagnosis(output_root, 
             end
             plot_hybrid_term1_isas_term2_3panel(fullfile(group_dir, 'argo_absolute_term1_isas_term2_section.png'), hybrid, polarity, band_label);
             plot_hybrid_depth_slices(fullfile(group_dir, 'argo_absolute_term1_isas_term2_depth_slices.png'), hybrid, polarity, band_label);
+            plot_hybrid_term1_isas_term2_3panel(fullfile(group_dir, 'argo_absolute_term1_isas_term2_section_regularized.png'), hybrid, polarity, band_label);
+            plot_hybrid_depth_slices(fullfile(group_dir, 'argo_absolute_term1_isas_term2_depth_slices_regularized.png'), hybrid, polarity, band_label);
             write_hybrid_term1_isas_term2_doc(fullfile(group_dir, 'ARGO_ABSOLUTE_TERM1_ISAS_TERM2_ZH.md'), hybrid, polarity, band_label, matches);
             save(fullfile(group_dir, 'argo_absolute_term1_isas_term2_terms.mat'), 'hybrid', '-v7.3');
             grid_files{end+1} = fullfile(group_dir, 'argo_absolute_term1_isas_term2_terms.mat'); %#ok<AGROW>

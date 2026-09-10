@@ -82,3 +82,20 @@ density 积分；ISAS 背景几何对 term2 仍有诊断意义，但不应替代
 另外，本入口新增 absolute-only 3D builder，不再复用 BOA anomaly 的
 profile-depth cache。20N/30N/40N 全深度运行中，200 层 Argo 密度插值通常小于
 1 秒，200 层 Cressman 约 4 秒，明显快于旧的 BOA/QC 逐 profile 反插路径。
+
+## 2026-09-10 横截面和 3D slice 规整化
+
+20N/30N/40N 的混合口径已经接近前辈算法，但原始横截面和 3D depth slice 图像仍有
+明显碎片化/锯齿。这个问题主要来自展示层：每个深度层独立 Cressman、支持格点随深度
+变化、截面只取 `|y/R| <= 0.25` 的窄条中位数，以及 `10:10:2000 m` 的高垂向层数会把
+局部采样噪声直接显示出来。
+
+为避免改变物理本质，当前只对 PNG 增加 display-regularized 输出：
+
+- 不改 `hybrid.term1`、`hybrid.term2`、`hybrid.w` 和 MAT 文件中的物理场。
+- 绘图前在已有有限值支撑附近做最多 2 轮小缺口填补，要求邻域内至少 4 个有限值。
+- 随后对横截面做 3 轮 `x-depth` 支持域均值平滑，对 depth slice 做 2 轮水平支持域平滑。
+- 图题和脚注明确标注 `display-regularized` 和 `MAT fields unchanged`。
+
+这一步只解决汇报图的规整性；如果后续希望物理场本身也更平滑，应单独讨论 Cressman
+半径、最小支撑数、垂向协同平滑或 objective mapping 的科学影响。
