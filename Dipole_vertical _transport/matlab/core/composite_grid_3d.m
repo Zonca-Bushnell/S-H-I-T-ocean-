@@ -6,7 +6,7 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     nan3 = nan(grid_n, grid_n, nz);
     count3 = zeros(grid_n, grid_n, nz);
     grid3d = struct('x', X, 'y', Y, 'depth_levels', depth_levels(:), 'w', nan3, 'term1', nan3, 'term2', nan3, ...
-        'z_anom', nan3, 'rho_anom', nan3, 'rho_abs', nan3, 'u_tw', nan3, 'v_tw', nan3, 'count', count3, 'mapped_support', count3, 'valid_profile_count', zeros(nz,1), ...
+        'z_anom', nan3, 'rho_anom', nan3, 'rho_abs', nan3, 'rho_boa', nan3, 'u_tw', nan3, 'v_tw', nan3, 'count', count3, 'mapped_support', count3, 'valid_profile_count', zeros(nz,1), ...
         'boa_bg_valid_count', zeros(nz,1), 'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, ...
         'mean_radius_m', NaN, 'section_axis', section_axis, 'section_half_width_r', section_half_width_r, ...
         'section_coord', [], 'section_w', [], 'match_count', 0, 'unique_argo_count', 0, 'duplicate_match_count', 0, ...
@@ -49,21 +49,27 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     z_samples = nan(numel(x), nz);
     rho_samples = nan(numel(x), nz);
     rho_abs_samples = nan(numel(x), nz);
+    boa_rho_samples = nan(numel(x), nz);
     z_samples(finite_unique,:) = profile_cache.z_anom(unique_pos(finite_unique), :);
     rho_samples(finite_unique,:) = profile_cache.rho_anom(unique_pos(finite_unique), :);
     if isfield(profile_cache, 'rho_abs')
         rho_abs_samples(finite_unique,:) = profile_cache.rho_abs(unique_pos(finite_unique), :);
     end
+    if isfield(profile_cache, 'boa_rho')
+        boa_rho_samples(finite_unique,:) = profile_cache.boa_rho(unique_pos(finite_unique), :);
+    end
     base_good = isfinite(x) & isfinite(y) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & hypot(x, y) <= 4;
     z_samples(~base_good,:) = NaN;
     rho_samples(~base_good,:) = NaN;
     rho_abs_samples(~base_good,:) = NaN;
+    boa_rho_samples(~base_good,:) = NaN;
     valid_pair = isfinite(z_samples) & isfinite(rho_samples);
     z_samples(~valid_pair) = NaN;
     rho_samples(~valid_pair) = NaN;
     rho_abs_samples(~valid_pair) = NaN;
+    boa_rho_samples(~valid_pair) = NaN;
     map_timer = tic;
-    [mapped_stack, support_stack] = cressman_map_multi_missing(x, y, [z_samples, rho_samples, rho_abs_samples], X, Y, cressman_radius_r, cressman_min_obs);
+    [mapped_stack, support_stack] = cressman_map_multi_missing(x, y, [z_samples, rho_samples, rho_abs_samples, boa_rho_samples], X, Y, cressman_radius_r, cressman_min_obs);
     for zz = 1:nz
         grid3d.valid_profile_count(zz) = nnz(profile_cache.profile_valid(:,zz));
         grid3d.boa_bg_valid_count(zz) = nnz(profile_cache.boa_valid(:,zz));
@@ -78,16 +84,20 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
         z_grid = mapped_stack(:,:,zz);
         rho_grid = mapped_stack(:,:,nz+zz);
         rho_abs_grid = mapped_stack(:,:,2*nz+zz);
-        support = support_stack(:,:,zz) >= cressman_min_obs & support_stack(:,:,nz+zz) >= cressman_min_obs & support_stack(:,:,2*nz+zz) >= cressman_min_obs;
-        grid3d.mapped_support(:,:,zz) = min(min(support_stack(:,:,zz), support_stack(:,:,nz+zz)), support_stack(:,:,2*nz+zz));
+        rho_boa_grid = mapped_stack(:,:,3*nz+zz);
+        support = support_stack(:,:,zz) >= cressman_min_obs & support_stack(:,:,nz+zz) >= cressman_min_obs & ...
+            support_stack(:,:,2*nz+zz) >= cressman_min_obs & support_stack(:,:,3*nz+zz) >= cressman_min_obs;
+        grid3d.mapped_support(:,:,zz) = min(min(support_stack(:,:,zz), support_stack(:,:,nz+zz)), min(support_stack(:,:,2*nz+zz), support_stack(:,:,3*nz+zz)));
         if smooth_passes > 0
             z_grid = smooth2_supported(z_grid, support, smooth_passes);
             rho_grid = smooth2_supported(rho_grid, support, smooth_passes);
             rho_abs_grid = smooth2_supported(rho_abs_grid, support, smooth_passes);
+            rho_boa_grid = smooth2_supported(rho_boa_grid, support, smooth_passes);
         end
         grid3d.z_anom(:,:,zz) = mask_to_support(z_grid, support);
         grid3d.rho_anom(:,:,zz) = mask_to_support(rho_grid, support);
         grid3d.rho_abs(:,:,zz) = mask_to_support(rho_abs_grid, support);
+        grid3d.rho_boa(:,:,zz) = mask_to_support(rho_boa_grid, support);
         rho_grids(:,:,zz) = rho_grid;
         support3(:,:,zz) = support;
     end

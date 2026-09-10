@@ -17,6 +17,7 @@ DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat")
 DEFAULT_HISTORY_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
 DEFAULT_BOA_PDEN_ROOT = Path(r"F:\Argo_data\Self_BOA_Argo_PotentialDensity")
+DEFAULT_ISAS_DENSITY_MAT = Path(r"D:\Users\Root\Output\Eddy Heat Flux\Argo04_data_DenField_ce_North_twosat_ISAS_7Sample.mat")
 DEFAULT_CACHE_ROOT = Path(r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\_cache")
 DEFAULT_OUTPUT_ROOT = Path(
     r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transport_crossing_global_60S60N_10deg"
@@ -267,6 +268,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     history_argo_mat = matlab_quote(args.history_argo_mat)
     meta_dir = matlab_quote(args.meta_dir)
     boa_pden_root = matlab_quote(args.boa_pden_root)
+    isas_density_mat = matlab_quote(args.isas_density_mat)
     cache_root = matlab_quote(args.cache_root)
     output_root = matlab_quote(args.output_root)
     manifest = matlab_quote(manifest_path)
@@ -279,6 +281,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@HISTORY_ARGO_MAT@", history_argo_mat)
         .replace("@META_DIR@", meta_dir)
         .replace("@BOA_PDEN_ROOT@", boa_pden_root)
+        .replace("@ISAS_DENSITY_MAT@", isas_density_mat)
         .replace("@CACHE_ROOT@", cache_root)
         .replace("@OUTPUT_ROOT@", output_root)
         .replace("@MATLAB_MODULE_ROOT@", matlab_module_root)
@@ -303,6 +306,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@MATLAB_PROFILE@", "true" if args.matlab_profile else "false")
         .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
         .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
+        .replace("@DIAGNOSE_THREEWAY_Z_BACKGROUND@", "true" if args.diagnose_threeway_z_background else "false")
         .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
@@ -331,6 +335,7 @@ def main() -> int:
     parser.add_argument("--history-argo-mat", type=Path, default=DEFAULT_HISTORY_ARGO_MAT)
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
     parser.add_argument("--boa-pden-root", type=Path, default=DEFAULT_BOA_PDEN_ROOT)
+    parser.add_argument("--isas-density-mat", type=Path, default=DEFAULT_ISAS_DENSITY_MAT)
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--bbox", type=parse_bbox, default=parse_bbox(DEFAULT_BBOX))
@@ -424,6 +429,11 @@ def main() -> int:
         "--compare-z-geometry-modes",
         action="store_true",
         help="Run the controlled 20N comparison between BOA-referenced z_rho anomaly geometry and composite-density isosurface geometry.",
+    )
+    parser.add_argument(
+        "--diagnose-threeway-z-background",
+        action="store_true",
+        help="Run the Original-worktree three-way test: BOA anomaly, composite-density isosurface, and background-density term2.",
     )
     parser.add_argument(
         "--z-geometry-mode",
