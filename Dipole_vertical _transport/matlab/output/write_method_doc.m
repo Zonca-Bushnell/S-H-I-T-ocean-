@@ -20,9 +20,9 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_r
     fprintf(fid, '- 默认网格化：Cressman objective mapping。权重 `w=(R_c^2-r^2)/(R_c^2+r^2)`，仅使用 `R_c` 内样本；默认 `R_c=0.5R`、每格至少 `3` 个样本。`sample_count` 是原始 bin 覆盖，`mapped_support` 是 Cressman 支撑样本数。\n');
     fprintf(fid, '- 默认输出格式：大匹配表写为 `.mat`；网格写为 `.mat` 和 `.nc`；SUMMARY 写为 `.mat`。CSV 与网格 JSON 默认关闭，可用 `--write-matched-csv`、`--write-summary-csv` 和 `--write-grid-json` 显式打开。\n');
     fprintf(fid, '- 默认绘图：二维 W 图使用 `contourf(..., ''LineStyle'', ''none'')`，只显示填色块，不叠加等值线描边。\n');
-    fprintf(fid, '- 深度变量约定：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 均保存为正深度向下，便于海洋剖面阅读。\n');
-    fprintf(fid, '- W 符号约定：`rebuild_w_m_s`、`term1_m_s`、`term2_m_s` 统一为向上为正，与历史 `I_Wpk` 中 `z=-Depth` 后计算 `Dz/Dt` 的口径一致；同时保留 `rebuild_w_raw_depth_positive_m_s` 作为深度向下正公式对照。\n');
-    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-u_bg, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`，避免传播速度在 term1 和 term2 中重复计入。\n');
+    fprintf(fid, '- 深度变量约定：正式代码内部统一使用 `D_rho`，即正深度向下；历史字段名 `z_rho_m/z_rho_bg_m/z_rho_anom_m` 仅为兼容名，物理含义按 `D_rho/D_rho_bg/D''_rho` 解释。\n');
+    fprintf(fid, '- W 符号约定：`rebuild_w_m_s`、`term1_m_s`、`term2_m_s` 统一为向上为正，即 `W_up = -D_t`；同时保留 `rebuild_w_raw_depth_positive_m_s` 作为深度向下正公式对照。\n');
+    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dD''_rho/dx`，`term2 = -[(u_pk-u_bg, v_pk) · grad(D''_rho)]`，`rebuild_W = term1 + term2`，避免传播速度在 term1 和 term2 中重复计入。\n');
     fprintf(fid, '- BOA_Argo 只作为 gridded 密度背景，不直接推导背景速度。\n\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\n');
     fclose(fid);

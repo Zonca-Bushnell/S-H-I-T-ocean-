@@ -24,8 +24,9 @@ function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, radius, 
         coef = Xfit \ z(inside);
         dzdx = coef(2) / radius(ii);
         dzdy = coef(3) / radius(ii);
-        term1(ii) = cx_rel * dzdx;
-        term2(ii) = -((u(ii) - mean_u_bg) * dzdx + v(ii) * dzdy);
-        rebuild(ii) = term1(ii) + term2(ii);
+        [t1, t2, w] = w_terms_from_depth_geometry(dzdx, dzdy, u(ii), v(ii), cx_rel, mean_u_bg, true);
+        term1(ii) = t1;
+        term2(ii) = t2;
+        rebuild(ii) = w;
     end
 end

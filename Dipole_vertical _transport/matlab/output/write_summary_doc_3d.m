@@ -7,7 +7,7 @@ function write_summary_doc_3d(path, summary_rows, output_root, depth_levels, sec
         fprintf(fid, '`%.0f m` ', depth_levels(i));
     end
     fprintf(fid, '\n- 横截面：`%s` 方向，半宽 `%.3gR`。纵坐标为正深度数值，W 向上为正。\n', section_axis, section_half_width_r);
-    fprintf(fid, '- 公式：`term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-u_bg,v_pk)·grad(z''_rho)]`，`W = term1 + term2`。\n\n');
+    fprintf(fid, '- 公式：正式几何统一为 `D''_rho` 正深度向下；`term1 = +c_x_rel dD''_rho/dx`，`term2 = -[(u_pk-u_bg,v_pk)·grad(D''_rho)]`，`W_up = term1 + term2`。\n\n');
     fprintf(fid, '| polarity | lat_band | matches | unique Argo | depth count | valid voxels | valid voxel %% | mean cells/depth | BOA bg %% | profile valid %% | c_x_rel m/s | q95 W |\n');
     fprintf(fid, '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n');
     for i=1:size(summary_rows,1)

@@ -36,26 +36,28 @@ Argo 使用 TEOS-10 派生密度，默认变量为 `I_sigma1`。历史文件中�
 正式几何固定为：
 
 ```text
-BOA monthly climatology -> z'_rho -> Cressman composite -> gradient/W
+BOA monthly climatology -> D'_rho -> Cressman composite -> gradient/W_up
 ```
 
 对每条匹配 profile：
 
 ```text
 rho0 = rho_Argo(parking_depth)
-z_rho = z_Argo(rho0)
-z_rho_bg = z_BOA_monthly_clim(lon, lat, month, rho0)
-z'_rho = z_rho - z_rho_bg
+D_rho = D_Argo(rho0)
+D_rho_bg = D_BOA_monthly_clim(lon, lat, month, rho0)
+D'_rho = D_rho - D_rho_bg
 ```
 
-`z_rho` 和 `z_rho_bg` 都必须由严格 bracket crossing 反插值得到；无 crossing、
-弱层结或 bracket 过厚的样本会被剔除。深度变量保存和图像标识均为正深度向下。
+`D_rho` 和 `D_rho_bg` 都必须由严格 bracket crossing 反插值得到；无 crossing、
+弱层结或 bracket 过厚的样本会被剔除。**正式代码内部统一使用 `D`：正深度向下。**
+已有输出字段名中的 `z_rho_m/z_rho_anom_m` 为历史兼容名，物理含义按 `D_rho/D'_rho`
+解释，不再在正式主流程中混用 `z=-D`。
 
-W 使用向上为正：
+W 使用向上为正，即 `W_up = -D_t`：
 
 ```text
-term1 = + c_x_rel * dz'_rho/dx
-term2 = - [(u_pk - c_x_raw), v_pk] · grad(z'_rho)
+term1 = + c_x_rel * dD'_rho/dx
+term2 = - [(u_pk - u_bg), v_pk] · grad(D'_rho)
 rebuild_W = term1 + term2
 ```
 
@@ -78,7 +80,7 @@ SUMMARY 写 `.mat`。大 CSV 和网格 JSON 默认关闭，需要时显式使用
 ## 三维模式
 
 `--vertical-mode thermal_wind_depth_stack` 会在每个名义深度层重复上述 BOA
-背景密度反插值，得到 `W(x/R,y/R,z)`。热成风只用于把 1000 m parking drift
+背景密度反插值，得到 `W(x/R,y/R,D)`。热成风只用于把 1000 m parking drift
 延拓成随深度变化的 `u(z),v(z)`：
 
 ```text
@@ -95,14 +97,14 @@ dv/dD = -g/(f rho_ref) * d rho'/dx
 
 - `--fast-sensitivity-2d`：复用匹配/QC 缓存，对少量 Cressman 参数做 2D 敏感性。
 - `--diagnose-reversal-factors`：检查等密面斜率、热成风速度和 term2 口径对深层反转的影响。
-- `--compare-z-geometry-modes`：对比正式 BOA `z'_rho` 几何与前辈式
+- `--compare-z-geometry-modes`：对比正式 BOA `D'_rho` 几何与前辈式
   `composite density -> isosurface` 几何。
 - `--z-geometry-mode`：只在 zgeometry diagnostics 中有效，不允许影响正式生产结果。
 
 ## 默认运行
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --match-mode all
 ```
@@ -110,7 +112,7 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 20N 推荐 2D 诊断：
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --target-lat 20 `
   --match-mode all `
@@ -125,7 +127,7 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 20N 三维热成风 smoke：
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --target-lat 20 `
   --match-mode all `

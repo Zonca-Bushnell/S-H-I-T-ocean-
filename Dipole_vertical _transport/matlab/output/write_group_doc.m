@@ -13,7 +13,7 @@ function write_group_doc(path, matches, grid, polarity, band_label)
     valid_cells = sum(isfinite(grid.rebuild_w(:)));
     valid_fraction = valid_cells / numel(grid.count);
     fprintf(fid, '- 有样本支撑网格：`%d / %d (%.2f%%)`。\n', valid_cells, numel(grid.count), valid_fraction * 100);
-    fprintf(fid, '- 符号约定：W 向上为正；`z_rho` 和 `z_rho_anom` 为正深度向下。\n');
+    fprintf(fid, '- 符号约定：正式几何统一为 `D_rho` 正深度向下；历史字段名 `z_rho/z_rho_anom` 按 `D_rho/D''_rho` 解释。W 向上为正，即 `W_up = -D_t`。\n');
     fprintf(fid, '- 输出：默认 `matched_core_argo.mat`、`composite_grid.mat`、`composite_grid.nc`、`vertical_transport_terms.png`、`wpk_validation.png`、`gradient_order_comparison.png`、`velocity_sign_sensitivity.png`。图像显示为 `10^-6 m/s`，网格文件保存原始 `m/s`，白色为空样本格点。\n');
     fclose(fid);
 end

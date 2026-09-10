@@ -77,22 +77,24 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
         [dzdx, dzdy] = gradient_xy(fillmissing2(grid.z), dx_m, dy_m);
         support = grid.mapped_support >= cressman_min_obs;
-        grid.term1_plus = mask_to_support(grid.cx_rel .* dzdx, support);
-        grid.term1_minus = mask_to_support(-grid.cx_rel .* dzdx, support);
+        [term1_up, term2_up, rebuild_up, term1_depth, term2_depth, rebuild_depth] = ...
+            w_terms_from_depth_geometry(dzdx, dzdy, grid.u, grid.v, grid.cx_rel, grid.mean_u_bg, support);
+        grid.term1_plus = term1_up;
+        grid.term1_minus = term1_depth;
         grid.term2_abs = mask_to_support(grid.u .* dzdx + grid.v .* dzdy, support);
         grid.term2_rel = mask_to_support((grid.u - grid.mean_u_bg) .* dzdx + grid.v .* dzdy, support);
         grid.rebuild_plus_abs = mask_to_support(grid.term1_plus + grid.term2_abs, support);
-        grid.rebuild_minus_rel = mask_to_support(grid.term1_minus + grid.term2_rel, support);
-        grid.term1_depth_positive = grid.term1_minus;
-        grid.term2_depth_positive = grid.term2_rel;
-        grid.rebuild_w_raw_depth_positive = grid.rebuild_minus_rel;
+        grid.rebuild_minus_rel = rebuild_depth;
+        grid.term1_depth_positive = term1_depth;
+        grid.term2_depth_positive = term2_depth;
+        grid.rebuild_w_raw_depth_positive = rebuild_depth;
         if plot_filled_gradient
-            grid.term1 = grid.cx_rel .* dzdx;
+            grid.term1 = term1_up;
         else
-            grid.term1 = grid.term1_plus;
+            grid.term1 = term1_up;
         end
-        grid.term2 = mask_to_support(-grid.term2_rel, support);
-        grid.rebuild_w = mask_to_support(grid.term1 + grid.term2, support);
+        grid.term2 = term2_up;
+        grid.rebuild_w = rebuild_up;
         grid.corr_rebuild_wpk = spatial_corr(grid.rebuild_w, grid.wpk);
         grid.corr_sample_rebuild_wpk = spatial_corr(grid.sample_rebuild_w, grid.wpk);
     end

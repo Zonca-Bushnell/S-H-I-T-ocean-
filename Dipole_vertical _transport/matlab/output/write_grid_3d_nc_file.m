@@ -20,4 +20,6 @@ function write_grid_3d_nc_file(path, grid3d, polarity, band_label)
     ncwriteatt(path, '/', 'lat_band', band_label);
     ncwriteatt(path, '/', 'w_positive_direction', 'upward');
     ncwriteatt(path, '/', 'depth_positive_direction', 'downward');
+    ncwriteatt(path, '/', 'isopycnal_coordinate', 'D_rho_positive_down');
+    ncwriteatt(path, '/', 'legacy_z_rho_fields_mean_D_rho', 'true');
 end

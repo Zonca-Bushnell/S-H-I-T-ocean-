@@ -30,15 +30,19 @@ function comparison = threeway_z_background_terms(grid3d, polarity, isas_density
     log_step(sprintf('three-way BOA background thermal wind ready in %.1f s', toc(t)));
 
     panels = struct('name', {}, 'title', {}, 'description', {}, 'term1', {}, 'term2', {}, 'w', {}, 'section_w', {}, 'section_term2', {}, 'stats', {});
+    [term1_anom, term2_anom] = w_terms_from_depth_geometry(dzdx_anom, dzdy_anom, grid3d.u_tw, grid3d.v_tw, grid3d.cx_rel, grid3d.mean_u_bg, support_anom);
     panels(1) = make_threeway_panel('A_boa_anomaly', 'A BOA anomaly z''_\rho', ...
         '当前正式口径：term1 和 term2 都使用 BOA 背景扣除后的 z''_\rho 几何。', ...
-        grid3d.cx_rel .* dzdx_anom, -((grid3d.u_tw - grid3d.mean_u_bg) .* dzdx_anom + grid3d.v_tw .* dzdy_anom), support_anom, grid3d, []);
+        term1_anom, term2_anom, support_anom, grid3d, []);
+    [term1_abs, term2_abs] = w_terms_from_depth_geometry(dzdx_abs, dzdy_abs, u_abs, v_abs, grid3d.cx_rel, grid3d.mean_u_bg, support_abs);
     panels(2) = make_threeway_panel('B_absolute_composite_density', 'B composite-density absolute z_\rho', ...
         'term1 和 term2 都使用涡旋合成密度场反插得到的整体等密面集合。', ...
-        grid3d.cx_rel .* dzdx_abs, -((u_abs - grid3d.mean_u_bg) .* dzdx_abs + v_abs .* dzdy_abs), support_abs, grid3d, panels(1));
+        term1_abs, term2_abs, support_abs, grid3d, panels(1));
+    [term1_boa_abs, ~] = w_terms_from_depth_geometry(dzdx_abs, dzdy_abs, u_boa, v_boa, grid3d.cx_rel, grid3d.mean_u_bg, support_abs & support_boa);
+    [~, term2_boa] = w_terms_from_depth_geometry(dzdx_boa, dzdy_boa, u_boa, v_boa, grid3d.cx_rel, grid3d.mean_u_bg, support_abs & support_boa);
     panels(3) = make_threeway_panel('C_boa_background_term2', 'C eddy z_\rho + BOA background term2', ...
         'term1 使用涡旋合成 absolute z_\rho；term2 使用 BOA 背景合成密度场的等密面斜率和热成风速度。', ...
-        grid3d.cx_rel .* dzdx_abs, -((u_boa - grid3d.mean_u_bg) .* dzdx_boa + v_boa .* dzdy_boa), support_abs & support_boa, grid3d, panels(1));
+        term1_boa_abs, term2_boa, support_abs & support_boa, grid3d, panels(1));
 
     isas_info = struct('path', '', 'available', false, 'message', 'ISAS predecessor density field not available for this polarity.');
     rho_isas = load_predecessor_isas_density_stack(isas_density_mat, polarity, grid3d.x, grid3d.y, depth_levels);
@@ -53,9 +57,11 @@ function comparison = threeway_z_background_terms(grid3d, polarity, isas_density
         t = tic;
         [u_isas, v_isas] = thermal_wind_velocity_stack(rho_isas, support_isas, base_u, base_v, base_support, depth_levels, dx_m, dy_m, grid3d.thermal_wind_f_s_1);
         log_step(sprintf('three-way ISAS-derived background thermal wind ready in %.1f s', toc(t)));
+        [term1_isas_abs, ~] = w_terms_from_depth_geometry(dzdx_abs, dzdy_abs, u_isas, v_isas, grid3d.cx_rel, grid3d.mean_u_bg, support_abs & support_isas);
+        [~, term2_isas] = w_terms_from_depth_geometry(dzdx_isas, dzdy_isas, u_isas, v_isas, grid3d.cx_rel, grid3d.mean_u_bg, support_abs & support_isas);
         panels(4) = make_threeway_panel('C_isas_background_term2', 'C eddy z_\rho + ISAS background term2', ...
             'term1 使用涡旋合成 absolute z_\rho；term2 使用前辈 ISAS-derived 背景合成密度场。', ...
-            grid3d.cx_rel .* dzdx_abs, -((u_isas - grid3d.mean_u_bg) .* dzdx_isas + v_isas .* dzdy_isas), support_abs & support_isas, grid3d, panels(1));
+            term1_isas_abs, term2_isas, support_abs & support_isas, grid3d, panels(1));
     else
         panels(4) = make_threeway_panel('C_isas_background_term2_missing', 'C ISAS background unavailable', ...
             isas_info.message, nan(size(grid3d.w)), nan(size(grid3d.w)), false(size(grid3d.w)), grid3d, panels(1));
