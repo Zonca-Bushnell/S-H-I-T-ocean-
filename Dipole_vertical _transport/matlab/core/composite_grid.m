@@ -41,7 +41,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     n = min([numel(xb), numel(yb), numel(z), numel(z_raw), numel(u), numel(v), numel(wpk)]);
     xb = xb(1:n); yb = yb(1:n); z = z(1:n); z_raw = z_raw(1:n); u = u(1:n); v = v(1:n); wpk = wpk(1:n);
     cx_raw = cx_raw(1:n); radius = radius(1:n);
-    [sample_term1, sample_term2, sample_rebuild_w] = sample_gradient_terms(x(1:n), y(1:n), z, u, v, cx_raw, radius, grid.cx_rel, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
+    [sample_term1, sample_term2, sample_rebuild_w] = sample_gradient_terms(x(1:n), y(1:n), z, u, v, radius, grid.cx_rel, grid.mean_u_bg, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
     valid = isfinite(xb) & isfinite(yb);
     subs = [yb(valid), xb(valid)];
     grid.count = accumarray(subs, 1, [grid_n grid_n], @sum, 0);
@@ -80,7 +80,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
         grid.term1_plus = mask_to_support(grid.cx_rel .* dzdx, support);
         grid.term1_minus = mask_to_support(-grid.cx_rel .* dzdx, support);
         grid.term2_abs = mask_to_support(grid.u .* dzdx + grid.v .* dzdy, support);
-        grid.term2_rel = mask_to_support((grid.u - grid.mean_cx_raw) .* dzdx + grid.v .* dzdy, support);
+        grid.term2_rel = mask_to_support((grid.u - grid.mean_u_bg) .* dzdx + grid.v .* dzdy, support);
         grid.rebuild_plus_abs = mask_to_support(grid.term1_plus + grid.term2_abs, support);
         grid.rebuild_minus_rel = mask_to_support(grid.term1_minus + grid.term2_rel, support);
         grid.term1_depth_positive = grid.term1_minus;

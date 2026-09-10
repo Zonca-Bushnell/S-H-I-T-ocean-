@@ -1,8 +1,8 @@
-function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, cx_raw, radius, cx_rel, radius_r, min_obs, max_profiles)
+function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, radius, cx_rel, mean_u_bg, radius_r, min_obs, max_profiles)
     term1 = nan(size(z));
     term2 = nan(size(z));
     rebuild = nan(size(z));
-    good_all = isfinite(x) & isfinite(y) & isfinite(z) & isfinite(u) & isfinite(v) & isfinite(cx_raw) & isfinite(radius) & radius > 0 & hypot(x, y) <= 4;
+    good_all = isfinite(x) & isfinite(y) & isfinite(z) & isfinite(u) & isfinite(v) & isfinite(radius) & radius > 0 & hypot(x, y) <= 4;
     if nnz(good_all) < min_obs || ~isfinite(radius_r) || radius_r <= 0
         return
     end
@@ -25,7 +25,7 @@ function [term1, term2, rebuild] = sample_gradient_terms(x, y, z, u, v, cx_raw, 
         dzdx = coef(2) / radius(ii);
         dzdy = coef(3) / radius(ii);
         term1(ii) = cx_rel * dzdx;
-        term2(ii) = -((u(ii) - cx_raw(ii)) * dzdx + v(ii) * dzdy);
+        term2(ii) = -((u(ii) - mean_u_bg) * dzdx + v(ii) * dzdy);
         rebuild(ii) = term1(ii) + term2(ii);
     end
 end

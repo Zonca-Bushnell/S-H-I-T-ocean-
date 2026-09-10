@@ -313,7 +313,7 @@ E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_vertical_transp
 
 ```text
 term1 = +c_x_rel dz'_rho/dx
-term2 = -[(u_pk-c_x_raw, v_pk) · grad(z'_rho)]
+term2 = -[(u_pk-u_bg, v_pk) · grad(z'_rho)]
 rebuild_W = term1 + term2
 ```
 

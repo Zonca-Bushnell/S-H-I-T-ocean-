@@ -5,7 +5,7 @@ function variant = make_reversal_variant_from_factors(name, description, dzdx_do
         term2 = u_field .* dzdx_up + v_field .* dzdy_up;
     else
         term1 = grid3d.cx_rel .* dzdx_down;
-        term2 = -((u_field - grid3d.mean_cx_raw) .* dzdx_down + v_field .* dzdy_down);
+        term2 = -((u_field - grid3d.mean_u_bg) .* dzdx_down + v_field .* dzdy_down);
     end
     variant = make_reversal_variant(name, description, term1, term2, support3, grid3d);
 end

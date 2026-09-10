@@ -22,7 +22,7 @@ function write_method_doc(path, argo_mat, history_argo_mat, meta_dir, boa_pden_r
     fprintf(fid, '- 默认绘图：二维 W 图使用 `contourf(..., ''LineStyle'', ''none'')`，只显示填色块，不叠加等值线描边。\n');
     fprintf(fid, '- 深度变量约定：`z_rho_m`、`z_rho_bg_m`、`z_rho_anom_m` 均保存为正深度向下，便于海洋剖面阅读。\n');
     fprintf(fid, '- W 符号约定：`rebuild_w_m_s`、`term1_m_s`、`term2_m_s` 统一为向上为正，与历史 `I_Wpk` 中 `z=-Depth` 后计算 `Dz/Dt` 的口径一致；同时保留 `rebuild_w_raw_depth_positive_m_s` 作为深度向下正公式对照。\n');
-    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-c_x_raw, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`。\n');
+    fprintf(fid, '- `c_x_raw` 来自 META track 相邻点中央差分；`u_bg` 为同 crossing 组、同极性、匹配 Core Argo 的 parking drift 纬向均值；`c_x_rel = mean(c_x_raw) - mean(u_bg)`。主图采用 `term1 = +c_x_rel dz''_rho/dx`，`term2 = -[(u_pk-u_bg, v_pk) · grad(z''_rho)]`，`rebuild_W = term1 + term2`，避免传播速度在 term1 和 term2 中重复计入。\n');
     fprintf(fid, '- BOA_Argo 只作为 gridded 密度背景，不直接推导背景速度。\n\n');
     fprintf(fid, '参考：NOAA AOML Argo overview, NOAA Argo best practices, Lin et al. 2019 Remote Sensing, Zhou et al. 2023 JGR Oceans, JAMSTEC Argo gridded products。\n');
     fclose(fid);

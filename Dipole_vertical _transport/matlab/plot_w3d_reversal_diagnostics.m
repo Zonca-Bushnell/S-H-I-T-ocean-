@@ -259,7 +259,7 @@ fprintf(fid, '# %.0fN Crossing W 垂向反转诊断\n\n', abs(target_lat));
 fprintf(fid, '本诊断只读取既有 `w_3d_grid.mat`，不重新计算 Argo-META 匹配、BOA 背景或 W。\n\n');
 fprintf(fid, '## 判读重点\n\n');
 fprintf(fid, '- 如果 `z''_rho anomaly` 或 `partial z''_rho / partial x` 随深度相位不变，term1 通常不会反转。\n');
-fprintf(fid, '- 如果 `u_tw-c_x_raw` 没有跨零或剪切很弱，term2 也不容易制造深层反转。\n');
+fprintf(fid, '- 如果 `u_tw-u_bg` 没有跨零或剪切很弱，term2 也不容易制造深层反转。\n');
 fprintf(fid, '- `vertical phase` 面板中，相关系数长期保持正值表示该变量相对 1000 m 没有发生主要相位翻转。\n\n');
 fprintf(fid, '## 摘要\n\n');
 fprintf(fid, '| polarity | W zero crossings | term1 zero crossings | term2 zero crossings | dzdx zero crossings | median corr W/1000m | median corr z/1000m | q95 W |\n');
