@@ -75,7 +75,7 @@ function grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradi
     dx_m = mean(diff(x_vec)) * grid.mean_radius_m;
     dy_m = mean(diff(y_vec)) * grid.mean_radius_m;
     if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
-        [dzdx, dzdy] = gradient(fillmissing2(grid.z), dx_m, dy_m);
+        [dzdx, dzdy] = gradient_xy(fillmissing2(grid.z), dx_m, dy_m);
         support = grid.mapped_support >= cressman_min_obs;
         grid.term1_plus = mask_to_support(grid.cx_rel .* dzdx, support);
         grid.term1_minus = mask_to_support(-grid.cx_rel .* dzdx, support);

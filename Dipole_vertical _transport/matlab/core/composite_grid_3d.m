@@ -105,7 +105,7 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
         z_grid = grid3d.z_anom(:,:,zz);
         support = support3(:,:,zz) & isfinite(grid3d.u_tw(:,:,zz)) & isfinite(grid3d.v_tw(:,:,zz));
         if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
-            [dzdx, dzdy] = gradient(fillmissing2(z_grid), dx_m, dy_m);
+            [dzdx, dzdy] = gradient_xy(fillmissing2(z_grid), dx_m, dy_m);
             term1 = mask_to_support(grid3d.cx_rel .* dzdx, support);
             term2 = mask_to_support(-((grid3d.u_tw(:,:,zz) - grid3d.mean_cx_raw) .* dzdx + grid3d.v_tw(:,:,zz) .* dzdy), support);
             grid3d.term1(:,:,zz) = term1;

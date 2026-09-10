@@ -50,7 +50,7 @@ for pp = 1:numel(polarities)
     for kk = 1:numel(depth)
         z_layer = G.z_anom(:,:,kk);
         if any(isfinite(z_layer(:)))
-            [dzy, dzx] = gradient(z_layer, dy_m, dx_m);
+            [dzx, ~] = gradient_xy(z_layer, dx_m, dy_m);
             dzdx(:,:,kk) = dzx;
         end
     end
