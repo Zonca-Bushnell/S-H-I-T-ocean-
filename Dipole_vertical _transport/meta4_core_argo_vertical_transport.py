@@ -307,6 +307,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
         .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
         .replace("@DIAGNOSE_THREEWAY_Z_BACKGROUND@", "true" if args.diagnose_threeway_z_background else "false")
+        .replace("@RUN_ARGO_ABSOLUTE_TERM1_ISAS_TERM2@", "true" if args.run_argo_absolute_term1_isas_term2 else "false")
         .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
@@ -434,6 +435,11 @@ def main() -> int:
         "--diagnose-threeway-z-background",
         action="store_true",
         help="Run the Original-worktree three-way test: BOA anomaly, composite-density isosurface, and background-density term2.",
+    )
+    parser.add_argument(
+        "--run-argo-absolute-term1-isas-term2",
+        action="store_true",
+        help="Run the predecessor-style hybrid test: term1 uses Argo composite absolute isopycnal slope, term2 uses ISAS/background isopycnal slope. Intended for selected crossing latitudes, not the default production flow.",
     )
     parser.add_argument(
         "--z-geometry-mode",

@@ -11,6 +11,9 @@ function path_out = resolved_isas_density_path(isas_density_mat, polarity)
             path_out = ae_candidate;
             return
         end
+        if exist(candidate, 'file') == 2
+            path_out = candidate;
+        end
         return
     end
     if exist(candidate, 'file') == 2
