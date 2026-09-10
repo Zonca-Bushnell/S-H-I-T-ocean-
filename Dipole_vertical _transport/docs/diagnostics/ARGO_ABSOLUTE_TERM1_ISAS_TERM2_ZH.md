@@ -38,27 +38,40 @@ ISAS 背景只进入 `term2` 的背景等密面斜率。若找不到极性专属
 ISAS 文件，背景场会回退到用户提供的通用 ISAS density MAT；这是因为背景场本身
 不是涡旋极性量。
 
+## 文献约束
+
+Zhang et al. (2024) 将三维 density、pressure anomaly 和 geostrophic currents
+作为涡旋三维结构的一组共同重建量，说明热成风/地转速度剪切应优先来自涡旋坐标下的
+三维合成密度或压力结构，而不是仅由外部背景场替代。Chaigneau et al. (2011) 的
+Argo-eddy composite 路线同样是先围绕涡旋中心构造三维温盐/密度结构，再解释涡旋的
+垂向结构。由此，本入口将热成风速度来源固定为 Argo composite absolute density；
+ISAS/BOA 这类背景场只用于定义 anomaly、环境态或 term2 的背景等密面斜率诊断。
+
+后续遇到难以决断的口径问题时，必须先查文献并把依据写入
+`docs/literature/` 或本诊断文档，再决定是否改变默认生产流程。
+
 ## 20N/30N/40N 结果摘要
 
 输出位置：
 
 `E:\DATA\01_Eddy_correspond\05_Original_Dipole_vertical _transport\ISAS_term2_crossing_20N30N40N`
 
-本轮六组结果均生成有效 ISAS 背景场。主要诊断量显示，`term2` 的量级明显小于
-`term1`：
+本轮六组结果均生成有效 ISAS 背景场。改为 Argo composite absolute density
+积分热成风后，`term2` 的量级明显增强；整体 `W` 仍受 `term1` 控制，但
+深层 term2 已经不再是可忽略的小项：
 
 | 极性 | 纬线 | match | unique Argo | q95 term1 | q95 term2 | q95 W |
 |---|---:|---:|---:|---:|---:|---:|
-| cyclonic | 20N | 122621 | 57142 | 123.486 | 7.08393 | 123.296 |
-| cyclonic | 30N | 92791 | 43188 | 106.132 | 10.0232 | 106.057 |
-| cyclonic | 40N | 31421 | 15844 | 178.564 | 20.1968 | 178.253 |
-| anticyclonic | 20N | 112942 | 53953 | 133.915 | 5.1011 | 133.642 |
-| anticyclonic | 30N | 100543 | 47886 | 47.1039 | 9.91714 | 49.4346 |
-| anticyclonic | 40N | 52707 | 24857 | 130.31 | 17.2746 | 134.503 |
+| cyclonic | 20N | 122621 | 57142 | 123.486 | 43.0505 | 142.142 |
+| cyclonic | 30N | 92791 | 43188 | 106.132 | 40.7792 | 121.857 |
+| cyclonic | 40N | 31421 | 15844 | 178.564 | 76.6879 | 192.441 |
+| anticyclonic | 20N | 112942 | 53953 | 133.915 | 34.5685 | 143.287 |
+| anticyclonic | 30N | 100543 | 47886 | 47.1039 | 26.8265 | 59.6055 |
+| anticyclonic | 40N | 52707 | 24857 | 130.31 | 50.4461 | 142.037 |
 
-单位均为 `10^-6 m s^-1`。因此，在该混合口径下，ISAS 背景 `term2`
-能够提供深层结构，但整体 `W` 仍主要受 Argo absolute density 几何给出的
-`term1` 控制。
+单位均为 `10^-6 m s^-1`。深层 `term2` 的 q95 约为 `44-136 x 10^-6 m s^-1`，
+说明热成风速度来源是一级敏感项。当前结论是：速度剪切应从 Argo 合成 absolute
+density 积分；ISAS 背景几何对 term2 仍有诊断意义，但不应替代涡旋速度剪切来源。
 
 ## 性能修正
 

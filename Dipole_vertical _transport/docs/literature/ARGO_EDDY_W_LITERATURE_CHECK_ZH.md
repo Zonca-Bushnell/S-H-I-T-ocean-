@@ -3,8 +3,11 @@
 ## 本地有效 PDF
 
 PDF 目录：`D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\PDF\Dipole_vertical _transport`
+Original worktree 补充 PDF 目录：
+`D:\01_Eddy\01_Vertical_asymmetric\Original_Dipole_vertical _transport\Original_Dipole_vertical _transport\pdf`
 
 - `JGR Oceans - 2026 - Zhang - Dipole Structure of Vertical Velocity Induced by Mesoscale Eddies.pdf`
+- `Zhang_etal_2024_OLAR_Three_Dimensional_Structure_Oceanic_Mesoscale_Eddies.pdf`
 - `Hou_etal_2022_Frontiers_Eddy_beta_spiral.pdf`
 - `Wang_etal_2020_JGR_Eddy_Induced_Acceleration_of_Argo_Floats.pdf`
 - `CortesMorales_etal_2026_ESSD_Global_Thermocline_Vertical_Velocities.pdf`
@@ -93,3 +96,22 @@ Zhang et al. (2026) 和 Hou et al. (2022) 支持“涡旋诱导 W 常呈偶极�
 形态检查和动力解释：若我们用正确的共同等密面、正确的涡心归一化、足够样本支撑的
 objective mapping，合成图应当逐渐接近东西向偶极子；若仍然只有零散点，则优先检查
 样本支撑、纬度带样本数、半径归一化和 `rho0/z_rho` 口径，而不是简单归因于年份不足。
+
+## 2026-09-10 热成风速度来源判据
+
+Zhang et al. (2024) 明确把三维 density、pressure anomaly 和 geostrophic currents
+作为涡旋三维结构的一组共同重建量。Chaigneau et al. (2011) 的 Argo composite 工作
+也遵循同一类逻辑：先围绕涡旋中心构造三维温盐/密度结构，再解释涡旋的垂向结构。
+因此，当我们用热成风把 1000 m parking drift 延拓到三维 `u(z), v(z)` 时，速度剪切
+应优先来自 Argo composite absolute density 的水平密度梯度，而不是只用 ISAS/BOA
+背景密度场。背景场的合理角色是定义 anomaly、环境态或 term2 的背景等密面坡度诊断。
+
+对应到当前 Original worktree 的混合口径：
+
+- `term1`：Argo composite absolute density 的整体等密面斜率。
+- 热成风速度：1000 m Argo parking drift 锚定 + Argo composite absolute density
+  水平密度梯度积分。
+- `term2`：ISAS/background density 的背景等密面斜率。
+
+后续若出现科学口径难以判断的问题，必须先查文献、保存可解析 PDF 或记录未能取得 PDF
+的 DOI/原因，再把依据写进本目录文档，不直接凭图像形态改默认算法。
