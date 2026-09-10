@@ -142,3 +142,63 @@ W      = W_dzdt + W_is
 4. `U1000_compound/V1000_compound` 是否来自 Argo parking drift、geostrophic velocity，还是其他速度产品。
 5. 前辈最终 W 的符号约定：变量名没有明确说明向上为正或深度向下为正，需要通过图和物理解释反推。
 
+## 扩展逐项差异清单
+
+下表按实际计算链条列出前辈程序与当前 Dipole 正式管线的差异。这里的“当前正式管线”指 `Dipole_vertical _transport/matlab/` 下的 crossing + BOA anomaly + Cressman + thermal-wind W 口径；整体等密面集合只作为 diagnostics 存在。
+
+| # | 环节 | 前辈程序 | 当前正式管线 | 可能影响 |
+|---|---|---|---|---|
+| 1 | 入口形态 | 三个脚本式 MATLAB 文件，依赖工作区和固定绝对路径。 | Python CLI 调 MATLAB 后端，参数显式，MATLAB 后端模块化。 | 前辈脚本复现性依赖本机中间文件；我们可追踪参数但流程更复杂。 |
+| 2 | 数据版本 | META3.2 DT twosat。 | META4.0 DT allsat。 | 涡旋半径、轨迹、生命周期和传播速度样本不同。 |
+| 3 | 极性命名 | 文件名中 CE/AE 混用较明显；`rebuild_eddy_W.m` 加载 CE 数据但输出名含 AE。 | cyclonic/anticyclonic 分开，目录和 summary 显式。 | 前辈脚本需确认 CE/AE 是否在某些输出名中写反。 |
+| 4 | 半球/纬度范围 | 示例为 North，筛选 `lat_eddy > 0` 或加载 `*_North_*`。 | 默认 crossing latitude，可为 20N、全球 60S-60N 等。 | 前辈是半球平均口径；我们是纬线穿越口径。 |
+| 5 | Argo-META 匹配 | 不在这三个脚本内完成，已封装进 `Argo02/03/04` 中间文件。 | 明确用 `within 1 day`、`r/R<=4`、crossing、本体 `1R` 过纬线、`match-mode all/nearest`。 | 前辈匹配规则不可见，是最大不可审计前置差异之一。 |
+| 6 | Argo 是否重复匹配 | 三个脚本看不到；取决于前置 `Argo02/03/04`。 | 可选 `match-mode all`；满意 20N 口径使用 all。 | 若前辈前置是重复投影，则与我们 all 更接近。 |
+| 7 | Core Argo 筛选 | 三个脚本没有显式 `900-1100 m` 筛选，可能在前置文件中完成。 | 显式 Core Argo：`I_ParkDepth=900-1100 m`。 | 前辈若混入非 1000 m parking float，会改变速度/密度样本。 |
+| 8 | 密度主源 | `Den_compound`：已合成 Argo 密度场；另有 `Den_compound_all`：ISAS 背景密度合成场。 | `ArgoData_SA_CT_PT_PDen_sigma.mat` 的 TEOS-10 profile + BOA monthly climatology 背景。 | 前辈密度源是“合成后场”；我们从逐 profile 和 BOA 背景构造。 |
+| 9 | 背景密度来源 | ISAS gridded Argo 背景场，读 `ISAS20_ARGO_20040615_fld_TEMP.nc` 只为 depth 坐标；实际密度在 `Argo04...ISAS_7Sample.mat`。 | `Self_BOA_Argo_PotentialDensity/PDen1000_YYYYMM.mat` 多年同月气候态。 | ISAS 与 BOA 的客观分析、时空分辨率、季节处理不同。 |
+| 10 | 背景密度算法 | `eddy_DenField_in = mean(Den_compound_all,4,'omitnan')`，即对第 4 维直接平均。 | 对所有 `PDen1000_YYYYMM.mat` 按月份累加，形成 12 个月多年同月 climatology，再按 profile lon/lat/month 双线性插值。 | 前辈更像合成涡旋背景密度场；我们是局地月气候态背景。 |
+| 11 | 异常密度定义 | 三个脚本没有显式 `rho' = rho - rho_bg` 作为 W 主几何；直接使用绝对 `Den_compound` 或 ISAS 背景密度场。 | `rho_anom = rho_profile(z0) - rho_BOA(lon,lat,month,z0)`，并保存 `rho_abs`。 | 我们去掉背景密度结构；前辈保留背景/水团/合成绝对结构。 |
+| 12 | `rho0` 定义 | 对每个网格点/深度，`den0 = Den_compound_smooth(i,j,:)`，即中心柱每层密度本身作为目标密度集合。 | 对每个 profile 和名义深度 `z0`，`rho0 = rho_BOA(lon,lat,month,z0)`。 | 前辈是“合成场自洽等密面”；我们是“局地 BOA 背景目标密度”。 |
+| 13 | `z_rho` 定义 | 在合成密度场相邻柱中寻找同一个 `den0` 的深度，得到整体等密面斜率。 | 在单条 Argo profile 和 BOA profile 中分别找同一个 `rho0` 的深度，取 `z_anom = z_profile - z_bg`。 | 这是深层反转是否出现的核心差异。 |
+| 14 | `z_rho` 是否异常化 | 不异常化，直接 `z2-z1` 得到绝对等密面坡度。 | 先异常化 `z'_rho = z_rho - z_bg`，再 Cressman、平滑、求梯度。 | 我们可能去掉了导致深层反转的背景等密面几何。 |
+| 15 | 单调化方式 | 发现 `diff(den)<0` 后，用相邻层外推/替换；这是局部强制修复。 | 正式 `isopycnal_depth_qc` 不强制改剖面，只找 bracket crossing；diagnostic `monotonic_density_profile` 是逐层最小递增修复。 | 前辈更激进，保留更多点但可能人工改变深层斜率。 |
+| 16 | 反插值函数 | `griddedInterpolant(den, -Depth1, 'linear','none')`，用密度作自变量、负深度作因变量。 | `isopycnal_depth_qc(depth, profile, rho0, z0)`，在相邻深度 bracket 中线性反插正深度。 | 前辈 z 轴为负深度；我们保存正深度向下，W 再显式换成向上为正。 |
+| 17 | 多重 crossing | 前辈单调化后 `interp`，基本不显式记录 crossing 数。 | 记录 crossing_count，并选择距离目标深度最近的 crossing；弱层结/大 bracket 剔除。 | 我们 QC 更严格；前辈更平滑连续但不易审计。 |
+| 18 | bracket 厚度/QC | 没有显式 bracket 厚度阈值。 | `max_rho_bracket_dz_m` 和 `min_drho_dz` 控制。 | 我们会丢弃深层弱层结或粗 bracket 样本；前辈可能保留。 |
+| 19 | 垂向层数 | `Depth1=(0:25:2000)'`，共 81 层。 | 2D 为单/若干层；3D 可 `10:10:2000`，共 200 层。 | 我们垂向分辨率更高，但可能更敏感于噪声。 |
+| 20 | 水平网格 | 固定 `-4:0.1:4`，81x81。 | 推荐 `grid_n=61`，也可 81；x/y = `linspace(-4,4,grid_n)`。 | 前辈水平网格更细；我们 recommended 更平滑。 |
+| 21 | 网格物理距离 | `grid_dis = 8*radius_eddy/80`；radius 用 mean 或 median。 | `dx_m=mean(diff(x_vec))*mean_radius_m`，`dy_m` 同理；mean_radius 来自匹配涡旋。 | 半径均值/中位数、样本来源差异会改变所有梯度量级。 |
+| 22 | 散点映射 | 三个脚本看不到；输入已经是 `Den_compound` 网格。 | Cressman：`w=(Rc^2-r^2)/(Rc^2+r^2)`，支撑数阈值，外圈 `r>4` 掩膜。 | 前辈前置 mapping 未知；我们映射可控可诊断。 |
+| 23 | 合成统计 | 文件名含 `median`，说明前置可能使用 median composite。 | Cressman 是加权平均；部分截面用 median 取 `|y/R|<=0.25`。 | median 与 weighted mean 会改变异常峰值和斑块结构。 |
+| 24 | 平滑对象 | 先平滑密度场，再算斜率；term2 斜率再平滑。窗口 `[8 8]`、`[6 6]`、`[4 4]`、`[2 2]` 不同。 | Cressman 后 `smooth2_supported` 平滑 `z_anom/rho_anom/rho_abs`；速度和 W 主要由映射/支撑掩膜控制。 | 前辈先密度平滑再反插，图更规整；我们保留更多局地异常。 |
+| 25 | 梯度算法：密度水平梯度 | 手写中心差分：列方向为 x，行方向为 y；边界用一阶差分。 | `gradient(rho_grid, dx_m, dy_m)` 或相关栈函数。 | MATLAB `gradient` 的行列间距语义必须谨慎；若参数/输出顺序误用，会造成 x/y 对调。 |
+| 26 | 梯度算法：等密面斜率 | 前辈不是 `gradient(z_rho)`，而是“左右/南北相邻整条密度柱反插同一 rho0 后差分”。 | 正式是先得到 `z_anom(x,y,z)`，再 `gradient(fillmissing2(z_grid), dx_m, dy_m)`。 | 这是算法层面最大差异；二者不等价。 |
+| 27 | 前后差分形式 | 内点：`0.5*(right-left)/grid_dis`；边界：复制内侧或一阶差分。 | MATLAB `gradient` 自动中心差分和边界差分；部分 mapping 先 fillmissing。 | 边界和缺测处理不同，深层/外围差异会放大。 |
+| 28 | 缺测处理 | `ndnanfilter` 处理 NaN；反插时 `none`，超范围为 NaN；边界斜率复制邻格。 | `fillmissing2` 先补洞用于求梯度，然后用 support mask 重新掩膜。 | 我们梯度可能受补洞影响；前辈受平滑和边界复制影响。 |
+| 29 | 热成风密度 | 主要用 `Den_compound_smooth` 的绝对密度梯度；向下部分有一处用未平滑 `Den_compound(:,:,n-1)`。 | 用 Cressman 后的 `rho_anom` 梯度积分热成风。 | 前辈速度剪切含绝对背景斜压结构；我们只含异常斜压结构。 |
+| 30 | 热成风积分锚点 | 1000 m，第 41 层，`U1000_compound/V1000_compound`。 | 1000 m 附近层，`u_base/v_base` 来自匹配历史 `I_Upk/I_Vpk` Cressman。 | 合成速度源、样本支撑和插值方法不同。 |
+| 31 | 热成风积分格式 | 层间距固定 25 m，显式 Euler：向上 `+dudz*25`，向下 `+dudz*(-25)`。 | 梯形积分：`0.5*(shear_k+shear_{k+1})*dD`，上下方向符号按正深度处理。 | 我们数值积分更平滑稳定；前辈可能更强或更相位偏移。 |
+| 32 | Coriolis 参数 | `f=2*7.292e-5*sind(median(E_lat))`。 | `f=2*7.2921159e-5*sind(mean(argo_lat_match))`。 | 中位/均值、样本纬度不同，量级小差异。 |
+| 33 | 参考密度 | `mean(Den_compound(:),'omitnan')`。 | 固定 `rho_ref=1025`。 | 前辈按样本密度自适应；我们固定常数。 |
+| 34 | 1000 m W 校验 | `W1000_compound` 被加载，但在脚本中没有直接参与重建。 | `I_Wpk` 只作为验证字段，不参与 W。 | 二者都不把观测 W 直接放入重建。 |
+| 35 | 传播速度 `c` | `abs(median(moving_speed_zonal))` 或 `median(E_mspeed)`。 | `c_x_rel = mean(c_x_raw)-mean(u_bg)`，`c_x_raw` 来自 META track 相邻点。 | 前辈常取正值/绝对值；我们保留东西向相对传播速度。 |
+| 36 | `term1` 符号 | `W_dzdt = c0 * dzdx`，斜率来自负深度坐标。 | `term1 = +c_x_rel * dz'_rho/dx`，W 向上为正。 | 即使公式同形，z 坐标和 c 符号不同，实际可反号。 |
+| 37 | `term2` 速度参考系 | `W_is = U_thw*dzdx + V_thw*dzdy`，未显式扣 `c`。 | `term2 = -((u_tw-mean_cx_raw)*dzdx + v_tw*dzdy)`。 | 前辈用绝对热成风速度；我们用相对 x 速度并整体取负。 |
+| 38 | `term2` 斜率 | 可来自 ISAS 背景密度场整体等密面斜率。 | 正式来自 BOA anomaly `z'_rho` 梯度。 | 前辈 `term2` 直接包含背景等密面坡度贡献。 |
+| 39 | W 合成 | `W = W_dzdt + W_is`。 | `W = term1 + term2`，但 term2 定义和符号已不同。 | 表面同为两项相加，内部物理口径差异很大。 |
+| 40 | W 符号声明 | 未在脚本/输出中明说。 | 明确 `W` 向上为正，深度变量正向下。 | 与前辈图对比必须先做符号校准。 |
+| 41 | 水平坐标方向 | 行 `i` 是 y，列 `j` 是 x；手写差分清楚区分。 | `meshgrid(x_vec,y_vec)`，理论上行 y、列 x；但部分 `gradient` 包装函数需审查输出顺序。 | x/y 对调曾导致南北偶极风险，是必须单元测试的点。 |
+| 42 | 背景速度扣除 | 未见 `u_bg` 或传播速度背景扣除。 | `mean_u_bg = mean(u)`，`cx_rel=mean_cx_raw-mean_u_bg`。 | 我们试图做相对运动；前辈更接近观测/合成绝对运动框架。 |
+| 43 | 支撑掩膜 | 三个脚本不保存每格样本支撑。 | 保存 `count/mapped_support/valid_profile_count/boa_bg_valid_count`。 | 我们能解释空白/噪声；前辈图不易评估支撑。 |
+| 44 | 输出格式 | 只存 MAT，变量较少，没有方法 Markdown。 | MAT/NC/PNG/Markdown，CSV/JSON 默认可关。 | 我们更适合汇报和复查。 |
+| 45 | 可复现性 | 缺少前置生成 `Argo02/03/04` 的代码时，不能完全复现。 | 原始匹配、QC、缓存、mapping、输出均在仓库内。 | 前辈三脚本只能解释后处理，不足以审计完整流程。 |
+
+## 对当前问题最有解释力的差异排序
+
+1. **`z_rho` 几何定义**：前辈用整体合成密度场反插绝对等密面斜率；我们正式用 BOA 背景异常等密面 `z'_rho`。这是 A 与 B/C/D 图像差异最大的原因。
+2. **密度/背景来源**：前辈 `Den_compound/Den_compound_all(ISAS)` 已经是合成场；我们逐 profile 对 BOA 多年同月局地背景做异常。这会改变深层水团和背景坡度是否保留。
+3. **term2 参考系和符号**：前辈 `U_thw*dzdx + V_thw*dzdy`；我们 `-[(u_tw-cx)*dzdx + v_tw*dzdy]`。这会改变相位和幅度，但诊断显示不如 `z_rho` 几何主导。
+4. **热成风速度来源**：前辈用绝对合成密度梯度；我们用异常密度梯度。这会改变深层剪切，尤其是是否出现深层反转。
+5. **平滑/前置合成方式**：前辈强平滑且可能 median composite；我们 Cressman 加支撑阈值。它控制图像是否规整，但不是物理符号差异的唯一来源。
+6. **梯度实现和 x/y 语义**：前辈手写中心差分；我们用 MATLAB `gradient`。当前代码必须持续用已知偶极方向做回归测试，防止行列方向误用。
