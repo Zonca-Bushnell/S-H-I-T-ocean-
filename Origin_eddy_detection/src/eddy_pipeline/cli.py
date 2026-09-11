@@ -289,6 +289,8 @@ def write_runtime_config(args: argparse.Namespace, paths: Paths) -> None:
             "depth_policy": strict_depth_policy_text(allow_noncontiguous_depth=bool(args.allow_noncontiguous_depth)),
             "require_boundary_monotonic_rotation": bool(args.require_boundary_monotonic_rotation),
             "boundary_monotonic_exception_limit": int(args.boundary_monotonic_exception_limit),
+            "boundary_mode": str(args.boundary_mode),
+            "streamline_direction_exception_fraction": float(args.streamline_direction_exception_fraction),
             "subgrid_center_refinement": not bool(args.disable_subgrid_center_refinement),
             "subgrid_target_degree": float(args.subgrid_target_degree),
             "subgrid_window_radius_cells": int(args.subgrid_window_radius_cells),
@@ -392,8 +394,6 @@ def detection_command(args: argparse.Namespace, paths: Paths, start: str, end: s
     ]
     if args.candidate_cache_dir:
         cmd.extend(["--candidate-cache-dir", str(args.candidate_cache_dir)])
-    if bool(args.disable_subgrid_center_refinement):
-        cmd.append("--disable-subgrid-center-refinement")
     if not bool(args.allow_noncontiguous_depth):
         cmd.append("--stop-at-first-failed-layer")
     if bool(args.require_boundary_monotonic_rotation):
@@ -404,6 +404,40 @@ def detection_command(args: argparse.Namespace, paths: Paths, start: str, end: s
                 str(args.boundary_monotonic_exception_limit),
             ]
         )
+    cmd.extend(
+        [
+            "--boundary-mode",
+            str(args.boundary_mode),
+            "--hua-backend",
+            str(args.hua_backend),
+            "--streamline-direction-exception-fraction",
+            str(args.streamline_direction_exception_fraction),
+            "--streamline-step-cells",
+            str(args.streamline_step_cells),
+            "--streamline-max-steps",
+            str(args.streamline_max_steps),
+            "--streamline-start-angles",
+            str(args.streamline_start_angles),
+            "--streamline-closure-tolerance-cells",
+            str(args.streamline_closure_tolerance_cells),
+            "--streamline-min-winding-turns",
+            str(args.streamline_min_winding_turns),
+            "--streamline-min-points",
+            str(args.streamline_min_points),
+            "--sensitivity-tangent-fractions",
+            str(args.sensitivity_tangent_fractions),
+            "--sensitivity-tangent-tolerances-deg",
+            str(args.sensitivity_tangent_tolerances_deg),
+            "--sensitivity-direction-exception-fractions",
+            str(args.sensitivity_direction_exception_fractions),
+        ]
+    )
+    if bool(args.matlab_use_gpu):
+        cmd.append("--matlab-use-gpu")
+    if bool(args.keep_matlab_bridge_files):
+        cmd.append("--keep-matlab-bridge-files")
+    if args.baseline_summary_path:
+        cmd.extend(["--baseline-summary-path", str(args.baseline_summary_path)])
     cmd.extend(extra)
     return cmd
 
@@ -720,6 +754,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--matlab-exe", type=Path, default=Path(r"D:\Util\Ma\01_Matlab\bin\matlab.exe"))
     parser.add_argument("--matlab-use-gpu", action="store_true")
     parser.add_argument(
+        "--keep-matlab-bridge-files",
+        action="store_true",
+        help="Keep temporary MATLAB day-batch .mat bridge files. By default they are deleted after Python reads them.",
+    )
+    parser.add_argument(
         "--detect-shard-mode",
         choices=["year", "quarter", "month"],
         default="year",
@@ -748,14 +787,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Legacy/diagnostic mode. Disable the production boundary-monotonic velocity-vector constraint.",
     )
     parser.add_argument("--boundary-monotonic-exception-limit", type=int, default=0)
+    parser.add_argument("--boundary-mode", choices=["circle_strict_original", "velocity_streamline_contour"], default="circle_strict_original")
+    parser.add_argument(
+        "--hua-backend",
+        choices=["python", "matlab"],
+        default="python",
+        help="Hua backend. matlab uses day-level MATLAB Engine kernels while Python keeps IO, seed selection, tracking, catalog, and shape.",
+    )
+    parser.add_argument("--streamline-direction-exception-fraction", type=float, default=0.10)
+    parser.add_argument("--streamline-step-cells", type=float, default=0.5)
+    parser.add_argument("--streamline-max-steps", type=int, default=180)
+    parser.add_argument("--streamline-start-angles", type=int, default=4)
+    parser.add_argument("--streamline-closure-tolerance-cells", type=float, default=1.75)
+    parser.add_argument("--streamline-min-winding-turns", type=float, default=0.75)
+    parser.add_argument("--streamline-min-points", type=int, default=16)
+    parser.add_argument("--sensitivity-tangent-fractions", default="0.50,0.60,0.70")
+    parser.add_argument("--sensitivity-tangent-tolerances-deg", default="24,30,36,45")
+    parser.add_argument("--sensitivity-direction-exception-fractions", default="0.05,0.10,0.15")
+    parser.add_argument("--baseline-summary-path", type=Path, default=None)
     parser.add_argument(
         "--disable-subgrid-center-refinement",
         action="store_true",
-        help="Legacy/diagnostic mode. Keep original grid-cell centers instead of local 1/24 degree refined velocity centers.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--subgrid-target-degree", type=float, default=float(HUA_B3_START2_DETECTION_PARAMS["subgrid_target_degree"]))
     parser.add_argument("--subgrid-window-radius-cells", type=int, default=int(HUA_B3_START2_DETECTION_PARAMS["subgrid_window_radius_cells"]))
     parser.add_argument("--subgrid-min-finite-fraction", type=float, default=float(HUA_B3_START2_DETECTION_PARAMS["subgrid_min_finite_fraction"]))
+    parser.add_argument(
+        "--center-refinement-stage",
+        choices=["pre_hua"],
+        default="pre_hua",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--stages",
         default="detect,tracking,catalog_shape",
@@ -783,6 +846,11 @@ def main() -> None:
     args = build_parser().parse_args(argv)
     if bool(args.allow_nonmonotonic_boundary):
         args.require_boundary_monotonic_rotation = False
+    if bool(args.disable_subgrid_center_refinement):
+        raise SystemExit(
+            "--disable-subgrid-center-refinement has been retired. "
+            "Search-stage pre-Hua subgrid center refinement is now mandatory."
+        )
     args.stages = tuple(item.strip() for item in str(args.stages).split(",") if item.strip())
     if not args.shape_output_name:
         args.shape_output_name = default_shape_output_name(args.start, args.end, int(args.lifetime_min_days))
