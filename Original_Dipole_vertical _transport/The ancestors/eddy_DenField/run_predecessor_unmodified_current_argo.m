@@ -11,7 +11,8 @@ parse(p, varargin{:});
 opt = p.Results;
 
 repo_dir = fileparts(mfilename('fullpath'));
-addpath(fullfile(repo_dir, 'matlab_compat'));
+project_dir = locate_project_dir(repo_dir);
+addpath(fullfile(project_dir, 'matlab_compat'));
 compat_roots = {fullfile('D:\Users\Root'), fullfile('E:\Users\Root')};
 for k_root = 1:numel(compat_roots)
     prepare_fixed_paths(compat_roots{k_root});
@@ -46,12 +47,27 @@ for ip = 1:numel(polarities)
     old_dir = pwd;
     cleanup = onCleanup(@() cd(old_dir));
     cd(out_dir);
-    addpath(fullfile(repo_dir, 'matlab_compat'));
+    addpath(fullfile(project_dir, 'matlab_compat'));
     run(fullfile(out_dir, 'rebuild_eddy_W.m'));
     clear cleanup
     plot_outputs(out_dir, polarity);
 end
 write_root_doc(opt.OutputRoot);
+end
+
+function project_dir = locate_project_dir(start_dir)
+project_dir = start_dir;
+for k = 1:6
+    if isfolder(fullfile(project_dir, 'matlab_compat'))
+        return
+    end
+    parent_dir = fileparts(project_dir);
+    if strcmp(parent_dir, project_dir)
+        break
+    end
+    project_dir = parent_dir;
+end
+error('Cannot locate project root containing matlab_compat from %s', start_dir);
 end
 
 function prepare_fixed_paths(root_dir)
@@ -240,6 +256,43 @@ sgtitle(sprintf('%s original-script W slices (10^{-6} m s^{-1})', polarity), 'In
 exportgraphics(fig2, fullfile(out_dir, 'original_unmodified_w_slices.png'), 'Resolution', 240);
 close(fig2);
 
+fields = {'W_dzdt', 'W_is', 'W'};
+labels = {'term1 W_{dzdt}', 'term2 W_{is}', 'rebuild W'};
+fig3 = figure('Visible', 'off', 'Color', 'w', 'Position', [100, 100, 1800, 1050]);
+tiledlayout(numel(fields), numel(slice_depths), 'TileSpacing', 'compact', 'Padding', 'compact');
+for i_field = 1:numel(fields)
+    F3 = S.(fields{i_field});
+    lim3 = robust_lim(F3);
+    for k = 1:numel(slice_depths)
+        [~, iz] = min(abs(depth - slice_depths(k)));
+        nexttile;
+        contourf(x, y, F3(:,:,iz) .* 1e6, 35, 'LineStyle', 'none');
+        axis equal tight;
+        caxis([-lim3, lim3] .* 1e6);
+        colormap(gca, redblue_colormap(256));
+        hold on;
+        th = linspace(0, 2*pi, 300);
+        plot(cos(th), sin(th), 'k-', 'LineWidth', 0.9);
+        plot(4*cos(th), 4*sin(th), 'k-', 'LineWidth', 0.9);
+        plot(0, 0, 'k.', 'MarkerSize', 12);
+        if i_field == 1
+            title(sprintf('%.0f m', depth(iz)));
+        end
+        if k == 1
+            ylabel({labels{i_field}; 'y/R'}, 'Interpreter', 'tex');
+        end
+        if i_field == numel(fields)
+            xlabel('x/R');
+        end
+    end
+end
+cb = colorbar;
+cb.Layout.Tile = 'east';
+cb.Label.String = '10^{-6} m s^{-1}';
+sgtitle(sprintf('%s original-script term slices', polarity), 'Interpreter', 'none');
+exportgraphics(fig3, fullfile(out_dir, 'original_unmodified_term_slices.png'), 'Resolution', 240);
+close(fig3);
+
 write_doc(out_dir, polarity, S);
 end
 
@@ -311,6 +364,7 @@ fprintf(fid, '## 输出\n\n');
 fprintf(fid, '- `test_AE_North_rebuild_W.mat`：原脚本直接输出。\n');
 fprintf(fid, '- `original_unmodified_4panel.png`：`W_dzdt`、`W_is`、`W` 东西向截面与 1000 m 水平 slice。\n');
 fprintf(fid, '- `original_unmodified_w_slices.png`：多深度水平 slice。\n\n');
+fprintf(fid, '- `original_unmodified_term_slices.png`：`W_dzdt`、`W_is`、`W` 三项的多深度水平 slice。\n\n');
 fprintf(fid, '## 量级\n\n');
 fprintf(fid, '- `q95(|W_dzdt|)=%.4g m/s`\n', robust_lim(S.W_dzdt));
 fprintf(fid, '- `q95(|W_is|)=%.4g m/s`\n', robust_lim(S.W_is));
