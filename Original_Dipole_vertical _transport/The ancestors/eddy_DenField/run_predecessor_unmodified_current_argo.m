@@ -5,7 +5,8 @@ function run_predecessor_unmodified_current_argo(varargin)
 p = inputParser;
 addParameter(p, 'SourceRoot', 'E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_W_3D_20N_repeat_all_recommended_thermalwind', @ischar);
 addParameter(p, 'ReferenceRoot', 'E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\META4_CoreArgo_W_3D_20N_reference_like_reversal_worktree', @ischar);
-addParameter(p, 'OutputRoot', 'E:\DATA\01_Eddy_correspond\05_Original_Dipole_vertical _transport\predecessor_unmodified_current_argo_20N', @ischar);
+addParameter(p, 'IsasHybridRoot', 'E:\DATA\01_Eddy_correspond\05_Original_Dipole_vertical _transport\ISAS_term2_crossing_20N30N40N', @ischar);
+addParameter(p, 'OutputRoot', 'E:\DATA\01_Eddy_correspond\05_Original_Dipole_vertical _transport\predecessor_unmodified_ISAS_hybrid_20N', @ischar);
 addParameter(p, 'Polarities', {'cyclonic','anticyclonic'});
 parse(p, varargin{:});
 opt = p.Results;
@@ -28,10 +29,11 @@ for ip = 1:numel(polarities)
     fprintf('Preparing predecessor-compatible inputs for %s...\n', polarity);
     src_file = fullfile(opt.SourceRoot, polarity, 'cross_20N_1R', 'w_3d_grid.mat');
     ref_file = fullfile(opt.ReferenceRoot, polarity, 'cross_20N_1R', 'reference_like_reversal_terms.mat');
-    if ~isfile(src_file)
+    hybrid_file = fullfile(opt.IsasHybridRoot, polarity, 'cross_20N_1R', 'argo_absolute_term1_isas_term2_terms.mat');
+    if ~isfile(hybrid_file) && ~isfile(src_file)
         error('Missing source grid: %s', src_file);
     end
-    if ~isfile(ref_file)
+    if ~isfile(hybrid_file) && ~isfile(ref_file)
         error('Missing reference-like density grid: %s', ref_file);
     end
     out_dir = fullfile(opt.OutputRoot, polarity, 'cross_20N_1R');
@@ -39,7 +41,7 @@ for ip = 1:numel(polarities)
         mkdir(out_dir);
     end
     for k_root = 1:numel(compat_roots)
-        prepare_compat_inputs(src_file, ref_file, compat_roots{k_root});
+        prepare_compat_inputs(src_file, ref_file, hybrid_file, compat_roots{k_root});
     end
     copyfile(fullfile(repo_dir, 'rebuild_eddy_W.m'), fullfile(out_dir, 'rebuild_eddy_W.m'));
     copyfile(fullfile(repo_dir, 'test01_dzdt_induced_W.m'), fullfile(out_dir, 'test01_dzdt_induced_W.m'));
@@ -85,17 +87,28 @@ for k = 1:numel(dirs)
 end
 end
 
-function prepare_compat_inputs(src_file, ref_file, root_dir)
-S = load(src_file, 'grid3d');
-G = S.grid3d;
-R = load(ref_file, 'result');
-rho_abs_source = double(R.result.rho_abs_smoothed);
+function prepare_compat_inputs(src_file, ref_file, hybrid_file, root_dir)
 Depth1 = (0:25:2000)';
 depth_isas = linspace(0, 2000, 152)';
-[Den_compound, U1000_compound, V1000_compound, W1000_compound, Den_compound_all] = resample_current_grid(G, rho_abs_source, Depth1, depth_isas);
+if isfile(hybrid_file)
+    H0 = load(hybrid_file, 'hybrid');
+    H = H0.hybrid;
+    G = hybrid_to_grid3d(H);
+    rho_abs_source = double(H.rho_abs_argo);
+    rho_isas_source = double(H.rho_isas);
+    [Den_compound, U1000_compound, V1000_compound, W1000_compound, Den_compound_all] = ...
+        resample_current_grid(G, rho_abs_source, rho_isas_source, Depth1, depth_isas);
+else
+    S = load(src_file, 'grid3d');
+    G = S.grid3d;
+    R = load(ref_file, 'result');
+    rho_abs_source = double(R.result.rho_abs_smoothed);
+    [Den_compound, U1000_compound, V1000_compound, W1000_compound, Den_compound_all] = ...
+        resample_current_grid(G, rho_abs_source, rho_abs_source, Depth1, depth_isas);
+end
 
 E_radius = repmat(double(G.mean_radius_m), 200, 1);
-E_mspeed = repmat(double(G.mean_cx_raw), 200, 1);
+E_mspeed = repmat(double(get_with_default(G, 'mean_cx_raw', get_with_default(G, 'cx_rel', 0))), 200, 1);
 E_lat = repmat(20, 200, 1);
 moving_speed_zonal = E_mspeed;
 
@@ -116,7 +129,28 @@ write_meta_nc(fullfile(root_dir, 'Data', 'AVISO_Eddy', 'META3.2_DT_twosat', 'MET
 write_isas_nc(fullfile(root_dir, 'Data', 'Argo_Data', 'ISAS_Argo', 'field', '2004', 'ISAS20_ARGO_20040615_fld_TEMP.nc'), depth_isas);
 end
 
-function [Den81, U1000, V1000, W1000, DenAll] = resample_current_grid(G, rho_abs_source, depth1, depth_isas)
+function G = hybrid_to_grid3d(H)
+G = struct();
+G.x = H.x;
+G.y = H.y;
+G.depth_levels = H.depth_levels;
+G.u_tw = H.u_tw;
+G.v_tw = H.v_tw;
+G.w = H.w;
+G.mean_radius_m = H.mean_radius_m;
+G.cx_rel = H.cx_rel;
+G.mean_cx_raw = H.cx_rel + H.mean_u_bg;
+end
+
+function value = get_with_default(S, field_name, default_value)
+if isfield(S, field_name)
+    value = S.(field_name);
+else
+    value = default_value;
+end
+end
+
+function [Den81, U1000, V1000, W1000, DenAll] = resample_current_grid(G, rho_abs_source, rho_isas_source, depth1, depth_isas)
 x_old = double(G.x(1,:));
 y_old = double(G.y(:,1));
 z_old = double(G.depth_levels(:));
@@ -129,6 +163,8 @@ Den81 = F(Yq, Xq, Zq);
 Den81 = enforce_monotonic_depth(Den81);
 
 [Y2, X2, Z2] = ndgrid(y_new, x_new, depth_isas);
+rho_abs = fillnan_nearest(rho_isas_source);
+F = griddedInterpolant({y_old, x_old, z_old}, rho_abs, 'linear', 'nearest');
 DenAll = F(Y2, X2, Z2);
 DenAll = enforce_monotonic_depth(DenAll);
 DenAll = reshape(DenAll, 81, 81, numel(depth_isas), 1);
@@ -359,7 +395,8 @@ function write_doc(out_dir, polarity, S)
 fid = fopen(fullfile(out_dir, 'ORIGINAL_UNMODIFIED_RUN_ZH.md'), 'w');
 cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '# 前辈原始程序兼容运行：%s\n\n', polarity);
-fprintf(fid, '本目录结果来自未修改的 `rebuild_eddy_W.m`。外部步骤只负责把我们当前 20N Argo 三维产品转换为前辈脚本硬编码路径需要的同名中间 MAT/NC 文件，并提供兼容 `ndnanfilter.m`。\n\n');
+fprintf(fid, '本目录结果来自未修改的 `rebuild_eddy_W.m`。外部步骤只负责把 20N 的 Argo absolute density 与 ISAS background density hybrid 结果转换为前辈脚本硬编码路径需要的同名中间 MAT/NC 文件，并提供兼容 `ndnanfilter.m`。\n\n');
+fprintf(fid, '其中 `Den_compound` 对应 term1 使用的 Argo composite absolute density，`Den_compound_all` 对应 term2 使用的 ISAS background density。\n\n');
 fprintf(fid, '## 输出\n\n');
 fprintf(fid, '- `test_AE_North_rebuild_W.mat`：原脚本直接输出。\n');
 fprintf(fid, '- `original_unmodified_4panel.png`：`W_dzdt`、`W_is`、`W` 东西向截面与 1000 m 水平 slice。\n');
@@ -375,6 +412,6 @@ function write_root_doc(output_root)
 fid = fopen(fullfile(output_root, 'README_ORIGINAL_UNMODIFIED_CURRENT_ARGO_ZH.md'), 'w');
 cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '# 前辈原始程序套用当前 Argo 数据\n\n');
-fprintf(fid, '本目录用于回答：如果不修改前辈三个程序，而把我们当前 Argo 20N 三维产品转换成它们所需的同名中间输入，输出图像长什么样。\n\n');
-fprintf(fid, '注意：这不是从原始 Argo/META 重新跑前辈完整前置流程，因为前辈三个程序本身不包含 Argo-META 匹配和 composite 生成代码。\n');
+fprintf(fid, '本目录用于回答：如果不修改前辈三个程序，而把 20N Argo absolute density 与 ISAS background density hybrid 结果转换成它们所需的同名中间输入，输出图像长什么样。\n\n');
+fprintf(fid, '注意：这不是从原始 Argo/META/ISAS raw 文件重新跑前辈完整前置流程，因为 `rebuild_eddy_W.m` 依赖已生成的 Argo02/Argo03/Argo04 中间 MAT。本入口只做兼容中间输入构造，再调用前辈原公式。\n');
 end
