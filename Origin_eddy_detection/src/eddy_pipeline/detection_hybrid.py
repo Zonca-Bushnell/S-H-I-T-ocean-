@@ -1887,6 +1887,23 @@ def _detect_day(
                         "polarity": polarity,
                     }
                 )
+                if args.write_object_voxels:
+                    voxel_rows.extend(
+                        _object_voxels_for_layer(
+                            u_day[depth_index],
+                            v_day[depth_index],
+                            lon,
+                            lat,
+                            float(depth[depth_index]),
+                            day=day,
+                            object_id=str(state["object_id"]),
+                            depth_index=int(depth_index),
+                            center_i=int(center_i),
+                            center_j=int(center_j),
+                            radius_cells=float(check["accepted_radius_cells"]),
+                            polarity=polarity,
+                        )
+                    )
         centers = pd.DataFrame(centers_rows)
         circle = pd.DataFrame(circle_rows)
         structures = pd.DataFrame(structure_rows)

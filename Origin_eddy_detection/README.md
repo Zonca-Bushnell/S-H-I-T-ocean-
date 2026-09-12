@@ -591,6 +591,37 @@ docs/source_manifest.json
 
 ## Dependencies
 
+### MATLAB day-batch voxel output fix
+
+With `--write-object-voxels`, the MATLAB day-batch path now generates tracking
+voxels for each Hua-passed layer using the same finite connected-component
+helper, integer grid anchor, and accepted radius as the Python path. Previously
+this branch returned before generating voxels, producing empty daily Parquet
+files and preventing all cross-day overlap links.
+
+Existing empty voxel parts are not repaired by this code change. They must be
+regenerated before rerunning tracking, catalog, and shape; resume checks file
+existence and therefore does not repair those files automatically.
+
+To backfill existing empty daily files, run from the worktree root in the
+`eddy_detection` environment:
+
+```powershell
+python -m Origin_eddy_detection.tools.backfill_matlab_day_voxels --detection-dir '<result-root>\hua_b3_start2_detection' --refresh-frame-summary
+```
+
+The tool reads saved passed centers and the original filtered daily velocity
+fields, preserves the existing voxel geometry, writes each part atomically,
+skips nonempty parts, and records daily counts in `voxel_backfill_*.json`.
+It does not rerun Hua. After completion, run the main pipeline with
+`--stages tracking,catalog_shape` and the original date and shape thresholds.
+
+Regression check (in the `eddy_detection` environment, from the worktree root):
+
+```powershell
+python -m unittest discover -s Origin_eddy_detection/tests -p test_matlab_day_voxels.py
+```
+
 The original chain expects a scientific Python environment with at least:
 
 ```text
