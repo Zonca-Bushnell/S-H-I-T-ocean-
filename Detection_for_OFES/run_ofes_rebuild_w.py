@@ -143,8 +143,9 @@ def run_w_diagnostics(data_root: Path, result_root: Path, output_root: Path, gri
 
 def _run_object_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
     target_day = parse_iso_date(args.date)
-    centers = pd.read_csv(result_root / "detection_hua_global_jan1991" / "centers_hua_style.csv")
-    structures = pd.read_csv(result_root / "detection_hua_global_jan1991" / "structures_hua_style.csv")
+    detection_dir = resolve_detection_table_dir(result_root)
+    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
+    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
     selected = select_objects(centers, structures, target_day, args.hua_object_id, int(args.max_objects))
 
     metas = {name: parse_ctl(ctl_path(data_root, name)) for name in ["u", "v", "w", "prho"]}
@@ -174,8 +175,9 @@ def _run_object_diagnostics(data_root: Path, result_root: Path, output_root: Pat
 
 
 def _run_crossing_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
-    centers = pd.read_csv(result_root / "detection_hua_global_jan1991" / "centers_hua_style.csv")
-    structures = pd.read_csv(result_root / "detection_hua_global_jan1991" / "structures_hua_style.csv")
+    detection_dir = resolve_detection_table_dir(result_root)
+    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
+    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
     target_lats = parse_float_list(str(args.crossing_lats))
     selections = select_crossing_objects(structures, target_lats, float(args.intersect_radius_r), bool(args.strict_crossing_only))
     section_dir = figures_dir / "crossing_sections"
@@ -224,8 +226,9 @@ def _run_crossing_diagnostics(data_root: Path, result_root: Path, output_root: P
 
 
 def _run_band_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
-    centers = pd.read_csv(result_root / "detection_hua_global_jan1991" / "centers_hua_style.csv")
-    structures = pd.read_csv(result_root / "detection_hua_global_jan1991" / "structures_hua_style.csv")
+    detection_dir = resolve_detection_table_dir(result_root)
+    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
+    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
     lat_min = float(args.band_lat_min)
     lat_max = float(args.band_lat_max)
     objects = select_band_objects(structures, lat_min, lat_max, int(args.band_max_objects))
@@ -288,6 +291,22 @@ def _run_band_diagnostics(data_root: Path, result_root: Path, output_root: Path,
     suffix = rho_stabilization_suffix(args)
     write_csv(output_root / f"band_match_all_summary_{token}{suffix}.csv", rows)
     write_json(output_root / f"band_match_all_summary_{token}{suffix}.json", rows)
+
+
+def resolve_detection_table_dir(result_root: Path) -> Path:
+    candidates = [
+        result_root,
+        result_root / "hua_b3_start2_detection",
+        result_root / "detection_hua_global_jan1991",
+    ]
+    for candidate in candidates:
+        if (candidate / "centers_hua_style.csv").exists() and (candidate / "structures_hua_style.csv").exists():
+            return candidate
+    checked = "; ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Could not find centers_hua_style.csv and structures_hua_style.csv. "
+        f"Checked: {checked}"
+    )
 
 
 def select_crossing_objects(structures: pd.DataFrame, target_lats: list[float], intersect_radius_r: float, strict_only: bool) -> list[dict[str, object]]:
