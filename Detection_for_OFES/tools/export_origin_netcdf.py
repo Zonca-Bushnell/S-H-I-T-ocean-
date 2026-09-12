@@ -33,6 +33,7 @@ def main() -> None:
         mean_end=parse_date(args.mean_end),
         max_depth_layers=int(args.max_depth_layers),
         depth_chunk=int(args.depth_chunk),
+        writer_backend=str(args.writer_backend),
         overwrite=bool(args.overwrite),
     )
 
@@ -49,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mean-end", default="1991-01-19")
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--depth-chunk", type=int, default=4)
+    parser.add_argument(
+        "--writer-backend",
+        choices=["scipy_netcdf3_64bit", "netcdf4", "auto"],
+        default="scipy_netcdf3_64bit",
+        help="NetCDF writer. The default avoids netCDF4 DLL policy issues on this host.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -63,6 +70,7 @@ def export_origin_netcdf(
     mean_end: date,
     max_depth_layers: int,
     depth_chunk: int,
+    writer_backend: str,
     overwrite: bool,
 ) -> Path:
     if start.year != end.year:
@@ -70,7 +78,7 @@ def export_origin_netcdf(
     if mean_start.year != start.year or mean_end.year != start.year:
         raise ValueError("The first exporter version expects the mean window to stay inside the exported year.")
 
-    writer_backend = resolve_writer_backend()
+    writer_backend = resolve_writer_backend(writer_backend)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = output_dir / "mean_cache"
@@ -170,7 +178,16 @@ def export_origin_netcdf(
     return out_path
 
 
-def resolve_writer_backend() -> str:
+def resolve_writer_backend(requested: str) -> str:
+    requested = str(requested)
+    if requested == "scipy_netcdf3_64bit":
+        from scipy.io import netcdf_file  # noqa: F401
+
+        return requested
+    if requested == "netcdf4":
+        import netCDF4  # noqa: F401
+
+        return requested
     try:
         import netCDF4  # noqa: F401
 

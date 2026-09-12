@@ -19,15 +19,10 @@ $env:PYTHONNOUSERSITE='1'
 & 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.validate_ofes2_sample --help
 ```
 
-The NetCDF exporter prefers `netCDF4`. On this Windows host, `netCDF4` can be
-blocked by application-control policy; the exporter then falls back to SciPy's
-NetCDF3 64-bit writer, which `Origin_eddy_detection` can read. If you want the
-compressed NetCDF4 path and the environment does not have a working `netCDF4`,
-install or repair it with mamba:
-
-```powershell
-& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' install -n OFES_detection -c conda-forge netcdf4
-```
+The NetCDF exporter defaults to SciPy's NetCDF3 64-bit writer. This avoids the
+local Windows application-control policy that blocks `netCDF4`'s `_netCDF4`
+DLL. `Origin_eddy_detection` can read the exported file through its own
+`netCDF4` environment.
 
 ## Data Layout
 
@@ -93,6 +88,7 @@ $env:PYTHONNOUSERSITE='1'
   --mean-end 1991-01-19 `
   --max-depth-layers 105 `
   --depth-chunk 4 `
+  --writer-backend scipy_netcdf3_64bit `
   --overwrite
 ```
 
