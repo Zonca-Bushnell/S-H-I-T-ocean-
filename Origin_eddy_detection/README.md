@@ -231,6 +231,47 @@ boundary_mode = velocity_streamline_contour
 SSH seed -> local velocity-minimum center -> closed velocity-streamline contour check
 ```
 
+For OFES and other energetic western-boundary-current cases, use the consensus
+catalog mode when a streamline-only catalog would confuse jet meanders with
+isolated eddy interiors:
+
+```text
+boundary_mode = velocity_streamline_ssh_consensus
+SSH seed -> local velocity-minimum center -> closed velocity-streamline diagnostic
+         -> SSH/effective-contour consensus
+         -> fast-current-core overlap diagnostic
+         -> fallback fixed-circle + SSH consensus for no_closed_streamline seeds
+```
+
+In this mode, `velocity_streamline_contour` is treated as a strong dynamical-core
+diagnostic rather than the only eddy definition. Surface rows add
+`ssh_contour_closed`, `ssh_contour_radius_cells`, `ssh_contour_area_cells`,
+`ssh_consensus_pass`, `jet_core_overlap_fraction`, `jet_meander_flag`,
+`boundary_source`, and `catalog_acceptance_reason`. A row accepted by a closed
+streamline plus SSH consensus is marked `boundary_source=pure_streamline_ssh`.
+A weak-velocity but SSH-coherent fallback object is marked
+`boundary_source=fallback_circle_ssh`. Jet-axis/meander-like candidates are
+kept in diagnostics but rejected with `jet_core_overlap`.
+
+For OFES/META-like surface catalogs, the preferred diagnostic mode is:
+
+```text
+boundary_mode = ssh_effective_contour_primary
+SSH seed -> SSH anomaly closed effective-contour interior
+         -> contour centroid, area, and equivalent radius define the surface object
+         -> velocity streamline is sampled only as a dynamical-core diagnostic
+         -> deeper layers continue with the existing Hua velocity checks
+```
+
+In this mode, a missing closed velocity streamline does not reject a surface SSH
+eddy. It is written as `dynamical_core_class=no_streamline_core` or
+`weak_dynamical_core`; a closed dynamical core is written as
+`closed_streamline_core`. Jet-axis overlap is recorded as `jet_meander_flag`
+rather than silently deleting the SSH object. Surface rows add
+`surface_definition=ssh_effective_contour_primary`,
+`ssh_contour_center_i/j`, `ssh_contour_center_lon/lat`,
+`ssh_contour_level`, and sampled `ssh_contour_boundary_i/j` for overview maps.
+
 The seed and vertical-extension chain is unchanged: surface seeds still come
 from filtered `zos_glor`, surface centers still come from local
 `sqrt(u^2+v^2)` minima near each SSH seed, and deeper centers are still searched
@@ -295,6 +336,62 @@ $env:PYTHONNOUSERSITE='1'
   --streamline-direction-exception-fraction 0.10 `
   --stop-at-first-failed-layer --preload-day-uv --resume --skip-axis-examples
 ```
+
+OFES one-day consensus smoke:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+Set-Location 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Origin_eddy_detection'
+& 'D:\Util\lever\02_miniforge\condabin\mamba.bat' run -n OFES_detection python `
+  -m src.eddy_pipeline.detection_hybrid `
+  --filter-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter\daily_parts' `
+  --raw-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter\daily_parts' `
+  --filter-template 'global_phy_{yyyymmdd}.nc' `
+  --raw-template 'global_phy_{yyyymmdd}.nc' `
+  --output-dir 'E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_ssh_consensus_smoke_19910101' `
+  --start 1991-01-01 --end 1991-01-01 --max-depth-m 1 `
+  --candidate-selection tile_topn --tile-lon-deg 10 --tile-lat-deg 10 --tile-top-n 10 `
+  --surface-search-cells 8 --deep-search-cells 6 --start-radius-cells 3 --max-radius-cells 8 `
+  --speed-ratio-max 3 --angle-jump-max-deg 150 `
+  --tangent-tolerance-deg 24 --min-tangent-fraction 0.70 `
+  --symmetry-tolerance-deg 120 --min-reversal-fraction 0.70 --min-finite-fraction 0.95 `
+  --boundary-mode velocity_streamline_ssh_consensus `
+  --ssh-consensus-min-finite-fraction 0.70 `
+  --jet-core-speed-percentile 80 --jet-core-overlap-max 0.50 `
+  --hua-backend python --preload-day-uv --write-day-figures --resume --skip-axis-examples
+```
+
+The smoke writes `figures\kuroshio_seed_fate_ssh_consensus_19910101.png`,
+which overlays pure streamline, fallback, jet-overlap rejected, and other
+rejected seeds on the Kuroshio velocity-speed background. Keep this output in a
+separate directory from `origin_streamline_cpu_jan01_jan19_life1`; it is a
+catalog-definition smoke, not a replacement for the previous full run.
+
+OFES SSH-primary one-day smoke:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+Set-Location 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Origin_eddy_detection'
+& 'D:\Util\lever\02_miniforge\condabin\mamba.bat' run -n OFES_detection python `
+  -m src.eddy_pipeline.detection_hybrid `
+  --filter-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter' `
+  --raw-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter' `
+  --filter-template 'global_phy_{yyyymmdd}.nc' `
+  --raw-template 'global_phy_{yyyymmdd}.nc' `
+  --output-dir 'E:\DATA\01_Eddy_correspond\02_OFES\origin_ssh_effective_contour_primary_smoke_19910101' `
+  --start 1991-01-01 --end 1991-01-01 --max-depth-m 3 `
+  --candidate-selection tile_topn --tile-lon-deg 10 --tile-lat-deg 10 --tile-top-n 10 `
+  --surface-search-cells 8 --deep-search-cells 6 --start-radius-cells 3 --max-radius-cells 8 `
+  --boundary-mode ssh_effective_contour_primary `
+  --ssh-primary-level-count 16 --ssh-primary-window-factor 4 --ssh-primary-max-radius-factor 2 `
+  --ssh-consensus-min-finite-fraction 0.70 `
+  --jet-core-speed-percentile 80 --jet-core-overlap-max 0.50 `
+  --hua-backend python --preload-day-uv --write-day-figures --resume --skip-axis-examples
+```
+
+The SSH-primary smoke is expected to return more surface objects than the
+strict `velocity_streamline_ssh_consensus` gate, because velocity-streamline
+closure is diagnostic rather than required.
 
 Both modes write `pass_rate_breakdown.csv/json` with surface/all-layer pass
 rates and rejection fractions. The streamline mode also writes
@@ -578,6 +675,30 @@ docs/source_manifest.json
 | Completion | `src.eddy_pipeline.completion` | Completes speed-leading layer centers needed by shape diagnostics. |
 | Shape | `src.eddy_pipeline.shape` | Builds life-thresholded 3-D shape classes. |
 | Original Panel-Family | `src.post.original_eddy_panels` | Recreates the Zhe original object-day discontinuity diagnostic panels. |
+
+## Kuroshio Theory Rebuild-W Diagnostic
+
+`tools/plot_kuroshio_theory_rebuild_w.py` is a standalone diagnostic for the
+Kuroshio 30-year velocity-streamline result. It uses raw Kuroshio
+temperature/salinity to estimate density with a linear equation of state, uses
+the `FILTER` velocity fields for the 30-180 day dynamical velocity, derives
+layerwise center propagation from the catalog, and plots:
+
+```text
+term1 = c_rel(z) · grad(eta_rho)
+term2 = -u_rel(x,y,z) · grad(eta_rho)
+term1 + term2
+```
+
+The diagnostic is for testing the tilted-eddy kinematic rebuild-W theory. It
+does not compare against native W because the CMEMS Kuroshio source files do
+not contain a native vertical velocity variable.
+
+Example:
+
+```powershell
+python Origin_eddy_detection\tools\plot_kuroshio_theory_rebuild_w.py
+```
 
 ## Important Differences From Full `Zhe`
 

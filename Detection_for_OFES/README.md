@@ -127,6 +127,85 @@ When using daily part files in PowerShell, quote the template:
 `'global_phy_{yyyymmdd}.nc'`. Without quotes, PowerShell treats `{yyyymmdd}` as
 a script block and passes the wrong string.
 
+## Velocity-Streamline Result Views
+
+The current OFES detection result used for reporting is the Origin
+`velocity_streamline_contour` run:
+
+```text
+E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1
+```
+
+For a quick surface overview and two representative family-panel views with
+eddy boundaries, run:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.plot_velocity_streamline_edges_pillow
+```
+
+For a LAVD-style regional map focused on the Kuroshio basin, with surface
+velocity-anomaly speed as the background and `velocity_streamline_contour`
+boundaries overlaid, run:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.plot_kuroshio_velocity_streamline_map
+```
+
+The tool intentionally filters to:
+
+```text
+boundary_mode == velocity_streamline_contour
+```
+
+and writes figures under:
+
+```text
+<result-root>\figures\latest_velocity_streamline_surface_and_family_with_edges\
+```
+
+The plotted eddy edges are accepted-boundary radius proxies from the
+velocity-streamline metadata. They are more informative than center points, but
+they are not exact streamline polygons because the current
+`centers_hua_style.parquet` table does not persist the full streamline vertex
+coordinates.
+
+To compare the OFES Kuroshio overview with META4.0, overlay the filtered META4
+track table on the same map:
+
+```powershell
+& 'C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m Detection_for_OFES.tools.overlay_meta4_on_kuroshio_map `
+  --ofes-day 1991-01-10 `
+  --meta-day 2019-07-01
+```
+
+The local META4.0 source starts at 1993-01-01, so it cannot provide a strict
+same-year overlay for the OFES 1991 sample. The overlay uses META4 filtered
+track-table centers and radii, while OFES uses the velocity-streamline result
+and its accepted-boundary radius proxy.
+
+To audit why many SSH seeds fail the `velocity_streamline_contour` filter,
+generate the rejection diagnostics:
+
+```powershell
+& 'C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m Detection_for_OFES.tools.diagnose_streamline_rejections `
+  --result-root E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1 `
+  --day 1991-01-10
+```
+
+This writes seed-fate tables, a Kuroshio seed-fate map, rejected-seed sample
+figures, and the literature note under:
+
+```text
+<result-root>\diagnostics\streamline_rejection_audit\
+```
+
+The diagnostic does not rerun or modify detection. It reads existing
+`centers_hua_style.parquet` / `circle_check_diagnostics.parquet` and highlights
+whether failures are dominated by `no_closed_streamline`, velocity-ratio,
+boundary-monotonic, or other Hua checks.
+
 ## Native W Diagnostics
 
 `run_ofes_rebuild_w.py` remains in this package because it compares OFES native
@@ -158,6 +237,101 @@ background, stabilized `rho_z`, layer-center native W alignment, layerwise
 translation tracking, and density/velocity scale separation. Its physical
 formula and `rebuild_object_w()` calculation are intentionally not changed by
 the interface cleanup.
+
+## Alpha-Aligned Theory Rebuild-W Coherent Composites
+
+To diagnose the theoretical rebuild-W terms on the current OFES
+`velocity_streamline_contour` result, use the coherent track composite helper.
+The current recommended口径 follows Zhe's `global_ls_alpha` convention: each
+coherent object-day is rotated by its vertical centerline tilt so that the
+surface-to-deep center displacement points toward `+x_rot` before compositing.
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.plot_ofes_theory_rebuild_w_composite `
+  --data-root F:\OFES\external_OFES2 `
+  --result-root E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1 `
+  --workers 6
+```
+
+It reads:
+
+```text
+<result-root>\shape_classification_1991_1991_hua_b3_start2_life1\shape_tracks.parquet
+<result-root>\catalog\vertical_objects.parquet
+<result-root>\catalog\layer_observations.parquet
+<result-root>\hua_b3_start2_detection\centers_hua_style.parquet
+<result-root>\hua_b3_start2_detection\structures_hua_style.parquet
+```
+
+Only `shape_class == coherent` object-days are used. They are grouped into
+`NH_cyclonic`, `NH_anticyclonic`, `SH_cyclonic`, and `SH_anticyclonic`, then
+rebuilt through the existing `rebuild_object_w()` formula:
+
+```text
+eta_rho = -rho'_eddy / rho_z
+term1 = c_rel(z) dot grad_h(eta_rho)
+term2 = -u_rel(x,y,z) dot grad_h(eta_rho)
+W_rebuild = term1 + term2
+```
+
+For each object-day, `alpha_deg = -atan2(y_deep - y_surface, x_deep - x_surface)`.
+If fewer than two center layers are valid, or the total displacement is below
+`0.02R`, `alpha_deg=0`. The scalar theory fields are sampled in the rotated
+frame using the same convention as `Zhe/composite_3d_lifecycle.py`.
+
+The tool keeps the current recommended OFES settings: regional density
+background, `rho_z_min=2e-5`, `|eta_rho|<=500 m`, layer tracking, density
+joint-lowpass, velocity joint-lowpass, and vertical smoothing of `c(z)`.
+Native W is still read and layer-center aligned inside `rebuild_object_w()` to
+keep the shared vertical coordinate consistent, but this diagnostic plots only
+`term1`, `term2`, and `term1+term2`.
+
+For full runs, coherent object-days are scheduled by date and daily `.dta`
+memmaps are cached across workers. This reduces repeated file opens and keeps
+the 10-day `prho/u/v/w` windows warm in the OS file cache. Start with
+`--workers 4` to `--workers 6`; increase only if disk queue and memory pressure
+remain acceptable.
+
+The theory composite helper also precomputes each object-day's local 10-day
+sampled blocks for `prho/u/v` and the regional density-background profile.
+Those cached blocks are then reused by the rebuild-W density and velocity
+filters, so the same local window is not sampled repeatedly inside one object
+calculation. Native-W mesoscale filtering is disabled for this theory-only
+composite because native W is not plotted in the three-column output.
+
+Outputs are written to:
+
+```text
+<result-root>\w_rebuild_diagnostics\theory_rebuild_w_coherent_alpha_aligned_by_polarity_hemisphere\
+  figures\theory_rebuild_w_section_alpha_<hemisphere>_<polarity>.png
+  figures\theory_rebuild_w_slices_alpha_<hemisphere>_<polarity>.png
+  grids\theory_rebuild_w_composite_alpha_<hemisphere>_<polarity>.npz
+  grids\theory_rebuild_w_composite_alpha_<hemisphere>_<polarity>.json
+  theory_rebuild_w_alpha_group_summary.csv
+  theory_rebuild_w_alpha_group_summary.json
+```
+
+The older unrotated output directory
+`theory_rebuild_w_coherent_by_polarity_hemisphere` is retained only as a
+comparison product.
+
+For a long full run, redirect stdout/stderr to a log file:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+$log = 'E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1\w_rebuild_diagnostics\theory_rebuild_w_coherent_alpha_aligned_by_polarity_hemisphere\theory_rebuild_w_alpha_run.log'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.plot_ofes_theory_rebuild_w_composite `
+  --data-root F:\OFES\external_OFES2 `
+  --result-root E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1 `
+  --workers 6 *> $log
+```
+
+Monitor progress from another PowerShell:
+
+```powershell
+Get-Content 'E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1\w_rebuild_diagnostics\theory_rebuild_w_coherent_alpha_aligned_by_polarity_hemisphere\theory_rebuild_w_alpha_run.log' -Wait -Tail 40
+```
 
 ### 20N crossing Cressman composite
 

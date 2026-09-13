@@ -1195,6 +1195,23 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
     )
     prho_raw = sample_stack(raw["prho"], metas["prho"], lon_grid, lat_grid, nlev)
     prho_raw = normalize_density_units(prho_raw)
+    set_thread_scale_cache(args, None)
+    if bool(getattr(args, "precompute_object_temporal_blocks", False)):
+        set_thread_scale_cache(
+            args,
+            precompute_object_temporal_blocks(
+                prho_raw,
+                u_raw,
+                v_raw,
+                metas,
+                lon_grid,
+                lat_grid,
+                nlev,
+                x_over_r,
+                obj,
+                args,
+            ),
+        )
 
     r = np.hypot(xxr, yyr)
     far_mask = (r >= float(args.farfield_inner_r)) & (r <= float(args.farfield_outer_r))
@@ -1346,7 +1363,7 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
 
     corr = spatial_corr(rebuild_w, native_w)
     corr_minus = spatial_corr(-rebuild_w, native_w)
-    return {
+    result = {
         **asdict(obj),
         "science_tag": SCIENCE_TAG,
         "depth_m": depth,
@@ -1440,6 +1457,8 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
         "q95_abs_rebuild_1e6_m_s": q95_abs(rebuild_w) * 1.0e6,
         "q95_abs_native_1e6_m_s": q95_abs(native_w) * 1.0e6,
     }
+    set_thread_scale_cache(args, None)
+    return result
 
 
 def sample_stack(raw: np.memmap, meta, lon_grid: np.ndarray, lat_grid: np.ndarray, nlev: int) -> np.ndarray:
@@ -1562,6 +1581,168 @@ def apply_scale_separation(
     }
 
 
+def set_thread_scale_cache(args: argparse.Namespace, cache: dict[str, object] | None) -> None:
+    thread_local = getattr(args, "_thread_local", None)
+    if thread_local is not None:
+        thread_local.scale_cache = cache
+
+
+def get_thread_scale_cache(args: argparse.Namespace) -> dict[str, object] | None:
+    thread_local = getattr(args, "_thread_local", None)
+    if thread_local is None:
+        return None
+    return getattr(thread_local, "scale_cache", None)
+
+
+def precompute_object_temporal_blocks(
+    current_prho: np.ndarray,
+    current_u: np.ndarray,
+    current_v: np.ndarray,
+    metas: dict[str, object],
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    nlev: int,
+    x_over_r: np.ndarray,
+    obj: SelectedObject,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    cache: dict[str, object] = {"precompute_object_temporal_blocks": True}
+    data_root = Path(getattr(args, "data_root", DEFAULT_DATA_ROOT))
+    target_day = parse_iso_date(obj.date)
+    start_day = parse_iso_date(str(getattr(args, "start", "1991-01-01")))
+    end_day = parse_iso_date(str(getattr(args, "end", "1991-01-19")))
+
+    density_mode = str(getattr(args, "rebuild_density_filter", "none"))
+    if density_mode != "none":
+        window = max(1, int(getattr(args, "rebuild_density_filter_window_days", 10)))
+        days = centered_filter_days(target_day, window, start_day, end_day)
+        expected = expected_dta_bytes(metas["prho"])
+        accum = np.zeros_like(current_prho, dtype="f8")
+        counts = np.zeros_like(current_prho, dtype="f4")
+        profiles = []
+        fractions = []
+        used: list[str] = []
+        missing: list[str] = []
+        for day in days:
+            if not cached_daily_exists(data_root, "prho", day, expected):
+                missing.append(day.isoformat())
+                continue
+            raw_prho = open_daily_memmap_cached(args, data_root, "prho", day, metas["prho"], expected)
+            sampled = normalize_density_units(sample_stack(raw_prho, metas["prho"], lon_grid, lat_grid, nlev))
+            finite = np.isfinite(sampled)
+            accum[finite] += sampled[finite]
+            counts[finite] += 1.0
+            profile, valid_fraction = regional_density_background(raw_prho, metas["prho"], obj, nlev, args)
+            profiles.append(profile)
+            fractions.append(valid_fraction)
+            used.append(day.isoformat())
+        if used:
+            filtered = np.divide(accum, counts, out=np.full_like(accum, np.nan), where=counts > 0).astype("f4")
+            cache["prho_filtered"] = filtered
+            cache["density_info"] = {
+                "rebuild_density_filter_window_days": window,
+                "rebuild_density_filter_days_used": len(used),
+                "rebuild_density_filter_dates_used": ",".join(used),
+                "rebuild_density_filter_missing_dates": ",".join(missing),
+                "scale_precompute_prho_sampled_blocks": True,
+            }
+            if profiles:
+                cache["regional_rho_bg_raw"] = np.nanmean(np.stack(profiles, axis=0), axis=0).astype("f4")
+                cache["regional_bg_valid_fraction"] = np.nanmean(np.stack(fractions, axis=0), axis=0).astype("f4")
+        else:
+            cache["density_info"] = {
+                "rebuild_density_filter_window_days": window,
+                "rebuild_density_filter_days_used": 0,
+                "rebuild_density_filter_dates_used": "",
+                "rebuild_density_filter_missing_dates": ",".join(missing),
+                "scale_precompute_prho_sampled_blocks": True,
+            }
+
+    velocity_mode = str(getattr(args, "rebuild_velocity_filter", "none"))
+    if velocity_mode != "none":
+        window = max(1, int(getattr(args, "rebuild_velocity_filter_window_days", 10)))
+        days = centered_filter_days(target_day, window, start_day, end_day)
+        expected_u = expected_dta_bytes(metas["u"])
+        expected_v = expected_dta_bytes(metas["v"])
+        accum_u = np.zeros_like(current_u, dtype="f8")
+        accum_v = np.zeros_like(current_v, dtype="f8")
+        counts_u = np.zeros_like(current_u, dtype="f4")
+        counts_v = np.zeros_like(current_v, dtype="f4")
+        used: list[str] = []
+        missing: list[str] = []
+        for day in days:
+            if not cached_daily_exists(data_root, "u", day, expected_u) or not cached_daily_exists(data_root, "v", day, expected_v):
+                missing.append(day.isoformat())
+                continue
+            raw_u = open_daily_memmap_cached(args, data_root, "u", day, metas["u"], expected_u)
+            raw_v = open_daily_memmap_cached(args, data_root, "v", day, metas["v"], expected_v)
+            sampled_u = sample_stack(raw_u, metas["u"], lon_grid, lat_grid, nlev) / 100.0
+            sampled_v = sample_stack(raw_v, metas["v"], lon_grid, lat_grid, nlev) / 100.0
+            finite_u = np.isfinite(sampled_u)
+            finite_v = np.isfinite(sampled_v)
+            accum_u[finite_u] += sampled_u[finite_u]
+            accum_v[finite_v] += sampled_v[finite_v]
+            counts_u[finite_u] += 1.0
+            counts_v[finite_v] += 1.0
+            used.append(day.isoformat())
+        if used:
+            filtered_u = np.divide(accum_u, counts_u, out=np.full_like(accum_u, np.nan), where=counts_u > 0).astype("f4")
+            filtered_v = np.divide(accum_v, counts_v, out=np.full_like(accum_v, np.nan), where=counts_v > 0).astype("f4")
+            sigma_r = float(getattr(args, "uv_horizontal_lowpass_sigma_r", 0.5))
+            sigma_cells = sigma_r_to_cells(sigma_r, x_over_r)
+            cache["u_filtered"] = nan_gaussian_smooth_3d(filtered_u, sigma_cells)
+            cache["v_filtered"] = nan_gaussian_smooth_3d(filtered_v, sigma_cells)
+            cache["velocity_info"] = {
+                "rebuild_velocity_filter": f"{velocity_mode}_highfreq_stop",
+                "rebuild_velocity_filter_window_days": window,
+                "rebuild_velocity_filter_days_used": len(used),
+                "rebuild_velocity_filter_dates_used": ",".join(used),
+                "rebuild_velocity_filter_missing_dates": ",".join(missing),
+                "uv_horizontal_lowpass_sigma_r": sigma_r,
+                "uv_horizontal_lowpass_sigma_cells": float(sigma_cells),
+                "scale_precompute_uv_sampled_blocks": True,
+            }
+        else:
+            cache["velocity_info"] = {
+                "rebuild_velocity_filter": f"{velocity_mode}_failed_no_days",
+                "rebuild_velocity_filter_window_days": window,
+                "rebuild_velocity_filter_days_used": 0,
+                "rebuild_velocity_filter_dates_used": "",
+                "rebuild_velocity_filter_missing_dates": ",".join(missing),
+                "uv_horizontal_lowpass_sigma_r": float(getattr(args, "uv_horizontal_lowpass_sigma_r", 0.5)),
+                "uv_horizontal_lowpass_sigma_cells": 0.0,
+                "scale_precompute_uv_sampled_blocks": True,
+            }
+    return cache
+
+
+def open_daily_memmap_cached(args: argparse.Namespace, data_root: Path, variable: str, day: date, meta, expected: int) -> np.memmap:
+    cache = getattr(args, "_daily_memmap_cache", None)
+    if cache is None:
+        path = require_daily_file(data_root, variable, day, expected)
+        return open_dta_memmap(path, meta)
+    key = (variable, day.isoformat())
+    lock = getattr(args, "_daily_memmap_cache_lock", None)
+    if lock is None:
+        if key not in cache:
+            path = require_daily_file(data_root, variable, day, expected)
+            cache[key] = open_dta_memmap(path, meta)
+        return cache[key]
+    with lock:
+        if key not in cache:
+            path = require_daily_file(data_root, variable, day, expected)
+            cache[key] = open_dta_memmap(path, meta)
+        return cache[key]
+
+
+def cached_daily_exists(data_root: Path, variable: str, day: date, expected: int) -> bool:
+    try:
+        require_daily_file(data_root, variable, day, expected)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def filter_native_w_temporal(
     current_native_w: np.ndarray,
     w_meta,
@@ -1604,12 +1785,10 @@ def filter_native_w_temporal(
     missing: list[str] = []
 
     for day in days:
-        try:
-            path = require_daily_file(data_root, "w", day, expected)
-        except FileNotFoundError:
+        if not cached_daily_exists(data_root, "w", day, expected):
             missing.append(day.isoformat())
             continue
-        raw_w = open_dta_memmap(path, w_meta)
+        raw_w = open_daily_memmap_cached(args, data_root, "w", day, w_meta, expected)
         raw_sample = sample_stack(raw_w, w_meta, lon_grid, lat_grid, sample_nlev) / 100.0
         aligned, _ = align_native_w_vertical(raw_sample, source_depth, target_depth_m, "layer_center")
         finite = np.isfinite(aligned)
@@ -1680,12 +1859,10 @@ def filter_native_w_meso(
     missing: list[str] = []
 
     for day in days:
-        try:
-            path = require_daily_file(data_root, "w", day, expected)
-        except FileNotFoundError:
+        if not cached_daily_exists(data_root, "w", day, expected):
             missing.append(day.isoformat())
             continue
-        raw_w = open_dta_memmap(path, w_meta)
+        raw_w = open_daily_memmap_cached(args, data_root, "w", day, w_meta, expected)
         raw_sample = sample_stack(raw_w, w_meta, lon_grid, lat_grid, sample_nlev) / 100.0
         aligned, _ = align_native_w_vertical(raw_sample, source_depth, target_depth_m, "layer_center")
         finite = np.isfinite(aligned)
@@ -1743,6 +1920,9 @@ def filter_rebuild_prho_temporal(
             "rebuild_density_filter_dates_used": str(obj.date),
             "rebuild_density_filter_missing_dates": "",
         }
+    scale_cache = get_thread_scale_cache(args)
+    if scale_cache is not None and "prho_filtered" in scale_cache:
+        return np.asarray(scale_cache["prho_filtered"], dtype="f4"), dict(scale_cache.get("density_info", {}))
 
     window = max(1, int(getattr(args, "rebuild_density_filter_window_days", 10)))
     days = centered_filter_days(parse_iso_date(obj.date), window, parse_iso_date(str(getattr(args, "start", "1991-01-01"))), parse_iso_date(str(getattr(args, "end", "1991-01-19"))))
@@ -1753,12 +1933,10 @@ def filter_rebuild_prho_temporal(
     used: list[str] = []
     missing: list[str] = []
     for day in days:
-        try:
-            path = require_daily_file(data_root, "prho", day, expected)
-        except FileNotFoundError:
+        if not cached_daily_exists(data_root, "prho", day, expected):
             missing.append(day.isoformat())
             continue
-        raw_prho = open_dta_memmap(path, prho_meta)
+        raw_prho = open_daily_memmap_cached(args, data_root, "prho", day, prho_meta, expected)
         sampled = normalize_density_units(sample_stack(raw_prho, prho_meta, lon_grid, lat_grid, nlev))
         finite = np.isfinite(sampled)
         accum[finite] += sampled[finite]
@@ -1803,6 +1981,13 @@ def filter_rebuild_velocity_temporal(
             "uv_horizontal_lowpass_sigma_r": 0.0,
             "uv_horizontal_lowpass_sigma_cells": 0.0,
         }
+    scale_cache = get_thread_scale_cache(args)
+    if scale_cache is not None and "u_filtered" in scale_cache and "v_filtered" in scale_cache:
+        return (
+            np.asarray(scale_cache["u_filtered"], dtype="f4"),
+            np.asarray(scale_cache["v_filtered"], dtype="f4"),
+            dict(scale_cache.get("velocity_info", {})),
+        )
 
     window = max(1, int(getattr(args, "rebuild_velocity_filter_window_days", 10)))
     days = centered_filter_days(parse_iso_date(obj.date), window, parse_iso_date(str(getattr(args, "start", "1991-01-01"))), parse_iso_date(str(getattr(args, "end", "1991-01-19"))))
@@ -1816,14 +2001,11 @@ def filter_rebuild_velocity_temporal(
     used: list[str] = []
     missing: list[str] = []
     for day in days:
-        try:
-            path_u = require_daily_file(data_root, "u", day, expected_u)
-            path_v = require_daily_file(data_root, "v", day, expected_v)
-        except FileNotFoundError:
+        if not cached_daily_exists(data_root, "u", day, expected_u) or not cached_daily_exists(data_root, "v", day, expected_v):
             missing.append(day.isoformat())
             continue
-        raw_u = open_dta_memmap(path_u, u_meta)
-        raw_v = open_dta_memmap(path_v, v_meta)
+        raw_u = open_daily_memmap_cached(args, data_root, "u", day, u_meta, expected_u)
+        raw_v = open_daily_memmap_cached(args, data_root, "v", day, v_meta, expected_v)
         sampled_u = sample_stack(raw_u, u_meta, lon_grid, lat_grid, nlev) / 100.0
         sampled_v = sample_stack(raw_v, v_meta, lon_grid, lat_grid, nlev) / 100.0
         finite_u = np.isfinite(sampled_u)
@@ -1947,6 +2129,12 @@ def regional_density_background(raw_prho: np.memmap, meta, obj: SelectedObject, 
 
 
 def regional_density_background_temporal(meta, obj: SelectedObject, nlev: int, args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray]:
+    scale_cache = get_thread_scale_cache(args)
+    if scale_cache is not None and "regional_rho_bg_raw" in scale_cache and "regional_bg_valid_fraction" in scale_cache:
+        return (
+            np.asarray(scale_cache["regional_rho_bg_raw"], dtype="f4"),
+            np.asarray(scale_cache["regional_bg_valid_fraction"], dtype="f4"),
+        )
     window = max(1, int(getattr(args, "rebuild_density_filter_window_days", 10)))
     days = centered_filter_days(parse_iso_date(obj.date), window, parse_iso_date(str(getattr(args, "start", "1991-01-01"))), parse_iso_date(str(getattr(args, "end", "1991-01-19"))))
     data_root = Path(getattr(args, "data_root", DEFAULT_DATA_ROOT))
@@ -1954,11 +2142,9 @@ def regional_density_background_temporal(meta, obj: SelectedObject, nlev: int, a
     profiles = []
     fractions = []
     for day in days:
-        try:
-            path = require_daily_file(data_root, "prho", day, expected)
-        except FileNotFoundError:
+        if not cached_daily_exists(data_root, "prho", day, expected):
             continue
-        raw_prho = open_dta_memmap(path, meta)
+        raw_prho = open_daily_memmap_cached(args, data_root, "prho", day, meta, expected)
         profile, valid_fraction = regional_density_background(raw_prho, meta, obj, nlev, args)
         profiles.append(profile)
         fractions.append(valid_fraction)
