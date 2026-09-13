@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 
 DEFAULT_DATA_ROOT = Path(r"F:\OFES\external_OFES2")
-DEFAULT_RESULT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\available_jan01_jan19_refined_ofes_grid")
+DEFAULT_RESULT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1")
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class RebuildConfig:
 
 @dataclass(frozen=True)
 class FilterConfig:
-    native_w_temporal_filter: str = "lowpass_running_mean"
+    native_w_temporal_filter: str = "none"
     native_w_filter_window_days: int = 10
     rebuild_density_filter: str = "joint_lowpass"
     rebuild_density_filter_window_days: int = 10
@@ -62,6 +62,11 @@ class FilterConfig:
     uv_horizontal_lowpass_sigma_r: float = 0.5
     translation_profile_smooth_sigma_layers: float = 2.0
     translation_profile_max_speed_m_s: float = 0.5
+    native_w_meso_filter: str = "temporal10d_spatial50_500km"
+    native_w_meso_time_window_days: int = 10
+    native_w_meso_small_cutoff_km: float = 50.0
+    native_w_meso_large_cutoff_km: float = 500.0
+    native_w_phase_align: bool = True
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,30 @@ class SelectionConfig:
     band_lat_min: float = 30.0
     band_lat_max: float = 35.0
     band_max_objects: int = 8
+    composite_lat: float = 20.0
+    composite_polarities: str = "cyclonic,anticyclonic"
+    composite_max_objects: int = 0
+    cressman_radius_r: float = 1.0
+    cressman_min_objects: int = 8
+    composite_workers: int = 1
+    composite_selection_mode: str = "crossing"
+    composite_domain_bbox: str = "120,145,20,35"
+    composite_domain_name: str = "kuroshio_domain"
+    multipole_depth_min_m: float = 300.0
+    multipole_depth_max_m: float = 500.0
+    multipole_radius_inner_r: float = 0.0
+    multipole_radius_outer_r: float = 1.0
+    multipole_azimuth_count: int = 60
+    multipole_min_valid_azimuth_fraction: float = 0.80
+    multipole_min_sector_valid_fraction: float = 0.35
+    multipole_boundary_max_nan_fraction: float = 0.35
+    multipole_min_amp_1e6_m_s: float = 0.5
+    multipole_min_snr: float = 2.0
+    multipole_min_harmonic_dominance: float = 1.1
+    composite_selection_class: str = ""
+    composite_region_mode: str = "none"
+    composite_region_boxes: str = "western_boundary:60,140;interior:140,240;eastern_basin:240,360"
+    composite_combine_polarities: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +182,11 @@ def config_from_args(args: argparse.Namespace) -> WRebuildConfig:
             uv_horizontal_lowpass_sigma_r=float(args.uv_horizontal_lowpass_sigma_r),
             translation_profile_smooth_sigma_layers=float(args.translation_profile_smooth_sigma_layers),
             translation_profile_max_speed_m_s=float(args.translation_profile_max_speed_m_s),
+            native_w_meso_filter=str(args.native_w_meso_filter),
+            native_w_meso_time_window_days=int(args.native_w_meso_time_window_days),
+            native_w_meso_small_cutoff_km=float(args.native_w_meso_small_cutoff_km),
+            native_w_meso_large_cutoff_km=float(args.native_w_meso_large_cutoff_km),
+            native_w_phase_align=bool(args.native_w_phase_align),
         ),
         selection=SelectionConfig(
             date=str(args.date),
@@ -164,6 +198,30 @@ def config_from_args(args: argparse.Namespace) -> WRebuildConfig:
             band_lat_min=float(args.band_lat_min),
             band_lat_max=float(args.band_lat_max),
             band_max_objects=int(args.band_max_objects),
+            composite_lat=float(args.composite_lat),
+            composite_polarities=str(args.composite_polarities),
+            composite_max_objects=int(args.composite_max_objects),
+            cressman_radius_r=float(args.cressman_radius_r),
+            cressman_min_objects=int(args.cressman_min_objects),
+            composite_workers=int(args.composite_workers),
+            composite_selection_mode=str(args.composite_selection_mode),
+            composite_domain_bbox=str(args.composite_domain_bbox),
+            composite_domain_name=str(args.composite_domain_name),
+            multipole_depth_min_m=float(args.multipole_depth_min_m),
+            multipole_depth_max_m=float(args.multipole_depth_max_m),
+            multipole_radius_inner_r=float(args.multipole_radius_inner_r),
+            multipole_radius_outer_r=float(args.multipole_radius_outer_r),
+            multipole_azimuth_count=int(args.multipole_azimuth_count),
+            multipole_min_valid_azimuth_fraction=float(args.multipole_min_valid_azimuth_fraction),
+            multipole_min_sector_valid_fraction=float(args.multipole_min_sector_valid_fraction),
+            multipole_boundary_max_nan_fraction=float(args.multipole_boundary_max_nan_fraction),
+            multipole_min_amp_1e6_m_s=float(args.multipole_min_amp_1e6_m_s),
+            multipole_min_snr=float(args.multipole_min_snr),
+            multipole_min_harmonic_dominance=float(args.multipole_min_harmonic_dominance),
+            composite_selection_class=str(args.composite_selection_class),
+            composite_region_mode=str(args.composite_region_mode),
+            composite_region_boxes=str(args.composite_region_boxes),
+            composite_combine_polarities=bool(args.composite_combine_polarities),
         ),
         plot=PlotConfig(backend=str(args.backend)),
     )

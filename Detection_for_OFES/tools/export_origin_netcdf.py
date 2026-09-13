@@ -34,6 +34,7 @@ def main() -> None:
         max_depth_layers=int(args.max_depth_layers),
         depth_chunk=int(args.depth_chunk),
         writer_backend=str(args.writer_backend),
+        output_layout=str(args.output_layout),
         overwrite=bool(args.overwrite),
     )
 
@@ -50,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mean-end", default="1991-01-19")
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--depth-chunk", type=int, default=4)
+    parser.add_argument(
+        "--output-layout",
+        choices=["daily_parts", "monolithic"],
+        default="daily_parts",
+        help="daily_parts writes global_phy_YYYYMMDD.nc files and avoids one huge yearly file.",
+    )
     parser.add_argument(
         "--writer-backend",
         choices=["scipy_netcdf3_64bit", "netcdf4", "auto"],
@@ -71,6 +78,7 @@ def export_origin_netcdf(
     max_depth_layers: int,
     depth_chunk: int,
     writer_backend: str,
+    output_layout: str,
     overwrite: bool,
 ) -> Path:
     if start.year != end.year:
@@ -83,9 +91,6 @@ def export_origin_netcdf(
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = output_dir / "mean_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"global_phy_{start.year:04d}.nc"
-    if out_path.exists() and not overwrite:
-        raise FileExistsError(f"{out_path} already exists. Use --overwrite to replace it.")
 
     eta_meta = parse_ctl(ctl_path(data_root, "eta"))
     u_meta = parse_ctl(ctl_path(data_root, "u"))
@@ -101,12 +106,124 @@ def export_origin_netcdf(
     u_mean = load_or_build_velocity_mean(data_root, cache_dir, "u", mean_days, u_meta, depth_count, depth_chunk)
     v_mean = load_or_build_velocity_mean(data_root, cache_dir, "v", mean_days, v_meta, depth_count, depth_chunk)
 
+    units = f"days since {start.year:04d}-01-01 00:00:00"
+    output_paths = []
+    if output_layout == "monolithic":
+        out_path = output_dir / f"global_phy_{start.year:04d}.nc"
+        output_paths.append(
+            write_netcdf_file(
+                out_path=out_path,
+                writer_backend=writer_backend,
+                data_root=data_root,
+                days=export_days,
+                start_year=start.year,
+                units=units,
+                overwrite=overwrite,
+                eta_meta=eta_meta,
+                u_meta=u_meta,
+                v_meta=v_meta,
+                lon=lon,
+                lat=lat,
+                depth=depth,
+                ssh_mean=ssh_mean,
+                u_mean=u_mean,
+                v_mean=v_mean,
+                depth_count=depth_count,
+                depth_chunk=depth_chunk,
+                mean_start=mean_start,
+                mean_end=mean_end,
+            )
+        )
+    elif output_layout == "daily_parts":
+        for day in export_days:
+            out_path = output_dir / f"global_phy_{day:%Y%m%d}.nc"
+            output_paths.append(
+                write_netcdf_file(
+                    out_path=out_path,
+                    writer_backend=writer_backend,
+                    data_root=data_root,
+                    days=[day],
+                    start_year=start.year,
+                    units=units,
+                    overwrite=overwrite,
+                    eta_meta=eta_meta,
+                    u_meta=u_meta,
+                    v_meta=v_meta,
+                    lon=lon,
+                    lat=lat,
+                    depth=depth,
+                    ssh_mean=ssh_mean,
+                    u_mean=u_mean,
+                    v_mean=v_mean,
+                    depth_count=depth_count,
+                    depth_chunk=depth_chunk,
+                    mean_start=mean_start,
+                    mean_end=mean_end,
+                )
+            )
+    else:
+        raise ValueError(f"Unsupported output layout: {output_layout}")
+
+    manifest = {
+        "output_layout": output_layout,
+        "output_template": "global_phy_{yyyymmdd}.nc" if output_layout == "daily_parts" else "global_phy_{year}.nc",
+        "output_paths": [str(path) for path in output_paths],
+        "data_root": str(data_root),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "mean_start": mean_start.isoformat(),
+        "mean_end": mean_end.isoformat(),
+        "max_depth_layers": depth_count,
+        "writer_backend": writer_backend,
+        "dimensions_per_file": {
+            "time": 1 if output_layout == "daily_parts" else len(export_days),
+            "depth": depth_count,
+            "latitude": len(lat),
+            "longitude": len(lon),
+        },
+        "variables": {
+            "zos_glor": "SSH anomaly in cm, regridded from OFES scalar grid to velocity grid",
+            "uo_glor": "u anomaly in m/s",
+            "vo_glor": "v anomaly in m/s",
+        },
+    }
+    (output_dir / "export_origin_netcdf_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return output_paths[-1]
+
+
+def write_netcdf_file(
+    *,
+    out_path: Path,
+    writer_backend: str,
+    data_root: Path,
+    days: list[date],
+    start_year: int,
+    units: str,
+    overwrite: bool,
+    eta_meta,
+    u_meta,
+    v_meta,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    depth: np.ndarray,
+    ssh_mean: np.ndarray,
+    u_mean: np.memmap,
+    v_mean: np.memmap,
+    depth_count: int,
+    depth_chunk: int,
+    mean_start: date,
+    mean_end: date,
+) -> Path:
+    if out_path.exists() and not overwrite:
+        raise FileExistsError(f"{out_path} already exists. Use --overwrite to replace it.")
     if out_path.exists():
         out_path.unlink()
-    units = f"days since {start.year:04d}-01-01 00:00:00"
     ds = open_output_dataset(out_path, writer_backend)
     try:
-        ds.createDimension("time", len(export_days))
+        ds.createDimension("time", len(days))
         ds.createDimension("depth", depth_count)
         ds.createDimension("latitude", len(lat))
         ds.createDimension("longitude", len(lon))
@@ -136,45 +253,19 @@ def export_origin_netcdf(
         ds.mean_window_end = mean_end.isoformat()
         ds.grid_note = "All exported variables are on the OFES velocity grid for Origin_eddy_detection."
 
-        time_var[:] = np.asarray([(day - date(start.year, 1, 1)).days for day in export_days], dtype="f8")
+        time_var[:] = np.asarray([(day - date(start_year, 1, 1)).days for day in days], dtype="f8")
         depth_var[:] = depth
         lat_var[:] = lat
         lon_var[:] = lon
 
-        for t_index, day in enumerate(export_days):
+        for t_index, day in enumerate(days):
             ssh = read_ssh_latlon_daily_only(data_root, day)
             zos[t_index, :, :] = regrid_scalar_to_velocity(ssh, eta_meta.x.values, eta_meta.y.values, lon, lat) - ssh_mean
             write_velocity_day(uo, t_index, data_root, "u", day, u_meta, u_mean, depth_count, depth_chunk)
             write_velocity_day(vo, t_index, data_root, "v", day, v_meta, v_mean, depth_count, depth_chunk)
-            print(f"[export-origin-netcdf] wrote {day.isoformat()}", flush=True)
+            print(f"[export-origin-netcdf] wrote {day.isoformat()} -> {out_path.name}", flush=True)
     finally:
         ds.close()
-
-    manifest = {
-        "output_path": str(out_path),
-        "data_root": str(data_root),
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "mean_start": mean_start.isoformat(),
-        "mean_end": mean_end.isoformat(),
-        "max_depth_layers": depth_count,
-        "writer_backend": writer_backend,
-        "dimensions": {
-            "time": len(export_days),
-            "depth": depth_count,
-            "latitude": len(lat),
-            "longitude": len(lon),
-        },
-        "variables": {
-            "zos_glor": "SSH anomaly in cm, regridded from OFES scalar grid to velocity grid",
-            "uo_glor": "u anomaly in m/s",
-            "vo_glor": "v anomaly in m/s",
-        },
-    }
-    (output_dir / "export_origin_netcdf_manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
     return out_path
 
 

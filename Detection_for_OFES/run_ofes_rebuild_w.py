@@ -4,6 +4,7 @@ import argparse
 import csv
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 from pathlib import Path
@@ -57,7 +58,7 @@ def main() -> None:
     stages = parse_stage_set(str(args.stages))
     if "extract" in stages:
         extract_w_prho(data_root, metadata_dir, days, int(args.extract_workers))
-    if stages & {"diagnose", "crossing", "band"}:
+    if stages & {"diagnose", "crossing", "band", "crossing_composite"}:
         run_w_diagnostics(data_root, result_root, output_root, grids_dir, figures_dir, args, stages)
 
 
@@ -66,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--result-root", type=Path, default=DEFAULT_RESULT_ROOT)
     parser.add_argument("--output-root", type=Path, default=None)
-    parser.add_argument("--stages", default="all", help="Comma-separated: extract,diagnose,crossing,band,all. all runs extract plus the default band diagnostic.")
+    parser.add_argument("--stages", default="all", help="Comma-separated: extract,diagnose,crossing,band,crossing_composite,all. all runs extract plus the default band diagnostic.")
     parser.add_argument("--start", default="1991-01-01")
     parser.add_argument("--end", default="1991-01-19")
     parser.add_argument("--date", default="1991-01-10", help="Diagnostic object date.")
@@ -95,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--translation-profile", choices=["barotropic", "layerwise", "layer_tracking"], default="layer_tracking", help="Use same-depth center tracking for c_abs(z) by default.")
     parser.add_argument("--layer-tracking-max-distance-r", type=float, default=2.0, help="Maximum same-depth center matching distance in eddy radii.")
     parser.add_argument("--layer-tracking-max-distance-km", type=float, default=250.0, help="Maximum same-depth center matching distance in km.")
-    parser.add_argument("--native-w-temporal-filter", choices=["none", "lowpass_running_mean"], default="lowpass_running_mean", help="Optional temporal filter for OFES native W reference only.")
+    parser.add_argument("--native-w-temporal-filter", choices=["none", "lowpass_running_mean"], default="none", help="Optional temporal filter for OFES native W reference only.")
     parser.add_argument("--native-w-filter-window-days", type=int, default=10, help="Running-mean window used when --native-w-temporal-filter=lowpass_running_mean.")
     parser.add_argument("--rebuild-density-filter", choices=["none", "joint_lowpass", "bg_perturb_decomp"], default="joint_lowpass", help="Scale separation applied to the density path used by rebuild W.")
     parser.add_argument("--rebuild-density-filter-window-days", type=int, default=10)
@@ -108,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--translation-profile-smooth-sigma-layers", type=float, default=2.0)
     parser.add_argument("--translation-profile-max-speed-m-s", type=float, default=0.5)
     parser.add_argument("--translation-background-layers", type=int, default=10, help="Upper farfield layers used to remove background advection from eddy translation speed.")
+    parser.add_argument("--native-w-meso-filter", choices=["none", "temporal10d_spatial50_500km"], default="temporal10d_spatial50_500km", help="Native-W field used by multipole classification and native-W composites.")
+    parser.add_argument("--native-w-meso-time-window-days", type=int, default=10, help="Available-day running mean window for the native-W mesoscale diagnostic.")
+    parser.add_argument("--native-w-meso-small-cutoff-km", type=float, default=50.0, help="Approximate small-scale cutoff; implemented as Gaussian FWHM before subtracting the large-scale field.")
+    parser.add_argument("--native-w-meso-large-cutoff-km", type=float, default=500.0, help="Approximate large-scale cutoff; implemented as Gaussian FWHM and subtracted from the small-scale lowpass.")
+    parser.add_argument("--native-w-phase-align", action=argparse.BooleanOptionalAction, default=True, help="Rotate dipole native-W mesoscale fields by their mode-1 phase before compositing.")
     parser.add_argument("--extract-workers", type=int, default=1)
     parser.add_argument("--backend", choices=["matplotlib", "pillow"], default="pillow")
     parser.add_argument("--crossing-lats", default="20,40", help="Comma-separated target latitudes for x-depth W section diagnostics.")
@@ -116,6 +122,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--band-lat-min", type=float, default=30.0, help="Minimum latitude for match_all band diagnostics.")
     parser.add_argument("--band-lat-max", type=float, default=35.0, help="Maximum latitude for match_all band diagnostics.")
     parser.add_argument("--band-max-objects", type=int, default=8, help="Maximum match_all band objects to plot; use <=0 for all.")
+    parser.add_argument("--composite-lat", type=float, default=20.0, help="Target latitude for strict crossing Cressman composites.")
+    parser.add_argument("--composite-polarities", default="cyclonic,anticyclonic", help="Comma-separated polarities for crossing composites.")
+    parser.add_argument("--composite-max-objects", type=int, default=0, help="Maximum strict-crossing objects per polarity; use <=0 for all.")
+    parser.add_argument("--cressman-radius-r", type=float, default=1.0, help="Cressman influence radius in eddy-radius units for composites.")
+    parser.add_argument("--cressman-min-objects", type=int, default=8, help="Minimum contributing objects required for a composite cell.")
+    parser.add_argument("--composite-workers", type=int, default=1, help="Parallel object rebuild workers for crossing composites.")
+    parser.add_argument("--composite-selection-mode", choices=["crossing", "domain_bbox"], default="crossing", help="Select composite source objects by strict crossing or by a lon/lat domain bbox.")
+    parser.add_argument("--composite-domain-bbox", default="120,145,20,35", help="Domain bbox for --composite-selection-mode=domain_bbox: lon_min,lon_max,lat_min,lat_max.")
+    parser.add_argument("--composite-domain-name", default="kuroshio_domain", help="Output label for --composite-selection-mode=domain_bbox.")
+    parser.add_argument("--multipole-depth-min-m", type=float, default=300.0, help="Upper bound of native-W depth range used for multipole classification.")
+    parser.add_argument("--multipole-depth-max-m", type=float, default=500.0, help="Lower bound of native-W depth range used for multipole classification.")
+    parser.add_argument("--multipole-radius-inner-r", type=float, default=0.0, help="Inner radius for native-W radial integration used by multipole classification.")
+    parser.add_argument("--multipole-radius-outer-r", type=float, default=1.0, help="Outer radius for native-W radial integration used by multipole classification.")
+    parser.add_argument("--multipole-azimuth-count", type=int, default=60, help="Number of azimuth sectors used by native-W multipole classification.")
+    parser.add_argument("--multipole-min-valid-azimuth-fraction", type=float, default=0.80, help="Minimum fraction of valid azimuth sectors required by multipole QC.")
+    parser.add_argument("--multipole-min-sector-valid-fraction", type=float, default=0.35, help="Minimum valid grid fraction inside an azimuth sector.")
+    parser.add_argument("--multipole-boundary-max-nan-fraction", type=float, default=0.35, help="Maximum NaN fraction allowed near the outer classification radius.")
+    parser.add_argument("--multipole-min-amp-1e6-m-s", type=float, default=0.5, help="Minimum azimuthal native-W amplitude in 10^-6 m/s.")
+    parser.add_argument("--multipole-min-snr", type=float, default=2.0, help="Minimum azimuthal signal-to-noise ratio for native-W multipole classification.")
+    parser.add_argument("--multipole-min-harmonic-dominance", type=float, default=1.1, help="Minimum dominance of the selected azimuthal harmonic over other low modes.")
+    parser.add_argument("--composite-selection-class", default="", help="Optional native-W multipole class to keep for composite output, e.g. dipole.")
+    parser.add_argument("--composite-region-mode", choices=["none", "longitude_bins"], default="none", help="Optional regional grouping for crossing composites.")
+    parser.add_argument("--composite-region-boxes", default="western_boundary:60,140;interior:140,240;eastern_basin:240,360", help="Semicolon-separated region:lon_min,lon_max boxes in 0-360 degrees. Multiple boxes per region use |.")
+    parser.add_argument("--composite-combine-polarities", action="store_true", help="Combine requested polarities before regional composite output.")
     return parser
 
 
@@ -123,7 +153,7 @@ def parse_stage_set(value: str) -> set[str]:
     requested = {item.strip().lower() for item in value.split(",") if item.strip()}
     if not requested:
         raise ValueError("--stages must include at least one stage")
-    valid = {"extract", "diagnose", "crossing", "band", "all"}
+    valid = {"extract", "diagnose", "crossing", "band", "crossing_composite", "all"}
     invalid = sorted(requested - valid)
     if invalid:
         raise ValueError(f"Unsupported --stages value(s): {', '.join(invalid)}. Valid stages: {', '.join(sorted(valid))}")
@@ -139,13 +169,14 @@ def run_w_diagnostics(data_root: Path, result_root: Path, output_root: Path, gri
         _run_crossing_diagnostics(data_root, result_root, output_root, grids_dir, figures_dir, args)
     if "band" in stages:
         _run_band_diagnostics(data_root, result_root, output_root, grids_dir, figures_dir, args)
+    if "crossing_composite" in stages:
+        _run_crossing_composite_diagnostics(data_root, result_root, output_root, args)
 
 
 def _run_object_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
     target_day = parse_iso_date(args.date)
     detection_dir = resolve_detection_table_dir(result_root)
-    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
-    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
+    centers, structures = load_detection_tables(detection_dir)
     selected = select_objects(centers, structures, target_day, args.hua_object_id, int(args.max_objects))
 
     metas = {name: parse_ctl(ctl_path(data_root, name)) for name in ["u", "v", "w", "prho"]}
@@ -176,8 +207,7 @@ def _run_object_diagnostics(data_root: Path, result_root: Path, output_root: Pat
 
 def _run_crossing_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
     detection_dir = resolve_detection_table_dir(result_root)
-    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
-    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
+    centers, structures = load_detection_tables(detection_dir)
     target_lats = parse_float_list(str(args.crossing_lats))
     selections = select_crossing_objects(structures, target_lats, float(args.intersect_radius_r), bool(args.strict_crossing_only))
     section_dir = figures_dir / "crossing_sections"
@@ -227,8 +257,7 @@ def _run_crossing_diagnostics(data_root: Path, result_root: Path, output_root: P
 
 def _run_band_diagnostics(data_root: Path, result_root: Path, output_root: Path, grids_dir: Path, figures_dir: Path, args: argparse.Namespace) -> None:
     detection_dir = resolve_detection_table_dir(result_root)
-    centers = pd.read_csv(detection_dir / "centers_hua_style.csv")
-    structures = pd.read_csv(detection_dir / "structures_hua_style.csv")
+    centers, structures = load_detection_tables(detection_dir)
     lat_min = float(args.band_lat_min)
     lat_max = float(args.band_lat_max)
     objects = select_band_objects(structures, lat_min, lat_max, int(args.band_max_objects))
@@ -300,13 +329,751 @@ def resolve_detection_table_dir(result_root: Path) -> Path:
         result_root / "detection_hua_global_jan1991",
     ]
     for candidate in candidates:
-        if (candidate / "centers_hua_style.csv").exists() and (candidate / "structures_hua_style.csv").exists():
+        if detection_table_path(candidate, "centers_hua_style") and detection_table_path(candidate, "structures_hua_style"):
             return candidate
     checked = "; ".join(str(path) for path in candidates)
     raise FileNotFoundError(
-        "Could not find centers_hua_style.csv and structures_hua_style.csv. "
+        "Could not find centers_hua_style and structures_hua_style tables. "
         f"Checked: {checked}"
     )
+
+
+def detection_table_path(directory: Path, stem: str) -> Path | None:
+    for suffix in [".parquet", ".csv"]:
+        path = directory / f"{stem}{suffix}"
+        if path.exists():
+            return path
+    return None
+
+
+def read_detection_table(directory: Path, stem: str) -> pd.DataFrame:
+    path = detection_table_path(directory, stem)
+    if path is None:
+        raise FileNotFoundError(f"Missing {stem}.parquet or {stem}.csv under {directory}")
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def load_detection_tables(detection_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    centers = read_detection_table(detection_dir, "centers_hua_style")
+    structures = read_detection_table(detection_dir, "structures_hua_style")
+    for table in [centers, structures]:
+        if "date" in table.columns:
+            table["date"] = pd.to_datetime(table["date"]).dt.strftime("%Y-%m-%d")
+    return centers, structures
+
+
+def _run_crossing_composite_diagnostics(data_root: Path, result_root: Path, output_root: Path, args: argparse.Namespace) -> None:
+    detection_dir = resolve_detection_table_dir(result_root)
+    centers, structures = load_detection_tables(detection_dir)
+    selection_mode = str(getattr(args, "composite_selection_mode", "crossing")).lower()
+    domain_bbox: tuple[float, float, float, float] | None = None
+    if selection_mode == "domain_bbox":
+        domain_bbox = parse_bbox(str(getattr(args, "composite_domain_bbox", "120,145,20,35")))
+        target_lat = 0.5 * (domain_bbox[2] + domain_bbox[3])
+        token = safe_token(str(getattr(args, "composite_domain_name", "kuroshio_domain")))
+    else:
+        target_lat = float(args.composite_lat)
+        token = lat_token(target_lat)
+    polarities = parse_string_list(str(args.composite_polarities))
+    if not polarities:
+        raise ValueError("--composite-polarities must include at least one polarity")
+
+    composite_root = output_root / "w_native_meso50_500km_mode1_aligned_by_polarity" / f"composite_{token}_crossing"
+    figures_dir = composite_root / "figures"
+    grids_dir = composite_root / "grids"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    grids_dir.mkdir(parents=True, exist_ok=True)
+
+    metas = {name: parse_ctl(ctl_path(data_root, name)) for name in ["u", "v", "w", "prho"]}
+    expected = {name: expected_dta_bytes(meta) for name, meta in metas.items()}
+    raw_cache: dict[str, dict[str, np.memmap]] = {}
+    summary_rows: list[dict[str, object]] = []
+    detail_rows: list[dict[str, object]] = []
+    workers = max(1, int(getattr(args, "composite_workers", 1)))
+
+    def build_object_grid(item: tuple[int, SelectedObject]) -> tuple[int, SelectedObject, dict[str, object]]:
+        idx, obj = item
+        target_day = parse_iso_date(obj.date)
+        day_key = target_day.isoformat()
+        if workers <= 1:
+            if day_key not in raw_cache:
+                paths = {name: require_daily_file(data_root, name, target_day, expected[name]) for name in ["u", "v", "w", "prho"]}
+                raw_cache[day_key] = {name: open_dta_memmap(paths[name], metas[name]) for name in ["u", "v", "w", "prho"]}
+            raw = raw_cache[day_key]
+        else:
+            paths = {name: require_daily_file(data_root, name, target_day, expected[name]) for name in ["u", "v", "w", "prho"]}
+            raw = {name: open_dta_memmap(paths[name], metas[name]) for name in ["u", "v", "w", "prho"]}
+        neighbors = open_neighbor_center_tables(centers, target_day)
+        grid = rebuild_object_w(raw, metas, centers, obj, neighbors, args)
+        distance_km, distance_over_r = crossing_distance_for_object(obj, target_lat)
+        grid.update(
+            {
+                "target_lat": target_lat,
+                "crossing_distance_km": distance_km,
+                "crossing_distance_over_r": distance_over_r,
+                "crossing_selection_mode": "domain_bbox_composite" if selection_mode == "domain_bbox" else "strict_1r_crossing_composite",
+                "crossing_status": "domain_bbox" if selection_mode == "domain_bbox" else "strict_crossing",
+                "strict_crossing": selection_mode != "domain_bbox",
+                "nearest_fallback": False,
+                "skipped_no_crossing": False,
+                "intersect_radius_r": float(args.intersect_radius_r),
+            }
+        )
+        grid.update(classify_native_w_multipole(grid, args))
+        grid.update(align_native_w_to_dipole_phase(grid, args))
+        return idx, obj, grid
+
+    if selection_mode == "domain_bbox":
+        assert domain_bbox is not None
+        selection_class = str(getattr(args, "composite_selection_class", "")).strip().lower()
+        if not selection_class:
+            selection_class = "dipole"
+        domain_name = str(getattr(args, "composite_domain_name", "kuroshio_domain")).strip() or "domain_bbox"
+        composite_root = output_root / "w_native_meso50_500km_mode1_aligned_by_polarity" / f"composite_{token}_domain"
+        figures_dir = composite_root / "figures"
+        grids_dir = composite_root / "grids"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        grids_dir.mkdir(parents=True, exist_ok=True)
+
+        object_pool: list[SelectedObject] = []
+        for polarity in polarities:
+            object_pool.extend(
+                select_domain_objects(
+                    structures,
+                    bbox=domain_bbox,
+                    polarity=polarity,
+                    max_objects=int(args.composite_max_objects),
+                )
+            )
+        object_pool.sort(key=lambda item: (item.date, item.hua_object_id))
+        print(
+            f"[domain-composite] {domain_name}: {len(object_pool)} objects in bbox {format_bbox(domain_bbox)} before class filter; "
+            f"class={selection_class}; workers={workers}",
+            flush=True,
+        )
+
+        all_selected_accumulator: dict[str, object] | None = None
+        polarity_accumulators: dict[str, dict[str, object]] = {}
+        domain_detail_rows: list[dict[str, object]] = []
+        domain_summary_rows: list[dict[str, object]] = []
+
+        def consume_domain_grid(idx: int, obj: SelectedObject, grid: dict[str, object]) -> None:
+            nonlocal all_selected_accumulator
+            multipole_class = str(grid.get("multipole_class", "")).lower()
+            selected = multipole_class == selection_class
+            distance_km = float(grid["crossing_distance_km"])
+            distance_over_r = float(grid["crossing_distance_over_r"])
+            row = object_detail_row(target_lat, obj.polarity, obj, grid, distance_km, distance_over_r)
+            row.update(
+                {
+                    "region": domain_name,
+                    "region_mode": "domain_bbox",
+                    "domain_bbox": format_bbox(domain_bbox),
+                    "selected_for_region_composite": bool(selected),
+                    "selection_class": selection_class,
+                    "combine_polarities": False,
+                }
+            )
+            domain_detail_rows.append(row)
+            print(
+                f"[domain-composite] {idx}/{len(object_pool)} {obj.hua_object_id} "
+                f"{obj.polarity} {multipole_class} selected={selected}",
+                flush=True,
+            )
+            if not selected:
+                return
+            if all_selected_accumulator is None:
+                all_selected_accumulator = init_composite_accumulator(grid, target_lat, "all_polarities", args, multipole_class=selection_class)
+                all_selected_accumulator["region"] = domain_name
+                all_selected_accumulator["region_boxes"] = format_bbox(domain_bbox)
+            update_composite_accumulator(all_selected_accumulator, grid, args)
+            if obj.polarity not in polarity_accumulators:
+                polarity_accumulators[obj.polarity] = init_composite_accumulator(grid, target_lat, obj.polarity, args, multipole_class=selection_class)
+                polarity_accumulators[obj.polarity]["region"] = domain_name
+                polarity_accumulators[obj.polarity]["region_boxes"] = format_bbox(domain_bbox)
+            update_composite_accumulator(polarity_accumulators[obj.polarity], grid, args)
+
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(build_object_grid, item) for item in enumerate(object_pool, start=1)]
+                for future in as_completed(futures):
+                    idx, obj, grid = future.result()
+                    consume_domain_grid(idx, obj, grid)
+        else:
+            for item in enumerate(object_pool, start=1):
+                idx, obj, grid = build_object_grid(item)
+                consume_domain_grid(idx, obj, grid)
+
+        if all_selected_accumulator is None:
+            domain_summary_rows.append(
+                {
+                    "target_lat": target_lat,
+                    "polarity": "all_polarities",
+                    "region": domain_name,
+                    "object_count": 0,
+                    "selection_class": selection_class,
+                    "domain_bbox": format_bbox(domain_bbox),
+                    "status": "no_selected_objects",
+                }
+            )
+        else:
+            reference_composite = finalize_composite_accumulator(all_selected_accumulator, args)
+            reference_composite["region"] = domain_name
+            reference_composite["selection_class"] = selection_class
+            for polarity, accumulator in sorted(polarity_accumulators.items()):
+                composite = finalize_composite_accumulator(accumulator, args)
+                composite["region"] = domain_name
+                composite["selection_class"] = selection_class
+                composite["region_boxes"] = format_bbox(domain_bbox)
+                attach_reference_native(composite, reference_composite)
+                composite["reference_multipole_class"] = f"{selection_class}_all_polarities"
+                domain_summary_rows.append(write_region_composite_outputs(composite, token, domain_name, polarity, selection_class, grids_dir, figures_dir))
+
+        write_csv(composite_root / f"composite_{token}_domain_summary.csv", domain_summary_rows)
+        write_json(composite_root / f"composite_{token}_domain_summary.json", domain_summary_rows)
+        write_csv(composite_root / f"composite_{token}_domain_objects.csv", domain_detail_rows)
+        return
+
+    if str(getattr(args, "composite_region_mode", "none")).lower() == "longitude_bins":
+        regions = parse_composite_region_boxes(str(getattr(args, "composite_region_boxes", "")))
+        if not regions:
+            raise ValueError("--composite-region-boxes did not define any valid longitude bins")
+        selection_class = str(getattr(args, "composite_selection_class", "")).strip().lower()
+        combine_polarities = bool(getattr(args, "composite_combine_polarities", False))
+        region_label = "all_polarities" if combine_polarities else "by_polarity"
+        composite_root = output_root / "w_native_meso50_500km_mode1_aligned_by_polarity" / f"composite_{token}_crossing_regions"
+        figures_dir = composite_root / "figures"
+        grids_dir = composite_root / "grids"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        grids_dir.mkdir(parents=True, exist_ok=True)
+
+        object_pool: list[SelectedObject] = []
+        for polarity in polarities:
+            object_pool.extend(
+                select_strict_crossing_objects(
+                    structures,
+                    target_lat=target_lat,
+                    polarity=polarity,
+                    intersect_radius_r=float(args.intersect_radius_r),
+                    max_objects=int(args.composite_max_objects),
+                )
+            )
+        object_pool.sort(key=lambda item: (item.date, item.hua_object_id))
+        print(
+            f"[crossing-composite-region] {token}: {len(object_pool)} strict-crossing objects before class/region filters; "
+            f"class={selection_class or 'all'}; regions={','.join(regions)}; workers={workers}",
+            flush=True,
+        )
+
+        all_selected_accumulator: dict[str, object] | None = None
+        region_accumulators: dict[tuple[str, str], dict[str, object]] = {}
+        region_detail_rows: list[dict[str, object]] = []
+
+        def consume_region_grid(idx: int, obj: SelectedObject, grid: dict[str, object]) -> None:
+            nonlocal all_selected_accumulator
+            multipole_class = str(grid.get("multipole_class", "")).lower()
+            region = assign_composite_region(float(obj.center_lon), regions)
+            selected = (not selection_class or multipole_class == selection_class) and region is not None
+            distance_km = float(grid["crossing_distance_km"])
+            distance_over_r = float(grid["crossing_distance_over_r"])
+            row = object_detail_row(target_lat, obj.polarity, obj, grid, distance_km, distance_over_r)
+            row.update(
+                {
+                    "region": region or "",
+                    "region_mode": "longitude_bins",
+                    "selected_for_region_composite": bool(selected),
+                    "selection_class": selection_class or "all",
+                    "combine_polarities": combine_polarities,
+                }
+            )
+            region_detail_rows.append(row)
+            print(
+                f"[crossing-composite-region] {idx}/{len(object_pool)} {obj.hua_object_id} "
+                f"{obj.polarity} {multipole_class} region={region or 'none'} selected={selected}",
+                flush=True,
+            )
+            if not selected:
+                return
+            composite_class = selection_class or "all"
+            if all_selected_accumulator is None:
+                all_selected_accumulator = init_composite_accumulator(grid, target_lat, region_label, args, multipole_class=composite_class)
+                all_selected_accumulator["region"] = "all_regions"
+                all_selected_accumulator["region_boxes"] = format_region_boxes(regions)
+            update_composite_accumulator(all_selected_accumulator, grid, args)
+            group_polarity = "all_polarities" if combine_polarities else obj.polarity
+            key = (region, group_polarity)
+            if key not in region_accumulators:
+                region_accumulators[key] = init_composite_accumulator(grid, target_lat, group_polarity, args, multipole_class=composite_class)
+                region_accumulators[key]["region"] = region
+                region_accumulators[key]["region_boxes"] = format_region_boxes(regions)
+            update_composite_accumulator(region_accumulators[key], grid, args)
+
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(build_object_grid, item) for item in enumerate(object_pool, start=1)]
+                for future in as_completed(futures):
+                    idx, obj, grid = future.result()
+                    consume_region_grid(idx, obj, grid)
+        else:
+            for item in enumerate(object_pool, start=1):
+                idx, obj, grid = build_object_grid(item)
+                consume_region_grid(idx, obj, grid)
+
+        if all_selected_accumulator is None:
+            summary_rows.append(
+                {
+                    "target_lat": target_lat,
+                    "polarity": region_label,
+                    "region": "",
+                    "object_count": 0,
+                    "selection_class": selection_class or "all",
+                    "status": "no_selected_objects",
+                }
+            )
+        else:
+            reference_composite = finalize_composite_accumulator(all_selected_accumulator, args)
+            reference_composite["region"] = "all_regions"
+            reference_composite["selection_class"] = selection_class or "all"
+            for (region, group_polarity), accumulator in sorted(region_accumulators.items()):
+                composite = finalize_composite_accumulator(accumulator, args)
+                composite["region"] = region
+                composite["selection_class"] = selection_class or "all"
+                composite["region_boxes"] = format_region_boxes(regions)
+                attach_reference_native(composite, reference_composite)
+                composite["reference_multipole_class"] = f"{selection_class or 'selected'}_all_regions"
+                summary_rows.append(write_region_composite_outputs(composite, token, region, group_polarity, selection_class or "all", grids_dir, figures_dir))
+
+        write_csv(composite_root / f"composite_{token}_crossing_region_summary.csv", summary_rows)
+        write_json(composite_root / f"composite_{token}_crossing_region_summary.json", summary_rows)
+        write_csv(composite_root / f"composite_{token}_crossing_region_objects.csv", region_detail_rows)
+        return
+
+    for polarity in polarities:
+        objects = select_strict_crossing_objects(
+            structures,
+            target_lat=target_lat,
+            polarity=polarity,
+            intersect_radius_r=float(args.intersect_radius_r),
+            max_objects=int(args.composite_max_objects),
+        )
+        if not objects:
+            print(f"[crossing-composite] {token} {polarity}: no strict crossing objects", flush=True)
+            summary_rows.append({"target_lat": target_lat, "polarity": polarity, "object_count": 0, "status": "no_objects"})
+            continue
+
+        print(f"[crossing-composite] {token} {polarity}: {len(objects)} objects; workers={workers}", flush=True)
+        accumulator_all: dict[str, object] | None = None
+        class_accumulators: dict[str, dict[str, object]] = {}
+
+        if workers > 1:
+            futures = []
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for item in enumerate(objects, start=1):
+                    futures.append(executor.submit(build_object_grid, item))
+                for future in as_completed(futures):
+                    idx, obj, grid = future.result()
+                    print(f"[crossing-composite] {polarity} {idx}/{len(objects)} {obj.hua_object_id} {grid['multipole_class']}", flush=True)
+                    if accumulator_all is None:
+                        accumulator_all = init_composite_accumulator(grid, target_lat, polarity, args, multipole_class="all")
+                    update_composite_accumulator(accumulator_all, grid, args)
+                    multipole_class = str(grid["multipole_class"])
+                    if multipole_class not in class_accumulators:
+                        class_accumulators[multipole_class] = init_composite_accumulator(grid, target_lat, polarity, args, multipole_class=multipole_class)
+                    update_composite_accumulator(class_accumulators[multipole_class], grid, args)
+                    distance_km = float(grid["crossing_distance_km"])
+                    distance_over_r = float(grid["crossing_distance_over_r"])
+                    detail_rows.append(object_detail_row(target_lat, polarity, obj, grid, distance_km, distance_over_r))
+        else:
+            for idx, obj in enumerate(objects, start=1):
+                print(f"[crossing-composite] {polarity} {idx}/{len(objects)} {obj.hua_object_id}", flush=True)
+                _, obj, grid = build_object_grid((idx, obj))
+                if accumulator_all is None:
+                    accumulator_all = init_composite_accumulator(grid, target_lat, polarity, args, multipole_class="all")
+                update_composite_accumulator(accumulator_all, grid, args)
+                multipole_class = str(grid["multipole_class"])
+                if multipole_class not in class_accumulators:
+                    class_accumulators[multipole_class] = init_composite_accumulator(grid, target_lat, polarity, args, multipole_class=multipole_class)
+                update_composite_accumulator(class_accumulators[multipole_class], grid, args)
+                distance_km = float(grid["crossing_distance_km"])
+                distance_over_r = float(grid["crossing_distance_over_r"])
+                detail_rows.append(object_detail_row(target_lat, polarity, obj, grid, distance_km, distance_over_r))
+
+        if accumulator_all is None:
+            continue
+        all_composite = finalize_composite_accumulator(accumulator_all, args)
+        summary_rows.append(write_composite_outputs(all_composite, token, polarity, "all", grids_dir, figures_dir))
+        for multipole_class in sorted(class_accumulators):
+            composite = finalize_composite_accumulator(class_accumulators[multipole_class], args)
+            attach_reference_native(composite, all_composite)
+            summary_rows.append(write_composite_outputs(composite, token, polarity, multipole_class, grids_dir, figures_dir))
+
+    write_csv(composite_root / f"composite_{token}_crossing_summary.csv", summary_rows)
+    write_json(composite_root / f"composite_{token}_crossing_summary.json", summary_rows)
+    write_csv(composite_root / f"composite_{token}_crossing_objects.csv", detail_rows)
+
+
+def select_strict_crossing_objects(structures: pd.DataFrame, target_lat: float, polarity: str, intersect_radius_r: float, max_objects: int) -> list[SelectedObject]:
+    objects = [summarize_object(part) for _, part in structures.groupby("hua_object_id", sort=False) if len(part) >= 2]
+    selected = []
+    for obj in objects:
+        if obj.polarity != polarity:
+            continue
+        _, distance_over_r = crossing_distance_for_object(obj, target_lat)
+        if distance_over_r <= intersect_radius_r:
+            selected.append(obj)
+    selected.sort(key=lambda item: (item.pass_layers, -crossing_distance_for_object(item, target_lat)[1], item.radius_km), reverse=True)
+    if max_objects > 0:
+        selected = selected[:max_objects]
+    return selected
+
+
+def select_domain_objects(structures: pd.DataFrame, bbox: tuple[float, float, float, float], polarity: str, max_objects: int) -> list[SelectedObject]:
+    lon_min, lon_max, lat_min, lat_max = bbox
+    lat_lo, lat_hi = sorted([lat_min, lat_max])
+    objects = [summarize_object(part) for _, part in structures.groupby("hua_object_id", sort=False) if len(part) >= 2]
+    selected = []
+    for obj in objects:
+        if obj.polarity != polarity:
+            continue
+        if lon_in_region_box(float(obj.center_lon), lon_min, lon_max) and lat_lo <= float(obj.center_lat) <= lat_hi:
+            selected.append(obj)
+    selected.sort(key=lambda item: (item.pass_layers, item.radius_km, item.date, item.hua_object_id), reverse=True)
+    if max_objects > 0:
+        selected = selected[:max_objects]
+    return selected
+
+
+def crossing_distance_for_object(obj: SelectedObject, target_lat: float) -> tuple[float, float]:
+    distance_km = abs(obj.center_lat - target_lat) * meters_per_degree(target_lat)[1] / 1000.0
+    distance_over_r = distance_km / obj.radius_km if obj.radius_km > 0 else math.inf
+    return float(distance_km), float(distance_over_r)
+
+
+def parse_composite_region_boxes(value: str) -> dict[str, list[tuple[float, float]]]:
+    regions: dict[str, list[tuple[float, float]]] = {}
+    for item in value.split(";"):
+        if not item.strip() or ":" not in item:
+            continue
+        name, raw_boxes = item.split(":", 1)
+        name = safe_token(name.strip())
+        boxes: list[tuple[float, float]] = []
+        for raw_box in raw_boxes.split("|"):
+            pieces = [piece.strip() for piece in raw_box.split(",") if piece.strip()]
+            if len(pieces) != 2:
+                continue
+            boxes.append((normalize_lon360(float(pieces[0])), normalize_lon360(float(pieces[1]))))
+        if name and boxes:
+            regions[name] = boxes
+    return regions
+
+
+def format_region_boxes(regions: dict[str, list[tuple[float, float]]]) -> str:
+    parts = []
+    for name, boxes in regions.items():
+        parts.append(f"{name}:" + "|".join(f"{lon0:g},{lon1:g}" for lon0, lon1 in boxes))
+    return ";".join(parts)
+
+
+def normalize_lon360(lon: float) -> float:
+    out = float(lon) % 360.0
+    return out + 360.0 if out < 0 else out
+
+
+def lon_in_region_box(lon: float, lon0: float, lon1: float) -> bool:
+    lon = normalize_lon360(lon)
+    lon0 = normalize_lon360(lon0)
+    lon1 = normalize_lon360(lon1)
+    if math.isclose(lon0, lon1):
+        return True
+    if lon0 < lon1:
+        return lon0 <= lon < lon1
+    return lon >= lon0 or lon < lon1
+
+
+def assign_composite_region(lon: float, regions: dict[str, list[tuple[float, float]]]) -> str | None:
+    for name, boxes in regions.items():
+        if any(lon_in_region_box(lon, lon0, lon1) for lon0, lon1 in boxes):
+            return name
+    return None
+
+
+def object_detail_row(target_lat: float, polarity: str, obj: SelectedObject, grid: dict[str, object], distance_km: float, distance_over_r: float) -> dict[str, object]:
+    return {
+        "target_lat": target_lat,
+        "polarity": polarity,
+        "hua_object_id": obj.hua_object_id,
+        "date": obj.date,
+        "pass_layers": obj.pass_layers,
+        "center_lon": obj.center_lon,
+        "center_lat": obj.center_lat,
+        "radius_km": obj.radius_km,
+        "crossing_distance_km": distance_km,
+        "crossing_distance_over_r": distance_over_r,
+        "multipole_class": str(grid.get("multipole_class", "")),
+        "multipole_qc_status": str(grid.get("multipole_qc_status", "")),
+        "multipole_zero_crossings": int(grid.get("multipole_zero_crossings", -1)),
+        "multipole_valid_azimuth_count": int(grid.get("multipole_valid_azimuth_count", 0)),
+        "multipole_azimuth_count": int(grid.get("multipole_azimuth_count", 0)),
+        "multipole_valid_azimuth_fraction": float(grid.get("multipole_valid_azimuth_fraction", float("nan"))),
+        "multipole_boundary_nan_fraction": float(grid.get("multipole_boundary_nan_fraction", float("nan"))),
+        "multipole_amp_1e6_m_s": float(grid.get("multipole_amp_1e6_m_s", float("nan"))),
+        "multipole_snr": float(grid.get("multipole_snr", float("nan"))),
+        "multipole_dominant_mode": int(grid.get("multipole_dominant_mode", -1)),
+        "multipole_harmonic_dominance": float(grid.get("multipole_harmonic_dominance", float("nan"))),
+        "multipole_depth_range_m": str(grid.get("multipole_depth_range_m", "")),
+        "multipole_radius_ring_r": str(grid.get("multipole_radius_ring_r", "")),
+        "multipole_native_w_source": str(grid.get("multipole_native_w_source", "")),
+        "native_w_meso_filter": str(grid.get("native_w_meso_filter", "")),
+        "native_w_phase_alignment": str(grid.get("native_w_phase_alignment", "")),
+        "dipole_phase_angle_deg": float(grid.get("dipole_phase_angle_deg", float("nan"))),
+        "dipole_phase_valid": bool(grid.get("dipole_phase_valid", False)),
+        "corr_rebuild_native": float(grid["corr_rebuild_native"]),
+        "q95_abs_rebuild_1e6_m_s": float(grid["q95_abs_rebuild_1e6_m_s"]),
+        "q95_abs_native_1e6_m_s": float(grid["q95_abs_native_1e6_m_s"]),
+    }
+
+
+def classify_native_w_multipole(grid: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    if "ofes_w_native_meso_m_s" in grid:
+        native_source = "ofes_w_native_meso_m_s"
+    elif "ofes_w_native_raw_m_s" in grid:
+        native_source = "ofes_w_native_raw_m_s"
+    else:
+        native_source = "ofes_w_native_m_s"
+    native = np.asarray(grid[native_source], dtype="f4")
+    depth = np.asarray(grid["depth_m"], dtype="f4")
+    x = np.asarray(grid["x_over_r"], dtype="f4")
+    y = np.asarray(grid["y_over_r"], dtype="f4")
+    dmin = float(getattr(args, "multipole_depth_min_m", 300.0))
+    dmax = float(getattr(args, "multipole_depth_max_m", 500.0))
+    r_inner = float(getattr(args, "multipole_radius_inner_r", 0.0))
+    r_outer = float(getattr(args, "multipole_radius_outer_r", 1.0))
+    n_azimuth = max(12, int(getattr(args, "multipole_azimuth_count", 60)))
+    min_valid_azimuth_fraction = float(getattr(args, "multipole_min_valid_azimuth_fraction", 0.80))
+    min_sector_valid_fraction = float(getattr(args, "multipole_min_sector_valid_fraction", 0.35))
+    boundary_max_nan_fraction = float(getattr(args, "multipole_boundary_max_nan_fraction", 0.35))
+    min_amp = float(getattr(args, "multipole_min_amp_1e6_m_s", 0.5)) * 1.0e-6
+    min_snr = float(getattr(args, "multipole_min_snr", 2.0))
+    min_harmonic_dominance = float(getattr(args, "multipole_min_harmonic_dominance", 1.1))
+    r_inner = max(0.0, min(r_inner, r_outer))
+    depth_mask = (depth >= min(dmin, dmax)) & (depth <= max(dmin, dmax))
+    if not np.any(depth_mask):
+        depth_mask = np.isfinite(depth)
+    with np.errstate(invalid="ignore"):
+        field = np.nanmean(native[depth_mask], axis=0)
+    xx, yy = np.meshgrid(x, y, indexing="xy")
+    rr = np.hypot(xx, yy)
+    boundary_inner = max(r_inner, r_outer * 0.85)
+    boundary = (rr >= boundary_inner) & (rr <= r_outer)
+    boundary_count = int(np.count_nonzero(boundary))
+    boundary_nan_fraction = float(np.count_nonzero(boundary & ~np.isfinite(field)) / boundary_count) if boundary_count else 1.0
+    values = np.full(n_azimuth, np.nan, dtype="f4")
+    sector_std = np.full(n_azimuth, np.nan, dtype="f4")
+    sector_valid_fraction = np.zeros(n_azimuth, dtype="f4")
+    sector_valid_count = np.zeros(n_azimuth, dtype="i4")
+    width = 2.0 * np.pi / float(n_azimuth)
+    radial_count = max(24, int(math.ceil((r_outer - r_inner) / max(float(np.nanmedian(np.abs(np.diff(x)))) if x.size > 1 else 0.1, 1.0e-6))))
+    radial_r = np.linspace(r_inner, r_outer, radial_count, dtype="f8")
+    radial_length = max(r_outer - r_inner, 1.0e-12)
+    for i in range(n_azimuth):
+        center = (i + 0.5) * width
+        ray_x = radial_r * math.cos(center)
+        ray_y = radial_r * math.sin(center)
+        if x.size < 2 or y.size < 2:
+            continue
+        ray_ix = (ray_x - float(x[0])) / float(x[1] - x[0])
+        ray_iy = (ray_y - float(y[0])) / float(y[1] - y[0])
+        samples = ndimage.map_coordinates(field, np.vstack([ray_iy, ray_ix]), order=1, mode="constant", cval=np.nan)
+        finite_ray = np.isfinite(samples)
+        valid_count = int(np.count_nonzero(finite_ray))
+        sector_valid_count[i] = valid_count
+        sector_valid_fraction[i] = valid_count / float(radial_count)
+        if sector_valid_fraction[i] >= min_sector_valid_fraction:
+            if valid_count >= 2:
+                integral = float(np.trapezoid(samples[finite_ray], radial_r[finite_ray]))
+                values[i] = integral / radial_length
+            elif valid_count == 1:
+                values[i] = float(samples[finite_ray][0])
+            sector_std[i] = float(np.nanstd(samples[finite_ray]))
+    valid = np.isfinite(values)
+    valid_count = int(np.count_nonzero(valid))
+    valid_fraction = valid_count / float(n_azimuth)
+    qc_status = "pass"
+    centered = values.copy()
+    centered_smooth = values.copy()
+    zero_crossings = -1
+    dominant_mode = -1
+    harmonic_dominance = float("nan")
+    amplitude = float("nan")
+    snr = float("nan")
+    phase_rad = float("nan")
+    phase_valid = False
+    if valid_count < max(4, int(math.ceil(n_azimuth * min_valid_azimuth_fraction))):
+        label = "qc_sparse_azimuth"
+        qc_status = "fail_sparse_azimuth"
+    elif boundary_nan_fraction > boundary_max_nan_fraction:
+        label = "qc_missing_boundary"
+        qc_status = "fail_missing_boundary"
+    else:
+        centered[valid] = centered[valid] - float(np.nanmean(centered[valid]))
+        filled = fill_circular_values(centered)
+        centered_smooth = ndimage.gaussian_filter1d(filled.astype("f4"), sigma=1.0, mode="wrap")
+        zero_crossings = count_circular_zero_crossings(centered_smooth)
+        amplitude = q95_abs(centered_smooth)
+        finite_std = sector_std[np.isfinite(sector_std)]
+        if finite_std.size:
+            noise = float(np.nanmedian(finite_std / np.sqrt(np.maximum(sector_valid_count[np.isfinite(sector_std)], 1))))
+        else:
+            diff = np.diff(np.r_[centered_smooth, centered_smooth[0]])
+            noise = float(1.4826 * np.nanmedian(np.abs(diff - np.nanmedian(diff))) / math.sqrt(2.0))
+        noise = max(noise, 1.0e-12)
+        snr = amplitude / noise
+        harmonics = circular_harmonic_amplitudes(centered_smooth, max_mode=4)
+        centers = (np.arange(n_azimuth, dtype="f8") + 0.5) * width
+        c1 = np.nanmean(centered_smooth.astype("f8") * np.exp(-1j * centers))
+        if np.isfinite(c1.real) and np.isfinite(c1.imag) and np.abs(c1) > 0.0:
+            phase_rad = float(-np.angle(c1))
+            phase_valid = True
+        if harmonics.size:
+            dominant_mode = int(np.nanargmax(harmonics) + 1)
+            sorted_h = np.sort(harmonics[np.isfinite(harmonics)])
+            harmonic_dominance = float(sorted_h[-1] / max(sorted_h[-2], 1.0e-12)) if sorted_h.size >= 2 else float("inf")
+        if amplitude < min_amp:
+            label = "qc_low_amplitude"
+            qc_status = "fail_low_amplitude"
+        elif snr < min_snr:
+            label = "qc_low_snr"
+            qc_status = "fail_low_snr"
+        elif harmonic_dominance < min_harmonic_dominance:
+            label = "qc_mixed_modes"
+            qc_status = "fail_mixed_modes"
+        elif zero_crossings <= 1:
+            label = "monopole"
+        elif zero_crossings == 2 and dominant_mode == 1:
+            label = "dipole"
+        elif zero_crossings == 4 and dominant_mode == 2:
+            label = "quadrupole"
+        else:
+            label = "other"
+    return {
+        "multipole_class": label,
+        "multipole_qc_status": qc_status,
+        "multipole_zero_crossings": int(zero_crossings),
+        "multipole_valid_azimuth_count": valid_count,
+        "multipole_azimuth_count": int(n_azimuth),
+        "multipole_valid_azimuth_fraction": float(valid_fraction),
+        "multipole_sector_valid_fraction": sector_valid_fraction,
+        "multipole_boundary_nan_fraction": float(boundary_nan_fraction),
+        "multipole_amp_1e6_m_s": float(amplitude * 1.0e6) if np.isfinite(amplitude) else float("nan"),
+        "multipole_snr": float(snr),
+        "multipole_dominant_mode": int(dominant_mode),
+        "multipole_harmonic_dominance": float(harmonic_dominance),
+        "multipole_azimuth_native_w_1e6_m_s": values * 1.0e6,
+        "multipole_azimuth_centered_native_w_1e6_m_s": centered_smooth * 1.0e6,
+        "multipole_depth_range_m": f"{min(dmin, dmax):g}-{max(dmin, dmax):g}",
+        "multipole_radius_ring_r": f"{r_inner:g}-{r_outer:g}",
+        "multipole_classifier": "native_w_60azimuth_true_radial_integral_qc",
+        "multipole_radial_sample_count": int(radial_count),
+        "multipole_native_w_source": native_source,
+        "dipole_phase_angle_rad": float(phase_rad),
+        "dipole_phase_angle_deg": float(np.degrees(phase_rad)) if phase_valid else float("nan"),
+        "dipole_phase_valid": bool(phase_valid and label == "dipole"),
+    }
+
+
+def fill_circular_values(values: np.ndarray) -> np.ndarray:
+    finite = np.asarray(values, dtype="f8")
+    if not np.any(np.isfinite(finite)):
+        return np.full(finite.shape, np.nan, dtype="f8")
+    filled = finite.copy()
+    valid_idx = np.flatnonzero(np.isfinite(filled))
+    if valid_idx.size == 1:
+        filled[~np.isfinite(filled)] = filled[valid_idx[0]]
+        return filled
+    idx = np.arange(filled.size)
+    extended_idx = np.r_[valid_idx, valid_idx[0] + filled.size]
+    extended_values = np.r_[filled[valid_idx], filled[valid_idx[0]]]
+    return np.interp(idx, extended_idx, extended_values, period=filled.size)
+
+
+def align_native_w_to_dipole_phase(grid: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    source_key = "ofes_w_native_meso_m_s" if "ofes_w_native_meso_m_s" in grid else "ofes_w_native_m_s"
+    source = np.asarray(grid[source_key], dtype="f4")
+    enabled = bool(getattr(args, "native_w_phase_align", True))
+    phase = float(grid.get("dipole_phase_angle_rad", float("nan")))
+    phase_valid = bool(grid.get("dipole_phase_valid", False))
+    is_dipole = str(grid.get("multipole_class", "")).lower() == "dipole"
+    if not (enabled and phase_valid and is_dipole and np.isfinite(phase)):
+        return {
+            "ofes_w_native_meso_aligned_m_s": source.copy(),
+            "native_w_phase_alignment": "not_applied",
+            "native_w_phase_alignment_reason": "disabled_or_not_valid_dipole",
+            "native_w_phase_alignment_source": source_key,
+        }
+
+    x = np.asarray(grid["x_over_r"], dtype="f8")
+    y = np.asarray(grid["y_over_r"], dtype="f8")
+    aligned = rotate_3d_field_by_phase(source, x, y, phase)
+    return {
+        "ofes_w_native_meso_aligned_m_s": aligned,
+        "native_w_phase_alignment": "mode1_positive_lobe_to_plus_x",
+        "native_w_phase_alignment_reason": "applied",
+        "native_w_phase_alignment_source": source_key,
+        "native_w_phase_alignment_angle_rad": phase,
+        "native_w_phase_alignment_angle_deg": float(np.degrees(phase)),
+    }
+
+
+def rotate_3d_field_by_phase(values: np.ndarray, x: np.ndarray, y: np.ndarray, phase_rad: float) -> np.ndarray:
+    arr = np.asarray(values, dtype="f4")
+    if x.size < 2 or y.size < 2:
+        return arr.copy()
+    xx, yy = np.meshgrid(x, y, indexing="xy")
+    cos_p = math.cos(phase_rad)
+    sin_p = math.sin(phase_rad)
+    x_old = cos_p * xx - sin_p * yy
+    y_old = sin_p * xx + cos_p * yy
+    ix = (x_old - float(x[0])) / float(x[1] - x[0])
+    iy = (y_old - float(y[0])) / float(y[1] - y[0])
+    coords = np.vstack([iy.ravel(), ix.ravel()])
+    out = np.empty_like(arr, dtype="f4")
+    for k in range(arr.shape[0]):
+        out[k] = ndimage.map_coordinates(arr[k], coords, order=1, mode="constant", cval=np.nan).reshape(y.size, x.size)
+    return out
+
+
+def circular_harmonic_amplitudes(values: np.ndarray, max_mode: int = 4) -> np.ndarray:
+    filled = fill_circular_values(values)
+    if not np.any(np.isfinite(filled)):
+        return np.full(max_mode, np.nan, dtype="f8")
+    filled = filled - float(np.nanmean(filled))
+    coeff = np.fft.rfft(filled)
+    out = np.full(max_mode, np.nan, dtype="f8")
+    for mode in range(1, max_mode + 1):
+        if mode < coeff.size:
+            out[mode - 1] = float(np.abs(coeff[mode]))
+    return out
+
+
+def count_circular_zero_crossings(values: np.ndarray) -> int:
+    finite = np.asarray(values, dtype="f8")
+    if not np.any(np.isfinite(finite)):
+        return -1
+    valid_idx = np.flatnonzero(np.isfinite(finite))
+    if valid_idx.size < 2:
+        return -1
+    filled = fill_circular_values(finite)
+    eps = max(float(np.nanpercentile(np.abs(filled), 20)) * 0.05, 1.0e-20)
+    signs = np.sign(filled)
+    signs[np.abs(filled) <= eps] = 0.0
+    for i in range(signs.size):
+        if signs[i] == 0:
+            prev = signs[(i - 1) % signs.size]
+            nxt = signs[(i + 1) % signs.size]
+            signs[i] = prev if prev != 0 else nxt
+    return int(np.count_nonzero(signs != np.roll(signs, 1)))
 
 
 def select_crossing_objects(structures: pd.DataFrame, target_lats: list[float], intersect_radius_r: float, strict_only: bool) -> list[dict[str, object]]:
@@ -552,6 +1319,18 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
             cy_profile = cy_profile - c_bg_y
             c_method = f"{c_method}_minus_farfield_bg{bg_nlev}"
     support = np.isfinite(z_anom) & np.isfinite(u_for_rebuild) & np.isfinite(v_for_rebuild) & np.isfinite(native_w)
+    native_w_meso, native_w_meso_info = filter_native_w_meso(
+        native_w,
+        metas["w"],
+        lon_grid,
+        lat_grid,
+        depth,
+        x_over_r,
+        y_over_r,
+        obj,
+        args,
+    )
+    native_w_meso[~support] = np.nan
     cx3 = cx_profile[:, None, None]
     cy3 = cy_profile[:, None, None]
     rebuild_formula = str(getattr(args, "rebuild_formula", "relative_advection"))
@@ -577,6 +1356,7 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
         "term2_m_s": term2,
         "rebuild_w_m_s": rebuild_w,
         "ofes_w_native_m_s": native_w,
+        "ofes_w_native_meso_m_s": native_w_meso,
         "ofes_w_native_raw_m_s": native_w_raw,
         "u_for_rebuild_raw_m_s": u_raw,
         "v_for_rebuild_raw_m_s": v_raw,
@@ -618,7 +1398,6 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
         "eta_rho_max_abs_m": finite_max_abs(z_anom),
         "grad_eta_q95_abs": q95_abs(grad_eta_abs),
         "rebuild_density_filter": rebuild_density_filter,
-        **rebuild_density_temporal_info,
         "eta_horizontal_lowpass_sigma_r": float(getattr(args, "eta_horizontal_lowpass_sigma_r", 0.5)),
         "eta_horizontal_lowpass_sigma_cells": float(eta_sigma_cells),
         "density_bg_detrend_order": int(getattr(args, "density_bg_detrend_order", 1)),
@@ -630,6 +1409,7 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
         "grad_eta_q95_before_filter": float(grad_eta_q95_before_filter),
         "grad_eta_q95_after_filter": float(grad_eta_q95_after_filter),
         **scale_info,
+        **native_w_meso_info,
         **translation_filter_info,
         "u_rel_q95_before_filter": float(u_rel_q95_before_filter),
         "u_rel_q95_after_filter": float(u_rel_q95_after_filter),
@@ -853,6 +1633,96 @@ def filter_native_w_temporal(
         "native_w_filter_days_used": len(used),
         "native_w_filter_dates_used": ",".join(used),
         "native_w_filter_missing_dates": ",".join(missing),
+    }
+
+
+def filter_native_w_meso(
+    current_native_w: np.ndarray,
+    w_meta,
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    target_depth_m: np.ndarray,
+    x_over_r: np.ndarray,
+    y_over_r: np.ndarray,
+    obj: SelectedObject,
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, dict[str, object]]:
+    mode = str(getattr(args, "native_w_meso_filter", "temporal10d_spatial50_500km"))
+    if mode == "none":
+        return current_native_w.astype("f4"), {
+            "native_w_meso_filter": "none",
+            "native_w_meso_time_window_days": 1,
+            "native_w_meso_dates_used": str(obj.date),
+            "native_w_meso_missing_dates": "",
+            "native_w_meso_small_cutoff_km": float("nan"),
+            "native_w_meso_large_cutoff_km": float("nan"),
+            "native_w_meso_small_sigma_cells": float("nan"),
+            "native_w_meso_large_sigma_cells": float("nan"),
+        }
+
+    window = max(1, int(getattr(args, "native_w_meso_time_window_days", 10)))
+    target_day = parse_iso_date(obj.date)
+    start_day = parse_iso_date(str(getattr(args, "start", "1991-01-01")))
+    end_day = parse_iso_date(str(getattr(args, "end", "1991-01-19")))
+    before = (window - 1) // 2
+    after = window - 1 - before
+    days = [target_day + timedelta(days=offset) for offset in range(-before, after + 1)]
+    days = [day for day in days if start_day <= day <= end_day]
+
+    data_root = Path(getattr(args, "data_root", DEFAULT_DATA_ROOT))
+    expected = expected_dta_bytes(w_meta)
+    nlev = len(target_depth_m)
+    sample_nlev = min(w_meta.z.count, nlev + 1)
+    source_depth = w_meta.z.values[:sample_nlev].astype("f8")
+    accum = np.zeros_like(current_native_w, dtype="f8")
+    counts = np.zeros_like(current_native_w, dtype="f4")
+    used: list[str] = []
+    missing: list[str] = []
+
+    for day in days:
+        try:
+            path = require_daily_file(data_root, "w", day, expected)
+        except FileNotFoundError:
+            missing.append(day.isoformat())
+            continue
+        raw_w = open_dta_memmap(path, w_meta)
+        raw_sample = sample_stack(raw_w, w_meta, lon_grid, lat_grid, sample_nlev) / 100.0
+        aligned, _ = align_native_w_vertical(raw_sample, source_depth, target_depth_m, "layer_center")
+        finite = np.isfinite(aligned)
+        accum[finite] += aligned[finite]
+        counts[finite] += 1.0
+        used.append(day.isoformat())
+
+    if used:
+        temporal = np.divide(accum, counts, out=np.full_like(accum, np.nan), where=counts > 0).astype("f4")
+    else:
+        temporal = current_native_w.astype("f4")
+
+    small_cutoff_km = float(getattr(args, "native_w_meso_small_cutoff_km", 50.0))
+    large_cutoff_km = float(getattr(args, "native_w_meso_large_cutoff_km", 500.0))
+    # Treat the requested cutoff as an approximate Gaussian FWHM. This keeps the
+    # field mesoscale-focused without pretending to be a sharp spectral filter.
+    fwhm_to_sigma = 1.0 / 2.354820045
+    dx_km = max(float(np.nanmedian(np.abs(np.diff(x_over_r)))) * float(obj.radius_km), 1.0e-6)
+    dy_km = max(float(np.nanmedian(np.abs(np.diff(y_over_r)))) * float(obj.radius_km), 1.0e-6)
+    small_sigma = ((small_cutoff_km * fwhm_to_sigma) / dy_km, (small_cutoff_km * fwhm_to_sigma) / dx_km)
+    large_sigma = ((large_cutoff_km * fwhm_to_sigma) / dy_km, (large_cutoff_km * fwhm_to_sigma) / dx_km)
+    lp_small = nan_gaussian_smooth_3d(temporal, small_sigma)
+    lp_large = nan_gaussian_smooth_3d(temporal, large_sigma)
+    meso = (lp_small - lp_large).astype("f4")
+    return meso, {
+        "native_w_meso_filter": mode,
+        "native_w_meso_time_window_days": window,
+        "native_w_meso_days_used": len(used),
+        "native_w_meso_dates_used": ",".join(used),
+        "native_w_meso_missing_dates": ",".join(missing),
+        "native_w_meso_small_cutoff_km": small_cutoff_km,
+        "native_w_meso_large_cutoff_km": large_cutoff_km,
+        "native_w_meso_small_sigma_cells_y": float(small_sigma[0]),
+        "native_w_meso_small_sigma_cells_x": float(small_sigma[1]),
+        "native_w_meso_large_sigma_cells_y": float(large_sigma[0]),
+        "native_w_meso_large_sigma_cells_x": float(large_sigma[1]),
+        "native_w_meso_q95_1e6_m_s": q95_abs(meso) * 1.0e6,
     }
 
 
@@ -1380,8 +2250,9 @@ def nan_gaussian_smooth_1d(values: np.ndarray, sigma: float) -> np.ndarray:
     return np.divide(smoothed, weights, out=np.full_like(smoothed, np.nan), where=weights > 1.0e-8).astype("f4")
 
 
-def nan_gaussian_smooth_3d(values: np.ndarray, sigma_cells: float) -> np.ndarray:
-    if sigma_cells <= 0:
+def nan_gaussian_smooth_3d(values: np.ndarray, sigma_cells: float | tuple[float, float]) -> np.ndarray:
+    sigma_arr = np.asarray(sigma_cells, dtype="f8")
+    if np.all(sigma_arr <= 0):
         return values
     out = np.empty_like(values, dtype="f4")
     for k in range(values.shape[0]):
@@ -1395,6 +2266,345 @@ def nan_gaussian_smooth_2d(values: np.ndarray, sigma_cells: float) -> np.ndarray
     weights = ndimage.gaussian_filter(valid.astype("f8"), sigma=sigma_cells, mode="nearest")
     smoothed = ndimage.gaussian_filter(np.where(valid, arr, 0.0), sigma=sigma_cells, mode="nearest")
     return np.divide(smoothed, weights, out=np.full_like(smoothed, np.nan), where=weights > 1.0e-8).astype("f4")
+
+
+COMPOSITE_3D_KEYS = [
+    "term1_m_s",
+    "term2_m_s",
+    "rebuild_w_m_s",
+    "ofes_w_native_m_s",
+    "ofes_w_native_meso_m_s",
+    "ofes_w_native_meso_aligned_m_s",
+    "prho_for_rebuild",
+    "rho_prime_for_rebuild",
+    "z_rho_anom_m",
+]
+COMPOSITE_SECTION_KEYS = COMPOSITE_3D_KEYS
+COMPOSITE_PROFILE_KEYS = ["rho_bg", "rho_z_used", "prho_center_profile", "rho_prime_center_profile", "z_rho_center_profile"]
+
+
+def init_composite_accumulator(grid: dict[str, object], target_lat: float, polarity: str, args: argparse.Namespace, multipole_class: str = "all") -> dict[str, object]:
+    depth = np.asarray(grid["depth_m"], dtype="f4")
+    x = np.asarray(grid["x_over_r"], dtype="f4")
+    y = np.asarray(grid["y_over_r"], dtype="f4")
+    shape3 = (depth.size, y.size, x.size)
+    shape2 = (depth.size, x.size)
+    return {
+        "target_lat": float(target_lat),
+        "polarity": polarity,
+        "depth_m": depth,
+        "x_over_r": x,
+        "y_over_r": y,
+        "cressman_radius_r": float(args.cressman_radius_r),
+        "cressman_min_objects": int(args.cressman_min_objects),
+        "multipole_class": str(multipole_class),
+        "multipole_depth_min_m": float(getattr(args, "multipole_depth_min_m", 300.0)),
+        "multipole_depth_max_m": float(getattr(args, "multipole_depth_max_m", 500.0)),
+        "multipole_radius_inner_r": float(getattr(args, "multipole_radius_inner_r", 0.0)),
+        "multipole_radius_outer_r": float(getattr(args, "multipole_radius_outer_r", 1.0)),
+        "multipole_azimuth_count": int(getattr(args, "multipole_azimuth_count", 60)),
+        "multipole_min_valid_azimuth_fraction": float(getattr(args, "multipole_min_valid_azimuth_fraction", 0.80)),
+        "multipole_min_sector_valid_fraction": float(getattr(args, "multipole_min_sector_valid_fraction", 0.35)),
+        "multipole_boundary_max_nan_fraction": float(getattr(args, "multipole_boundary_max_nan_fraction", 0.35)),
+        "multipole_min_amp_1e6_m_s": float(getattr(args, "multipole_min_amp_1e6_m_s", 0.5)),
+        "multipole_min_snr": float(getattr(args, "multipole_min_snr", 2.0)),
+        "multipole_min_harmonic_dominance": float(getattr(args, "multipole_min_harmonic_dominance", 1.1)),
+        "native_w_meso_filter": str(getattr(args, "native_w_meso_filter", "temporal10d_spatial50_500km")),
+        "native_w_meso_time_window_days": int(getattr(args, "native_w_meso_time_window_days", 10)),
+        "native_w_meso_small_cutoff_km": float(getattr(args, "native_w_meso_small_cutoff_km", 50.0)),
+        "native_w_meso_large_cutoff_km": float(getattr(args, "native_w_meso_large_cutoff_km", 500.0)),
+        "native_w_phase_align": bool(getattr(args, "native_w_phase_align", True)),
+        "object_count": 0,
+        "object_ids": [],
+        "sum3d": {key: np.zeros(shape3, dtype="f8") for key in COMPOSITE_3D_KEYS},
+        "count3d": {key: np.zeros(shape3, dtype="u2") for key in COMPOSITE_3D_KEYS},
+        "sum_section": {key: np.zeros(shape2, dtype="f8") for key in COMPOSITE_SECTION_KEYS},
+        "count_section": {key: np.zeros(shape2, dtype="u2") for key in COMPOSITE_SECTION_KEYS},
+        "sum_profile": {key: np.zeros(depth.shape, dtype="f8") for key in COMPOSITE_PROFILE_KEYS},
+        "count_profile": {key: np.zeros(depth.shape, dtype="u2") for key in COMPOSITE_PROFILE_KEYS},
+    }
+
+
+def update_composite_accumulator(accumulator: dict[str, object], grid: dict[str, object], args: argparse.Namespace) -> None:
+    accumulator["object_count"] = int(accumulator["object_count"]) + 1
+    accumulator["object_ids"].append(str(grid["hua_object_id"]))
+    radius_r = float(args.cressman_radius_r)
+    x = np.asarray(accumulator["x_over_r"], dtype="f8")
+    y = np.asarray(accumulator["y_over_r"], dtype="f8")
+    kernel2d = cressman_kernel_2d(x, y, radius_r)
+    kernel1d = cressman_kernel_1d(x, radius_r)
+
+    for key in COMPOSITE_3D_KEYS:
+        mapped, support = cressman_map_3d(np.asarray(grid[key], dtype="f4"), kernel2d)
+        add_composite_array(accumulator["sum3d"][key], accumulator["count3d"][key], mapped, support)
+
+    sections = crossing_sections_for_keys(grid, COMPOSITE_SECTION_KEYS)
+    for key in COMPOSITE_SECTION_KEYS:
+        mapped, support = cressman_map_section(np.asarray(sections[key], dtype="f4"), kernel1d)
+        add_composite_array(accumulator["sum_section"][key], accumulator["count_section"][key], mapped, support)
+
+    cy = len(y) // 2
+    cx = len(x) // 2
+    profile_values = {
+        "rho_bg": np.asarray(grid["rho_bg"], dtype="f4"),
+        "rho_z_used": np.asarray(grid["rho_z_used"], dtype="f4"),
+        "prho_center_profile": np.asarray(grid["prho_for_rebuild"], dtype="f4")[:, cy, cx],
+        "rho_prime_center_profile": np.asarray(grid["rho_prime_for_rebuild"], dtype="f4")[:, cy, cx],
+        "z_rho_center_profile": np.asarray(grid["z_rho_anom_m"], dtype="f4")[:, cy, cx],
+    }
+    for key, values in profile_values.items():
+        valid = np.isfinite(values)
+        accumulator["sum_profile"][key][valid] += values[valid]
+        accumulator["count_profile"][key][valid] += 1
+
+
+def finalize_composite_accumulator(accumulator: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    min_objects = int(args.cressman_min_objects)
+    out: dict[str, object] = {
+        "target_lat": float(accumulator["target_lat"]),
+        "polarity": str(accumulator["polarity"]),
+        "object_count": int(accumulator["object_count"]),
+        "source_object_ids": ",".join(accumulator["object_ids"]),
+        "depth_m": np.asarray(accumulator["depth_m"], dtype="f4"),
+        "x_over_r": np.asarray(accumulator["x_over_r"], dtype="f4"),
+        "y_over_r": np.asarray(accumulator["y_over_r"], dtype="f4"),
+        "cressman_radius_r": float(accumulator["cressman_radius_r"]),
+        "cressman_min_objects": min_objects,
+        "multipole_class": str(accumulator["multipole_class"]),
+        "multipole_depth_min_m": float(accumulator["multipole_depth_min_m"]),
+        "multipole_depth_max_m": float(accumulator["multipole_depth_max_m"]),
+        "multipole_radius_inner_r": float(accumulator["multipole_radius_inner_r"]),
+        "multipole_radius_outer_r": float(accumulator["multipole_radius_outer_r"]),
+        "multipole_azimuth_count": int(accumulator["multipole_azimuth_count"]),
+        "multipole_min_valid_azimuth_fraction": float(accumulator["multipole_min_valid_azimuth_fraction"]),
+        "multipole_min_sector_valid_fraction": float(accumulator["multipole_min_sector_valid_fraction"]),
+        "multipole_boundary_max_nan_fraction": float(accumulator["multipole_boundary_max_nan_fraction"]),
+        "multipole_min_amp_1e6_m_s": float(accumulator["multipole_min_amp_1e6_m_s"]),
+        "multipole_min_snr": float(accumulator["multipole_min_snr"]),
+        "multipole_min_harmonic_dominance": float(accumulator["multipole_min_harmonic_dominance"]),
+        "native_w_meso_filter": str(accumulator["native_w_meso_filter"]),
+        "native_w_meso_time_window_days": int(accumulator["native_w_meso_time_window_days"]),
+        "native_w_meso_small_cutoff_km": float(accumulator["native_w_meso_small_cutoff_km"]),
+        "native_w_meso_large_cutoff_km": float(accumulator["native_w_meso_large_cutoff_km"]),
+        "native_w_phase_align": bool(accumulator["native_w_phase_align"]),
+        "composite_method": "strict_crossing_cressman_object_support",
+    }
+    for key in COMPOSITE_3D_KEYS:
+        values = finalize_sum_count(accumulator["sum3d"][key], accumulator["count3d"][key], min_objects)
+        out[f"composite_{key}"] = values
+        out[f"support_objects_{key}"] = accumulator["count3d"][key]
+    for key in COMPOSITE_SECTION_KEYS:
+        values = finalize_sum_count(accumulator["sum_section"][key], accumulator["count_section"][key], min_objects)
+        out[f"section_{key}"] = values
+        out[f"section_support_objects_{key}"] = accumulator["count_section"][key]
+    for key in COMPOSITE_PROFILE_KEYS:
+        values = finalize_sum_count(accumulator["sum_profile"][key], accumulator["count_profile"][key], 1)
+        out[f"profile_{key}"] = values
+        out[f"profile_support_objects_{key}"] = accumulator["count_profile"][key]
+
+    rebuild = out["composite_rebuild_w_m_s"]
+    native = out["composite_ofes_w_native_m_s"]
+    native_meso_aligned = out["composite_ofes_w_native_meso_aligned_m_s"]
+    section_rebuild = out["section_rebuild_w_m_s"]
+    section_native = out["section_ofes_w_native_m_s"]
+    section_native_meso_aligned = out["section_ofes_w_native_meso_aligned_m_s"]
+    support = out["support_objects_rebuild_w_m_s"]
+    out.update(
+        {
+            "corr_rebuild_native_3d": spatial_corr(rebuild, native),
+            "corr_rebuild_native_section": spatial_corr(section_rebuild, section_native),
+            "q95_abs_rebuild_1e6_m_s": q95_abs(rebuild) * 1.0e6,
+            "q95_abs_native_1e6_m_s": q95_abs(native) * 1.0e6,
+            "q95_abs_native_meso_aligned_1e6_m_s": q95_abs(native_meso_aligned) * 1.0e6,
+            "q95_abs_section_rebuild_1e6_m_s": q95_abs(section_rebuild) * 1.0e6,
+            "q95_abs_section_native_1e6_m_s": q95_abs(section_native) * 1.0e6,
+            "q95_abs_section_native_meso_aligned_1e6_m_s": q95_abs(section_native_meso_aligned) * 1.0e6,
+            "eta_rho_q95_abs_m": q95_abs(out["composite_z_rho_anom_m"]),
+            "rho_prime_q95_abs": q95_abs(out["composite_rho_prime_for_rebuild"]),
+            "rho_z_q95_abs": q95_abs(out["profile_rho_z_used"]),
+            "valid_grid_fraction": float(np.isfinite(rebuild).sum() / rebuild.size),
+            "valid_section_fraction": float(np.isfinite(section_rebuild).sum() / section_rebuild.size),
+            "mean_support_objects": float(np.nanmean(np.where(support > 0, support, np.nan))),
+            "max_support_objects": int(np.nanmax(support)) if support.size else 0,
+        }
+    )
+    return out
+
+
+def attach_reference_native(composite: dict[str, object], all_composite: dict[str, object]) -> None:
+    composite["reference_multipole_class"] = "all"
+    composite["reference_composite_ofes_w_native_m_s"] = np.asarray(all_composite["composite_ofes_w_native_m_s"], dtype="f4")
+    composite["reference_section_ofes_w_native_m_s"] = np.asarray(all_composite["section_ofes_w_native_m_s"], dtype="f4")
+    composite["reference_object_count"] = int(all_composite["object_count"])
+    composite["corr_rebuild_reference_native_section"] = spatial_corr(
+        np.asarray(composite["section_rebuild_w_m_s"], dtype="f4"),
+        np.asarray(composite["reference_section_ofes_w_native_m_s"], dtype="f4"),
+    )
+    composite["corr_class_native_reference_native_section"] = spatial_corr(
+        np.asarray(composite["section_ofes_w_native_m_s"], dtype="f4"),
+        np.asarray(composite["reference_section_ofes_w_native_m_s"], dtype="f4"),
+    )
+
+
+def write_composite_outputs(composite: dict[str, object], token: str, polarity: str, multipole_class: str, grids_dir: Path, figures_dir: Path) -> dict[str, object]:
+    class_token = safe_token(multipole_class)
+    stem = f"{token}_{polarity}_{class_token}_cressman"
+    npz_path = grids_dir / f"composite_{stem}.npz"
+    json_path = grids_dir / f"composite_{stem}.json"
+    np.savez_compressed(npz_path, **{key: value for key, value in composite.items() if isinstance(value, np.ndarray)})
+    scalar_payload = {key: json_safe(value) for key, value in composite.items() if not isinstance(value, np.ndarray)}
+    write_json(json_path, scalar_payload)
+
+    native_prefix = "native_w_meso_aligned" if "composite_ofes_w_native_meso_aligned_m_s" in composite else "native_w"
+    w_section = figures_dir / f"{native_prefix}_cross_section_{stem}.png"
+    w_focus = figures_dir / f"{native_prefix}_focus_300_500m_450m_surface_{stem}.png"
+    density_profiles = figures_dir / f"density_profiles_{stem}.png"
+    density_sections = figures_dir / f"density_sections_{stem}.png"
+    plot_composite_native_w_cross_section_pillow(composite, w_section)
+    plot_composite_native_w_focus_pillow(composite, w_focus)
+    plot_composite_density_profiles_pillow(composite, density_profiles)
+    plot_composite_density_sections_pillow(composite, density_sections)
+    return {
+        **scalar_payload,
+        "grid_npz": str(npz_path),
+        "grid_json": str(json_path),
+        "native_w_cross_section_image": str(w_section),
+        "native_w_focus_image": str(w_focus),
+        "density_profiles_image": str(density_profiles),
+        "density_sections_image": str(density_sections),
+        "status": "ok",
+    }
+
+
+def write_region_composite_outputs(
+    composite: dict[str, object],
+    token: str,
+    region: str,
+    polarity: str,
+    multipole_class: str,
+    grids_dir: Path,
+    figures_dir: Path,
+) -> dict[str, object]:
+    region_token = safe_token(region)
+    class_token = safe_token(multipole_class)
+    polarity_token = safe_token(polarity)
+    stem = f"{token}_{region_token}_{polarity_token}_{class_token}_cressman"
+    npz_path = grids_dir / f"composite_{stem}.npz"
+    json_path = grids_dir / f"composite_{stem}.json"
+    np.savez_compressed(npz_path, **{key: value for key, value in composite.items() if isinstance(value, np.ndarray)})
+    scalar_payload = {key: json_safe(value) for key, value in composite.items() if not isinstance(value, np.ndarray)}
+    write_json(json_path, scalar_payload)
+
+    native_prefix = "native_w_meso_aligned" if "composite_ofes_w_native_meso_aligned_m_s" in composite else "native_w"
+    w_section = figures_dir / f"{native_prefix}_cross_section_{stem}.png"
+    w_focus = figures_dir / f"{native_prefix}_focus_300_500m_450m_surface_{stem}.png"
+    plot_composite_native_w_cross_section_pillow(composite, w_section)
+    plot_composite_native_w_focus_pillow(composite, w_focus)
+    return {
+        **scalar_payload,
+        "grid_npz": str(npz_path),
+        "grid_json": str(json_path),
+        "native_w_cross_section_image": str(w_section),
+        "native_w_focus_image": str(w_focus),
+        "status": "ok",
+    }
+
+
+def cressman_kernel_2d(x: np.ndarray, y: np.ndarray, radius_r: float) -> np.ndarray:
+    dx = float(np.nanmedian(np.abs(np.diff(x)))) if x.size > 1 else radius_r
+    dy = float(np.nanmedian(np.abs(np.diff(y)))) if y.size > 1 else radius_r
+    nx = max(1, int(math.ceil(radius_r / max(dx, 1.0e-12))))
+    ny = max(1, int(math.ceil(radius_r / max(dy, 1.0e-12))))
+    ox = np.arange(-nx, nx + 1, dtype="f8") * dx
+    oy = np.arange(-ny, ny + 1, dtype="f8") * dy
+    xx, yy = np.meshgrid(ox, oy, indexing="xy")
+    d2 = xx * xx + yy * yy
+    r2 = radius_r * radius_r
+    weights = np.where(d2 <= r2, (r2 - d2) / np.maximum(r2 + d2, 1.0e-12), 0.0)
+    return weights.astype("f4")
+
+
+def cressman_kernel_1d(x: np.ndarray, radius_r: float) -> np.ndarray:
+    dx = float(np.nanmedian(np.abs(np.diff(x)))) if x.size > 1 else radius_r
+    nx = max(1, int(math.ceil(radius_r / max(dx, 1.0e-12))))
+    ox = np.arange(-nx, nx + 1, dtype="f8") * dx
+    d2 = ox * ox
+    r2 = radius_r * radius_r
+    weights = np.where(d2 <= r2, (r2 - d2) / np.maximum(r2 + d2, 1.0e-12), 0.0)
+    return weights.astype("f4")
+
+
+def cressman_map_3d(values: np.ndarray, kernel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    out = np.full(values.shape, np.nan, dtype="f4")
+    support = np.zeros(values.shape, dtype=bool)
+    for k in range(values.shape[0]):
+        valid = np.isfinite(values[k])
+        if not np.any(valid):
+            continue
+        numerator = ndimage.convolve(np.where(valid, values[k], 0.0).astype("f4"), kernel, mode="constant", cval=0.0)
+        denominator = ndimage.convolve(valid.astype("f4"), kernel, mode="constant", cval=0.0)
+        layer = np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 1.0e-8)
+        out[k] = layer
+        support[k] = np.isfinite(layer)
+    return out, support
+
+
+def cressman_map_section(values: np.ndarray, kernel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    out = np.full(values.shape, np.nan, dtype="f4")
+    support = np.zeros(values.shape, dtype=bool)
+    for k in range(values.shape[0]):
+        valid = np.isfinite(values[k])
+        if not np.any(valid):
+            continue
+        numerator = ndimage.convolve1d(np.where(valid, values[k], 0.0).astype("f4"), kernel, mode="constant", cval=0.0)
+        denominator = ndimage.convolve1d(valid.astype("f4"), kernel, mode="constant", cval=0.0)
+        line = np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 1.0e-8)
+        out[k] = line
+        support[k] = np.isfinite(line)
+    return out, support
+
+
+def add_composite_array(total: np.ndarray, count: np.ndarray, mapped: np.ndarray, support: np.ndarray) -> None:
+    valid = support & np.isfinite(mapped)
+    total[valid] += mapped[valid]
+    count[valid] += 1
+
+
+def finalize_sum_count(total: np.ndarray, count: np.ndarray, min_count: int) -> np.ndarray:
+    threshold = max(1, int(min_count))
+    return np.divide(total, count, out=np.full(total.shape, np.nan, dtype="f4"), where=count >= threshold).astype("f4")
+
+
+def crossing_sections_for_keys(grid: dict[str, object], keys: list[str]) -> dict[str, np.ndarray | float]:
+    x = np.asarray(grid["x_over_r"], dtype="f8")
+    y = np.asarray(grid["y_over_r"], dtype="f8")
+    depth = np.asarray(grid["depth_m"], dtype="f8")
+    target_y = (float(grid["target_lat"]) - float(grid["center_lat"])) * meters_per_degree(float(grid["center_lat"]))[1] / (float(grid["radius_km"]) * 1000.0)
+    if y.size < 2:
+        y_index = 0.0
+        center_y_index = 0.0
+    else:
+        y_index = (target_y - float(y[0])) / float(y[1] - y[0])
+        center_y_index = (0.0 - float(y[0])) / float(y[1] - y[0])
+    z_index = np.arange(depth.size, dtype="f8")[:, None]
+    x_index = np.arange(x.size, dtype="f8")[None, :]
+    out: dict[str, np.ndarray | float] = {"x_over_r": x, "depth_m": depth, "target_y_over_r": float(target_y)}
+    outside = target_y < float(y[0]) or target_y > float(y[-1])
+    for key in keys:
+        arr = np.asarray(grid[key], dtype="f4")
+        key_y_index = center_y_index if "aligned" in key else y_index
+        coords = np.vstack(
+            [
+                np.broadcast_to(z_index, (depth.size, x.size)).ravel(),
+                np.full(depth.size * x.size, key_y_index, dtype="f8"),
+                np.broadcast_to(x_index, (depth.size, x.size)).ravel(),
+            ]
+        )
+        sampled = ndimage.map_coordinates(arr, coords, order=1, mode="nearest").reshape(depth.size, x.size)
+        if outside and "aligned" not in key:
+            sampled[:] = np.nan
+        out[key] = sampled.astype("f4")
+    return out
 
 
 def plot_four_panel(grid: dict[str, object], png_path: Path, pdf_path: Path, backend: str) -> None:
@@ -1530,35 +2740,310 @@ def plot_crossing_four_panel_pillow(grid: dict[str, object], png_path: Path) -> 
     canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
 
 
-def crossing_sections(grid: dict[str, object]) -> dict[str, np.ndarray | float]:
-    x = np.asarray(grid["x_over_r"], dtype="f8")
-    y = np.asarray(grid["y_over_r"], dtype="f8")
-    depth = np.asarray(grid["depth_m"], dtype="f8")
-    target_y = (float(grid["target_lat"]) - float(grid["center_lat"])) * meters_per_degree(float(grid["center_lat"]))[1] / (float(grid["radius_km"]) * 1000.0)
-    if y.size < 2:
-        y_index = 0.0
-    else:
-        y_index = (target_y - float(y[0])) / float(y[1] - y[0])
-    z_index = np.arange(depth.size, dtype="f8")[:, None]
-    x_index = np.arange(x.size, dtype="f8")[None, :]
-    coords = np.vstack(
-        [
-            np.broadcast_to(z_index, (depth.size, x.size)).ravel(),
-            np.full(depth.size * x.size, y_index, dtype="f8"),
-            np.broadcast_to(x_index, (depth.size, x.size)).ravel(),
-        ]
+def preferred_native_w_composite_key(composite: dict[str, object], section: bool) -> tuple[str, str]:
+    prefix = "section_" if section else "composite_"
+    candidates = [
+        ("ofes_w_native_meso_aligned_m_s", "native W meso 50-500 km, mode-1 aligned"),
+        ("ofes_w_native_meso_m_s", "native W meso 50-500 km, unaligned"),
+        ("ofes_w_native_m_s", "native W layer-center"),
+    ]
+    for key, label in candidates:
+        full_key = f"{prefix}{key}"
+        if full_key in composite:
+            return full_key, label
+    return f"{prefix}ofes_w_native_m_s", "native W layer-center"
+
+
+def plot_composite_native_w_cross_section_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    native_key, native_label = preferred_native_w_composite_key(composite, section=True)
+    native = np.asarray(composite[native_key], dtype="f4")
+    vals = native[np.isfinite(native)]
+    lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
+    canvas = Image.new("RGB", (1050, 900), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(28)
+    main_font = load_font(20)
+    small_font = load_font(15)
+    class_text = str(composite.get("multipole_class", "all"))
+    region_text = str(composite.get("region", "")).strip()
+    region_suffix = f" | {region_text}" if region_text else ""
+    draw.text(
+        (35, 28),
+        f"Native W crossing section | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | {class_text}{region_suffix}",
+        fill=(20, 24, 32),
+        font=title_font,
     )
-    out: dict[str, np.ndarray | float] = {"x_over_r": x, "depth_m": depth, "target_y_over_r": float(target_y)}
-    for key in ["term1_m_s", "term2_m_s", "rebuild_w_m_s", "ofes_w_native_m_s"]:
-        arr = np.asarray(grid[key], dtype="f4")
-        sampled = ndimage.map_coordinates(arr, coords, order=1, mode="nearest").reshape(depth.size, x.size)
-        if target_y < float(y[0]) or target_y > float(y[-1]):
-            sampled[:] = np.nan
-        out[key] = sampled
-    return out
+    draw.text(
+        (35, 68),
+        f"{native_label}; objects={composite['object_count']}; Cressman R={composite['cressman_radius_r']}R; min objects={composite['cressman_min_objects']}; +/-{lim:.2g} x10^-6 m/s",
+        fill=(80, 88, 100),
+        font=small_font,
+    )
+    draw_section_field_pillow(canvas, (70, 125, 980, 830), x, depth, native * 1.0e6, -lim, lim, native_label, main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
 
 
-def draw_section_field_pillow(canvas: Image.Image, box: tuple[int, int, int, int], x: np.ndarray, depth: np.ndarray, data: np.ndarray, vmin: float, vmax: float, title: str, main_font, small_font) -> None:
+def plot_composite_native_w_focus_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    y = np.asarray(composite["y_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    native_key, native_label = preferred_native_w_composite_key(composite, section=False)
+    native = np.asarray(composite[native_key], dtype="f4")
+    rows = [
+        ("0-100 m surface", depth_average_indices(depth, 0.0, 100.0)),
+        ("300-500 m mean", depth_average_indices(depth, 300.0, 500.0)),
+        ("450 m slice", np.array([int(np.nanargmin(np.abs(depth - 450.0)))])),
+    ]
+    fields2d: list[tuple[str, np.ndarray]] = []
+    for row_name, idx in rows:
+        with np.errstate(invalid="ignore"):
+            fields2d.append((row_name, np.nanmean(native[idx], axis=0)))
+    finite_parts = [arr[np.isfinite(arr)] for _, arr in fields2d if np.isfinite(arr).any()]
+    vals = np.concatenate(finite_parts) if finite_parts else np.array([], dtype="f4")
+    lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
+    canvas = Image.new("RGB", (760, 1770), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(26)
+    main_font = load_font(16)
+    small_font = load_font(12)
+    region_text = str(composite.get("region", "")).strip()
+    region_suffix = f" | {region_text}" if region_text else ""
+    draw.text(
+        (35, 25),
+        f"Native W focus | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | {composite.get('multipole_class', 'all')}{region_suffix}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    draw.text((35, 62), f"{native_label}; objects={composite['object_count']}; +/-{lim:.2g} x10^-6 m/s", fill=(80, 88, 100), font=small_font)
+    for row_idx, (row_name, data) in enumerate(fields2d):
+        box = (70, 130 + row_idx * 535, 680, 630 + row_idx * 535)
+        draw.text((20, 105 + row_idx * 535), row_name, fill=(30, 36, 48), font=main_font)
+        draw_field_pillow(canvas, box, x, y, data * 1.0e6, -lim, lim, native_label, main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def plot_composite_w_cross_section_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    fields = [
+        ("term1", np.asarray(composite["section_term1_m_s"], dtype="f4")),
+        ("term2", np.asarray(composite["section_term2_m_s"], dtype="f4")),
+        ("rebuild W", np.asarray(composite["section_rebuild_w_m_s"], dtype="f4")),
+    ]
+    if "reference_section_ofes_w_native_m_s" in composite:
+        fields.extend(
+            [
+                ("native W all", np.asarray(composite["reference_section_ofes_w_native_m_s"], dtype="f4")),
+                (f"native W {composite['multipole_class']}", np.asarray(composite["section_ofes_w_native_m_s"], dtype="f4")),
+            ]
+        )
+    else:
+        fields.append(("OFES native W", np.asarray(composite["section_ofes_w_native_m_s"], dtype="f4")))
+    vals = np.concatenate([arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()])
+    lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
+    if len(fields) == 5:
+        canvas = Image.new("RGB", (2500, 1500), "white")
+        boxes = [(45, 125, 820, 710), (860, 125, 1635, 710), (1675, 125, 2450, 710), (450, 805, 1225, 1390), (1275, 805, 2050, 1390)]
+    else:
+        canvas = Image.new("RGB", (1900, 1450), "white")
+        boxes = [(65, 125, 915, 715), (995, 125, 1845, 715), (65, 790, 915, 1380), (995, 790, 1845, 1380)]
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(30)
+    main_font = load_font(20)
+    small_font = load_font(15)
+    class_text = str(composite.get("multipole_class", "all"))
+    region_text = str(composite.get("region", "")).strip()
+    region_suffix = f" | {region_text}" if region_text else ""
+    draw.text(
+        (45, 30),
+        f"OFES W Cressman composite crossing section | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | {class_text}{region_suffix}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    draw.text(
+        (45, 70),
+        f"objects={composite['object_count']}; Cressman R={composite['cressman_radius_r']}R; min objects={composite['cressman_min_objects']}; corr={composite['corr_rebuild_native_section']:.3f}; +/-{lim:.2g} x10^-6 m/s",
+        fill=(80, 88, 100),
+        font=small_font,
+    )
+    for box, (name, data) in zip(boxes, fields):
+        draw_section_field_pillow(canvas, box, x, depth, data * 1.0e6, -lim, lim, name, main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def plot_composite_w_focus_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    y = np.asarray(composite["y_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    field_defs = [
+        ("term1", np.asarray(composite["composite_term1_m_s"], dtype="f4")),
+        ("term2", np.asarray(composite["composite_term2_m_s"], dtype="f4")),
+        ("rebuild W", np.asarray(composite["composite_rebuild_w_m_s"], dtype="f4")),
+    ]
+    if "reference_composite_ofes_w_native_m_s" in composite:
+        field_defs.extend(
+            [
+                ("native W all", np.asarray(composite["reference_composite_ofes_w_native_m_s"], dtype="f4")),
+                (f"native W {composite['multipole_class']}", np.asarray(composite["composite_ofes_w_native_m_s"], dtype="f4")),
+            ]
+        )
+    else:
+        field_defs.append(("OFES native W", np.asarray(composite["composite_ofes_w_native_m_s"], dtype="f4")))
+    rows = [
+        ("0-100 m surface", depth_average_indices(depth, 0.0, 100.0)),
+        ("300-500 m mean", depth_average_indices(depth, 300.0, 500.0)),
+        ("450 m slice", np.array([int(np.nanargmin(np.abs(depth - 450.0)))])),
+    ]
+    fields2d: list[tuple[str, str, np.ndarray]] = []
+    for row_name, idx in rows:
+        for field_name, arr in field_defs:
+            with np.errstate(invalid="ignore"):
+                fields2d.append((row_name, field_name, np.nanmean(arr[idx], axis=0)))
+    vals = np.concatenate([arr[np.isfinite(arr)] for _, _, arr in fields2d if np.isfinite(arr).any()])
+    lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
+    ncols = len(field_defs)
+    canvas = Image.new("RGB", (610 * ncols + 80, 1770), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(30)
+    main_font = load_font(16)
+    small_font = load_font(12)
+    region_text = str(composite.get("region", "")).strip()
+    region_suffix = f" | {region_text}" if region_text else ""
+    draw.text(
+        (35, 25),
+        f"OFES W focus slices | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | {composite.get('multipole_class', 'all')}{region_suffix} | objects={composite['object_count']}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    for row_idx, (row_name, _) in enumerate(rows):
+        draw.text((15, 105 + row_idx * 535), row_name, fill=(30, 36, 48), font=main_font)
+        for col_idx, (field_name, arr3d) in enumerate(field_defs):
+            idx = row_idx * ncols + col_idx
+            _, _, data = fields2d[idx]
+            box = (40 + col_idx * 610, 130 + row_idx * 535, 585 + col_idx * 610, 630 + row_idx * 535)
+            draw_field_pillow(canvas, box, x, y, data * 1.0e6, -lim, lim, field_name, main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def plot_composite_w_slices_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    y = np.asarray(composite["y_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    fields = [
+        ("term1", np.asarray(composite["composite_term1_m_s"], dtype="f4")),
+        ("term2", np.asarray(composite["composite_term2_m_s"], dtype="f4")),
+        ("rebuild W", np.asarray(composite["composite_rebuild_w_m_s"], dtype="f4")),
+        ("OFES native W", np.asarray(composite["composite_ofes_w_native_m_s"], dtype="f4")),
+    ]
+    desired_depths = [50.0, 200.0, 500.0, 1000.0]
+    indices = [int(np.nanargmin(np.abs(depth - target))) for target in desired_depths if depth.size]
+    vals = np.concatenate([arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()])
+    lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
+    canvas = Image.new("RGB", (2420, 2300), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(30)
+    main_font = load_font(17)
+    small_font = load_font(13)
+    draw.text(
+        (40, 28),
+        f"OFES W Cressman composite horizontal slices | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | objects={composite['object_count']}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    box_w, box_h = 560, 510
+    x0, y0 = 35, 95
+    for row, k in enumerate(indices):
+        draw.text((20, y0 + row * box_h + 15), f"z={depth[k]:.0f} m", fill=(30, 36, 48), font=main_font)
+        for col, (name, arr) in enumerate(fields):
+            box = (x0 + col * 590, y0 + row * box_h, x0 + col * 590 + box_w, y0 + row * box_h + box_h - 25)
+            draw_field_pillow(canvas, box, x, y, arr[k] * 1.0e6, -lim, lim, name, main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def plot_composite_density_sections_pillow(composite: dict[str, object], png_path: Path) -> None:
+    x = np.asarray(composite["x_over_r"], dtype="f4")
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    fields = [
+        ("prho", np.asarray(composite["section_prho_for_rebuild"], dtype="f4"), "kg/m^3"),
+        ("rho prime", np.asarray(composite["section_rho_prime_for_rebuild"], dtype="f4"), "kg/m^3"),
+        ("z rho anomaly", np.asarray(composite["section_z_rho_anom_m"], dtype="f4"), "m"),
+        ("support", np.asarray(composite["section_support_objects_rebuild_w_m_s"], dtype="f4"), "objects"),
+    ]
+    canvas = Image.new("RGB", (1900, 1450), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(30)
+    main_font = load_font(20)
+    small_font = load_font(15)
+    draw.text(
+        (45, 30),
+        f"OFES density Cressman composite crossing section | {lat_label(float(composite['target_lat']))} | {composite['polarity']}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    draw.text((45, 70), f"objects={composite['object_count']}; support is object count after Cressman mapping", fill=(80, 88, 100), font=small_font)
+    boxes = [(65, 125, 915, 715), (995, 125, 1845, 715), (65, 790, 915, 1380), (995, 790, 1845, 1380)]
+    for box, (name, data, unit) in zip(boxes, fields):
+        finite = data[np.isfinite(data)]
+        if finite.size:
+            if name in {"rho prime", "z rho anomaly"}:
+                lim = max(float(np.nanpercentile(np.abs(finite), 95)), 1.0e-12)
+                vmin, vmax = -lim, lim
+            else:
+                vmin, vmax = float(np.nanpercentile(finite, 2)), float(np.nanpercentile(finite, 98))
+                if vmax <= vmin:
+                    vmax = vmin + 1.0
+        else:
+            vmin, vmax = -1.0, 1.0
+        draw_section_field_pillow(canvas, box, x, depth, data, vmin, vmax, f"{name} ({unit})", main_font, small_font, unit)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def plot_composite_density_profiles_pillow(composite: dict[str, object], png_path: Path) -> None:
+    depth = np.asarray(composite["depth_m"], dtype="f4")
+    profiles = [
+        ("rho_bg", np.asarray(composite["profile_rho_bg"], dtype="f4"), "kg/m^3"),
+        ("center prho", np.asarray(composite["profile_prho_center_profile"], dtype="f4"), "kg/m^3"),
+        ("center rho prime", np.asarray(composite["profile_rho_prime_center_profile"], dtype="f4"), "kg/m^3"),
+        ("rho_z used", np.asarray(composite["profile_rho_z_used"], dtype="f4"), "kg/m^4"),
+    ]
+    canvas = Image.new("RGB", (1650, 1250), "white")
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_font(30)
+    main_font = load_font(20)
+    small_font = load_font(15)
+    draw.text(
+        (40, 28),
+        f"OFES density profiles from W rebuild composite | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | objects={composite['object_count']}",
+        fill=(20, 24, 32),
+        font=title_font,
+    )
+    boxes = [(70, 115, 780, 575), (860, 115, 1570, 575), (70, 690, 780, 1150), (860, 690, 1570, 1150)]
+    for box, (name, values, unit) in zip(boxes, profiles):
+        draw_profile_panel(canvas, box, values, depth, f"{name} ({unit})", main_font, small_font)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(png_path)
+    canvas.save(png_path.with_suffix(".pdf"), "PDF", resolution=180.0)
+
+
+def crossing_sections(grid: dict[str, object]) -> dict[str, np.ndarray | float]:
+    return crossing_sections_for_keys(grid, ["term1_m_s", "term2_m_s", "rebuild_w_m_s", "ofes_w_native_m_s"])
+
+
+def draw_section_field_pillow(canvas: Image.Image, box: tuple[int, int, int, int], x: np.ndarray, depth: np.ndarray, data: np.ndarray, vmin: float, vmax: float, title: str, main_font, small_font, unit_label: str = "1e-6 m/s") -> None:
     draw = ImageDraw.Draw(canvas)
     draw.rectangle(box, outline=(180, 186, 196), width=1)
     plot = (box[0] + 70, box[1] + 42, box[2] - 40, box[3] - 58)
@@ -1580,7 +3065,50 @@ def draw_section_field_pillow(canvas: Image.Image, box: tuple[int, int, int, int
     draw.text((plot[0], box[3] - 30), "x/R", fill=(80, 88, 100), font=small_font)
     draw.text((box[0] + 8, plot[1]), "depth m", fill=(80, 88, 100), font=small_font)
     colorbar_box = (plot[2] + 10, plot[1], min(plot[2] + 30, box[2] - 8), plot[3])
-    draw_colorbar_pillow(canvas, colorbar_box, vmin, vmax, small_font)
+    draw_colorbar_pillow(canvas, colorbar_box, vmin, vmax, small_font, unit_label)
+
+
+def draw_profile_panel(canvas: Image.Image, box: tuple[int, int, int, int], values: np.ndarray, depth: np.ndarray, title: str, main_font, small_font) -> None:
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle(box, outline=(180, 186, 196), width=1)
+    plot = (box[0] + 80, box[1] + 42, box[2] - 35, box[3] - 58)
+    draw.rectangle(plot, outline=(100, 110, 125), width=1)
+    finite = np.isfinite(values) & np.isfinite(depth)
+    if np.any(finite):
+        xmin = float(np.nanpercentile(values[finite], 2))
+        xmax = float(np.nanpercentile(values[finite], 98))
+        if abs(xmax - xmin) < 1.0e-12:
+            xmin -= 1.0
+            xmax += 1.0
+        dmin = float(np.nanmin(depth[finite]))
+        dmax = float(np.nanmax(depth[finite]))
+        grid_color = (226, 230, 236)
+        for frac in [0.25, 0.5, 0.75]:
+            gx = plot[0] + int(round(frac * (plot[2] - plot[0])))
+            gy = plot[1] + int(round(frac * (plot[3] - plot[1])))
+            draw.line((gx, plot[1], gx, plot[3]), fill=grid_color, width=1)
+            draw.line((plot[0], gy, plot[2], gy), fill=grid_color, width=1)
+        points = []
+        for value, dep in zip(values, depth):
+            if not np.isfinite(value) or not np.isfinite(dep):
+                if len(points) > 1:
+                    draw.line(points, fill=(37, 79, 150), width=3)
+                points = []
+                continue
+            px = plot[0] + int(round((float(value) - xmin) / max(xmax - xmin, 1.0e-12) * (plot[2] - plot[0] - 1)))
+            py = plot[1] + int(round((float(dep) - dmin) / max(dmax - dmin, 1.0e-12) * (plot[3] - plot[1] - 1)))
+            points.append((px, py))
+        if len(points) > 1:
+            draw.line(points, fill=(37, 79, 150), width=3)
+        draw.text((plot[0], plot[3] + 10), f"{xmin:.3g}", fill=(80, 88, 100), font=small_font)
+        draw.text((plot[2] - 55, plot[3] + 10), f"{xmax:.3g}", fill=(80, 88, 100), font=small_font)
+        for dz in [0, 500, 1000, 1500, 2000, 3000, 4000, 5000]:
+            if dmin <= dz <= dmax:
+                ty = section_depth_to_py(plot, float(dz), dmin, dmax)
+                draw.line((plot[0] - 5, ty, plot[0], ty), fill=(80, 88, 100), width=1)
+                draw.text((box[0] + 10, ty - 8), f"{dz}", fill=(80, 88, 100), font=small_font)
+    draw.text((box[0] + 12, box[1] + 10), title, fill=(30, 36, 48), font=main_font)
+    draw.text((box[0] + 10, plot[1]), "depth m", fill=(80, 88, 100), font=small_font)
 
 
 def section_x_to_px(plot: tuple[int, int, int, int], value: float, xmin: float, xmax: float) -> int:
@@ -1600,7 +3128,7 @@ def array_to_rgb(values: np.ndarray, vmin: float, vmax: float) -> Image.Image:
     return Image.fromarray(colors, mode="RGB")
 
 
-def draw_colorbar_pillow(canvas: Image.Image, box: tuple[int, int, int, int], vmin: float, vmax: float, small_font) -> None:
+def draw_colorbar_pillow(canvas: Image.Image, box: tuple[int, int, int, int], vmin: float, vmax: float, small_font, unit_label: str = "1e-6 m/s") -> None:
     draw = ImageDraw.Draw(canvas)
     if box[2] <= box[0] or box[3] <= box[1]:
         return
@@ -1613,7 +3141,7 @@ def draw_colorbar_pillow(canvas: Image.Image, box: tuple[int, int, int, int], vm
     for _, y, label in ticks:
         draw.line((box[2], y, tick_x0 + 4, y), fill=(75, 85, 99), width=1)
         draw.text((tick_x0 + 7, y - 8), label, fill=(75, 85, 99), font=small_font)
-    draw.text((box[0] - 2, box[3] + 8), "1e-6 m/s", fill=(75, 85, 99), font=small_font)
+    draw.text((box[0] - 2, box[3] + 8), unit_label, fill=(75, 85, 99), font=small_font)
 
 
 def rdbu_r_colors(scaled: np.ndarray) -> np.ndarray:
@@ -1657,6 +3185,16 @@ def dipole_score(w: np.ndarray, x: np.ndarray, y: np.ndarray) -> float:
 def q95_abs(values: np.ndarray) -> float:
     finite = values[np.isfinite(values)]
     return float(np.nanpercentile(np.abs(finite), 95)) if finite.size else float("nan")
+
+
+def depth_average_indices(depth: np.ndarray, dmin: float, dmax: float) -> np.ndarray:
+    arr = np.asarray(depth, dtype="f8")
+    mask = (arr >= min(dmin, dmax)) & (arr <= max(dmin, dmax))
+    idx = np.flatnonzero(mask)
+    if idx.size:
+        return idx
+    target = 0.5 * (float(dmin) + float(dmax))
+    return np.array([int(np.nanargmin(np.abs(arr - target)))], dtype=int)
 
 
 def meters_per_degree(lat_deg: float) -> tuple[float, float]:
@@ -1720,6 +3258,29 @@ def parse_float_list(value: str) -> list[float]:
     return out
 
 
+def parse_bbox(value: str) -> tuple[float, float, float, float]:
+    parts = [float(item.strip()) for item in value.split(",") if item.strip()]
+    if len(parts) != 4:
+        raise ValueError("--composite-domain-bbox must be lon_min,lon_max,lat_min,lat_max")
+    lon_min, lon_max, lat_min, lat_max = parts
+    if lat_min == lat_max:
+        raise ValueError("--composite-domain-bbox latitude bounds must differ")
+    return float(lon_min), float(lon_max), float(lat_min), float(lat_max)
+
+
+def format_bbox(bbox: tuple[float, float, float, float]) -> str:
+    lon_min, lon_max, lat_min, lat_max = bbox
+    return f"{lon_min:g},{lon_max:g},{lat_min:g},{lat_max:g}"
+
+
+def parse_string_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def safe_token(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value)).strip("_") or "unknown"
+
+
 def lat_token(lat: float) -> str:
     hemi = "N" if lat >= 0 else "S"
     value = abs(float(lat))
@@ -1748,8 +3309,13 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
         return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

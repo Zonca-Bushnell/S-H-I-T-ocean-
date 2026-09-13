@@ -130,7 +130,21 @@ def _year_shards(start: str, end: str) -> list[tuple[str, str, str]]:
     return shards
 
 
+def _day_shards(start: str, end: str) -> list[tuple[str, str, str]]:
+    start_dt = _parse_date(start)
+    end_dt = _parse_date(end)
+    shards: list[tuple[str, str, str]] = []
+    current = start_dt
+    while current <= end_dt:
+        label = _date_label(current)
+        shards.append((label, label, current.strftime("%Y%m%d")))
+        current += timedelta(days=1)
+    return shards
+
+
 def _detection_shards(start: str, end: str, mode: str) -> list[tuple[str, str, str]]:
+    if mode == "day":
+        return _day_shards(start, end)
     if mode == "year":
         return _year_shards(start, end)
     if mode == "month":
@@ -760,9 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--detect-shard-mode",
-        choices=["year", "quarter", "month"],
+        choices=["year", "quarter", "month", "day"],
         default="year",
-        help="Detection partial-run sharding. year reduces repeated annual NetCDF opens and is the default for local F: data.",
+        help="Detection partial-run sharding. Use day for OFES daily NetCDF parts and CPU parallelism.",
     )
     parser.add_argument("--lifetime-min-days", type=int, default=30)
     parser.add_argument("--radius-min-m", type=float, default=50_000.0)

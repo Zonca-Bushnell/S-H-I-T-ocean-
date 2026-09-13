@@ -530,6 +530,8 @@ def _wrap_lon_delta_deg(lon: np.ndarray, lon0: float) -> np.ndarray:
 
 
 def _time_lookup(ds: Dataset) -> dict[date, int]:
+    if hasattr(ds, "time_lookup"):
+        return ds.time_lookup()  # type: ignore[no-any-return]
     tvar = ds.variables["time"]
     times = num2date(tvar[:], units=tvar.units, calendar=getattr(tvar, "calendar", "standard"))
     return {date(int(t.year), int(t.month), int(t.day)): i for i, t in enumerate(times)}
@@ -1660,6 +1662,47 @@ def _format_year_template(template: str, year: int) -> str:
     return str(template).format(year=year)
 
 
+def _template_uses_daily_parts(template: str) -> bool:
+    return "{date" in str(template) or "{yyyymmdd" in str(template)
+
+
+def _format_day_template(template: str, day: date) -> str:
+    return str(template).format(year=day.year, date=f"{day:%Y-%m-%d}", yyyymmdd=f"{day:%Y%m%d}")
+
+
+class DailyPartDataset:
+    def __init__(self, root: Path, template: str) -> None:
+        self.root = Path(root)
+        self.template = str(template)
+        self._open_day: date | None = None
+        self._dataset: Dataset | None = None
+
+    def open_day(self, day: date) -> Dataset:
+        if self._open_day == day and self._dataset is not None:
+            return self._dataset
+        self.close()
+        self._open_day = day
+        self._dataset = Dataset(self.root / _format_day_template(self.template, day))
+        return self._dataset
+
+    @property
+    def variables(self):
+        if self._dataset is None:
+            raise RuntimeError("DailyPartDataset has no open day. Call open_day(day) first.")
+        return self._dataset.variables
+
+    def time_lookup(self) -> dict[date, int]:
+        if self._open_day is None:
+            raise RuntimeError("DailyPartDataset has no open day. Call open_day(day) first.")
+        return {self._open_day: 0}
+
+    def close(self) -> None:
+        if self._dataset is not None:
+            self._dataset.close()
+        self._dataset = None
+        self._open_day = None
+
+
 def _configure_var_chunk_cache(ds: Dataset, variable_names: tuple[str, ...], cache_mb: int) -> None:
     cache_size = int(cache_mb) * 1024 * 1024
     if cache_size <= 0:
@@ -1687,9 +1730,26 @@ def _configure_var_chunk_cache(ds: Dataset, variable_names: tuple[str, ...], cac
 def _load_year_arrays(args: argparse.Namespace, year: int) -> tuple[Dataset, Dataset | None, np.ndarray, np.ndarray, np.ndarray]:
     filter_root = Path(args.filter_root)
     raw_root = Path(args.raw_root)
-    filt = Dataset(filter_root / _format_year_template(args.filter_template, year))
-    raw_path = raw_root / _format_year_template(args.raw_template, year)
-    raw = Dataset(raw_path) if raw_path.exists() else None
+    if _template_uses_daily_parts(str(args.filter_template)):
+        first_day = _parse_date(args.start)
+        while first_day.year != year:
+            first_day += timedelta(days=1)
+        filt = DailyPartDataset(filter_root, str(args.filter_template))
+        filt.open_day(first_day)
+        if _template_uses_daily_parts(str(args.raw_template)):
+            raw = DailyPartDataset(raw_root, str(args.raw_template))
+            raw_path = raw_root / _format_day_template(str(args.raw_template), first_day)
+            if raw_path.exists():
+                raw.open_day(first_day)
+            else:
+                raw = None
+        else:
+            raw_path = raw_root / _format_year_template(args.raw_template, year)
+            raw = Dataset(raw_path) if raw_path.exists() else None
+    else:
+        filt = Dataset(filter_root / _format_year_template(args.filter_template, year))
+        raw_path = raw_root / _format_year_template(args.raw_template, year)
+        raw = Dataset(raw_path) if raw_path.exists() else None
     _configure_var_chunk_cache(filt, ("zos_glor", "uo_glor", "vo_glor"), int(args.netcdf_chunk_cache_mb))
     if raw is not None:
         _configure_var_chunk_cache(raw, ("zos_glor", "uo_glor", "vo_glor"), max(1, int(args.netcdf_chunk_cache_mb) // 4))
@@ -1711,6 +1771,10 @@ def _detect_day(
     output_dir: Path,
     matlab_backend: MatlabHuaBackend | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if hasattr(filt, "open_day"):
+        filt.open_day(day)
+    if raw is not None and hasattr(raw, "open_day"):
+        raw.open_day(day)
     time_index = _time_lookup(filt)[day]
     zos = np.asarray(filt.variables["zos_glor"][time_index, :, :], dtype="float64")
     cached_extrema = _load_cached_extrema(args.candidate_cache_dir, day, args.max_candidates_per_day)
