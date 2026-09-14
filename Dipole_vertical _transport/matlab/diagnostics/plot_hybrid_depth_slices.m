@@ -1,7 +1,7 @@
 function plot_hybrid_depth_slices(path, hybrid, polarity, band_label)
     wanted = [200 500 1000 1500 1900];
     idx = arrayfun(@(d) nearest_depth_index(hybrid.depth_levels(:), d), wanted);
-    [w_plot, info] = regularize_stack_for_plot(hybrid.w(:,:,idx), 2, 2);
+    [w_plot, info] = regularize_stack_for_plot(hybrid.w(:,:,idx), 10, 2, 'sigma', [3.2 3.2], 'min_neighbors', 2);
     vals = w_plot * 1e6;
     lim = q95_abs(vals(:));
     if ~isfinite(lim) || lim <= 0
@@ -15,7 +15,7 @@ function plot_hybrid_depth_slices(path, hybrid, polarity, band_label)
         ax = nexttile(tl);
         data = w_plot(:,:,ii) * 1e6;
         if any(isfinite(data(:)))
-            contourf(ax, x, y, data, 28, 'LineStyle', 'none');
+            contourf(ax, x, y, data, 16, 'LineStyle', 'none');
             axis(ax, 'equal');
             axis(ax, [-4 4 -4 4]);
             colormap(ax, redblue_colormap());
@@ -42,7 +42,7 @@ function plot_hybrid_depth_slices(path, hybrid, polarity, band_label)
     clim(ax, [-lim lim]);
     sgtitle(tl, [polarity ' ' band_label ' rebuild W depth slices (display-regularized)'], 'Interpreter', 'none');
     annotation(fig, 'textbox', [0.01 0.01 0.98 0.04], 'String', ...
-        sprintf('PNG only: support-limited gap fill + horizontal smoothing; filled cells = %d; MAT fields unchanged.', info.filled_count), ...
+        sprintf('PNG only: support-limited gap fill + large-scale NaN-aware spatial Gaussian smoothing; filled cells = %d; MAT fields unchanged.', info.filled_count), ...
         'EdgeColor', 'none', 'HorizontalAlignment', 'center', 'FontSize', 8, 'Interpreter', 'none');
     export_png_safe(fig, path, 180);
     close(fig);

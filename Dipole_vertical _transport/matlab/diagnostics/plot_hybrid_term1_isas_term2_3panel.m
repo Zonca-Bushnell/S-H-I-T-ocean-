@@ -1,7 +1,7 @@
 function plot_hybrid_term1_isas_term2_3panel(path, hybrid, polarity, band_label)
-    [section_term1, info1] = regularize_field_for_plot(hybrid.section_term1, 2, 3);
-    [section_term2, info2] = regularize_field_for_plot(hybrid.section_term2, 2, 3);
-    [section_w, info3] = regularize_field_for_plot(hybrid.section_w, 2, 3);
+    [section_term1, info1] = regularize_field_for_plot(hybrid.section_term1, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
+    [section_term2, info2] = regularize_field_for_plot(hybrid.section_term2, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
+    [section_w, info3] = regularize_field_for_plot(hybrid.section_w, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
     vals = [section_term1(:); section_term2(:); section_w(:)] * 1e6;
     lim = q95_abs(vals);
     if ~isfinite(lim) || lim <= 0
@@ -17,7 +17,7 @@ function plot_hybrid_term1_isas_term2_3panel(path, hybrid, polarity, band_label)
         ax = nexttile(tl);
         data = panels{ii} * 1e6;
         if any(isfinite(data(:)))
-            contourf(ax, x, depth_plot, data, 28, 'LineStyle', 'none');
+            contourf(ax, x, depth_plot, data, 20, 'LineStyle', 'none');
             set(ax, 'YDir', 'reverse');
             colormap(ax, redblue_colormap());
             clim(ax, [-lim lim]);
@@ -34,7 +34,7 @@ function plot_hybrid_term1_isas_term2_3panel(path, hybrid, polarity, band_label)
     end
     sgtitle(tl, [polarity ' ' band_label ' Argo absolute term1 + ISAS term2 (display-regularized)'], 'Interpreter', 'none');
     annotation(fig, 'textbox', [0.01 0.01 0.98 0.04], 'String', ...
-        sprintf('PNG only: support-limited gap fill + x-depth smoothing. filled cells term1/term2/W = %d/%d/%d; MAT fields unchanged.', ...
+        sprintf('PNG only: support-limited gap fill + large-scale NaN-aware x-depth Gaussian smoothing. filled cells term1/term2/W = %d/%d/%d; MAT fields unchanged.', ...
         info1.filled_count, info2.filled_count, info3.filled_count), ...
         'EdgeColor', 'none', 'HorizontalAlignment', 'center', 'FontSize', 8, 'Interpreter', 'none');
     export_png_safe(fig, path, 180);
