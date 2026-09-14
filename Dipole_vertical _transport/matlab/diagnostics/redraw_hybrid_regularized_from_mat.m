@@ -15,5 +15,9 @@ function redraw_hybrid_regularized_from_mat(result_root)
         out_dir = fileparts(mat_path);
         plot_hybrid_term1_isas_term2_3panel(fullfile(out_dir, 'argo_absolute_term1_isas_term2_section_regularized.png'), S.hybrid, polarity, 'cross_20N_1R');
         plot_hybrid_depth_slices(fullfile(out_dir, 'argo_absolute_term1_isas_term2_depth_slices_regularized.png'), S.hybrid, polarity, 'cross_20N_1R');
+        plot_hybrid_rebuild_w_clean( ...
+            fullfile(out_dir, 'argo_absolute_term1_isas_term2_rebuild_w_section_clean.png'), ...
+            fullfile(out_dir, 'argo_absolute_term1_isas_term2_rebuild_w_depth_slices_clean.png'), ...
+            S.hybrid, polarity, 'cross_20N_1R');
     end
 end
