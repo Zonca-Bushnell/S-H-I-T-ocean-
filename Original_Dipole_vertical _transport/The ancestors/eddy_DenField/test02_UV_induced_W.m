@@ -1,5 +1,8 @@
+%% Windows path root (was '/Users/Root' on macOS)
+ROOT = 'E:/Users/Root';
+
 %%
-load('/Users/Root/Output/Eddy Heat Flux/Argo02_data_point_ae_North_twosat.mat','E_radius')
+load([ROOT, '/Output/Eddy Heat Flux/Argo02_data_point_ae_North_twosat.mat'],'E_radius')
 % path = '/Users/Root/Data/AVISO_Eddy/META3.2_DT_twosat/META3.2_DT_twosat_Cyclonic_long_19930101_20220209.nc';
 % radius_eddy = ncread(path,'speed_radius');
 % lat_eddy = ncread(path,'latitude');
@@ -9,7 +12,7 @@ load('/Users/Root/Output/Eddy Heat Flux/Argo02_data_point_ae_North_twosat.mat','
 
 %% load Depth
 % ISAS
-path_test = '/Users/Root/Data/Argo_Data/ISAS_Argo/field/2004/ISAS20_ARGO_20040615_fld_TEMP.nc';
+path_test = [ROOT, '/Data/Argo_Data/ISAS_Argo/field/2004/ISAS20_ARGO_20040615_fld_TEMP.nc'];
 depth = double(ncread(path_test,'depth'));
 depth = depth(1:152);
 depth(1) = 0;
@@ -175,7 +178,7 @@ end
 clear F1 F2 i j index temp den1 den2 z1 z2
 
 %% UV induced W
-load('/Users/Root/Output/Eddy Heat Flux/rebuild_W/UV_induced_W/AE_North_ThermalWind_UV_smooth1.mat')
+load([ROOT, '/Output/Eddy Heat Flux/rebuild_W/UV_induced_W/AE_North_ThermalWind_UV_smooth1.mat'])
 
 W_uis = U_thw.*dzdx;
 W_vis = V_thw.*dzdy;

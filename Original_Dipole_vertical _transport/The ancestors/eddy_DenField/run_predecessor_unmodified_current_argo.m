@@ -14,7 +14,7 @@ opt = p.Results;
 repo_dir = fileparts(mfilename('fullpath'));
 project_dir = locate_project_dir(repo_dir);
 addpath(fullfile(project_dir, 'matlab_compat'));
-compat_roots = {fullfile('D:\Users\Root'), fullfile('E:\Users\Root')};
+compat_roots = {fullfile('E:\Users\Root')};
 for k_root = 1:numel(compat_roots)
     prepare_fixed_paths(compat_roots{k_root});
 end

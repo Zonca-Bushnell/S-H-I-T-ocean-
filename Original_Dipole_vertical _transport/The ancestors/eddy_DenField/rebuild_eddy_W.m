@@ -1,7 +1,10 @@
-%% grid distance
-load('/Users/Root/Output/Eddy Heat Flux/Argo02_data_point_ce_North_twosat.mat','Depth1','E_lat')
+%% Windows path root (was '/Users/Root' on macOS)
+ROOT = 'E:/Users/Root';
 
-path = '/Users/Root/Data/AVISO_Eddy/META3.2_DT_twosat/META3.2_DT_twosat_Cyclonic_long_19930101_20220209.nc';
+%% grid distance
+load([ROOT, '/Output/Eddy Heat Flux/Argo02_data_point_ce_North_twosat.mat'],'Depth1','E_lat')
+
+path = [ROOT, '/Data/AVISO_Eddy/META3.2_DT_twosat/META3.2_DT_twosat_Cyclonic_long_19930101_20220209.nc'];
 radius_eddy = ncread(path,'speed_radius');
 lat_eddy = ncread(path,'latitude');
 radius_eddy = radius_eddy(lat_eddy > 0);
@@ -10,14 +13,14 @@ radius_eddy = mean(radius_eddy,'omitmissing');
 grid_dis = 8*radius_eddy/80;
 
 % eddy composition data
-load('/Users/Root/Output/Eddy Heat Flux/Argo03_compound_ce_North_res0.6_median.mat', ...
+load([ROOT, '/Output/Eddy Heat Flux/Argo03_compound_ce_North_res0.6_median.mat'], ...
     'Den_compound','U1000_compound','V1000_compound','W1000_compound')
 
 % background Density Field
-load('/Users/Root/Output/Eddy Heat Flux/Argo04_data_DenField_ce_North_twosat_ISAS_7Sample.mat')
+load([ROOT, '/Output/Eddy Heat Flux/Argo04_data_DenField_ce_North_twosat_ISAS_7Sample.mat'])
 
 % eddy zonal moving speed
-load('/Users/Root/Output/Eddy Heat Flux/eddy_features/eddy_moving_speed/Twosat_CE_eddy_zonal_moving_speed.mat')
+load([ROOT, '/Output/Eddy Heat Flux/eddy_features/eddy_moving_speed/Twosat_CE_eddy_zonal_moving_speed.mat'])
 moving_speed_zonal = moving_speed_zonal(lat_eddy > 0);
 c0 = abs(median(moving_speed_zonal,'omitmissing'));
 
@@ -119,7 +122,7 @@ clear i j n gradx grady dudz dvdz temp
 
 %% UV induced W
 % ISAS
-path_test = '/Users/Root/Data/Argo_Data/ISAS_Argo/field/2004/ISAS20_ARGO_20040615_fld_TEMP.nc';
+path_test = [ROOT, '/Data/Argo_Data/ISAS_Argo/field/2004/ISAS20_ARGO_20040615_fld_TEMP.nc'];
 depth = double(ncread(path_test,'depth'));
 depth = depth(1:152);
 depth(1) = 0;

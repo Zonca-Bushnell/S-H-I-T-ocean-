@@ -1,8 +1,11 @@
+%% Windows path root (was '/Users/Root' on macOS)
+ROOT = 'E:/Users/Root';
+
 %% load Density and C
 % Density
-load('/Users/Root/Output/Eddy Heat Flux/Argo03_compound_ce_North_res0.6_median.mat','Den_compound','Depth1')
+load([ROOT, '/Output/Eddy Heat Flux/Argo03_compound_ce_North_res0.6_median.mat'],'Den_compound','Depth1')
 % eddy radius
-load('/Users/Root/Output/Eddy Heat Flux/Argo02_data_point_ce_North_twosat.mat','E_radius','E_mspeed')
+load([ROOT, '/Output/Eddy Heat Flux/Argo02_data_point_ce_North_twosat.mat'],'E_radius','E_mspeed')
 % path = '/Users/Root/Data/AVISO_Eddy/META3.2_DT_twosat/META3.2_DT_twosat_Cyclonic_long_19930101_20220209.nc';
 % radius_eddy = ncread(path,'speed_radius');
 % lat_eddy = ncread(path,'latitude');
