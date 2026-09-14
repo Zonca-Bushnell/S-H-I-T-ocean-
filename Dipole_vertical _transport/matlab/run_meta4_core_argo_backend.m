@@ -1,6 +1,7 @@
 argo_mat = '@ARGO_MAT@';
 history_argo_mat = '@HISTORY_ARGO_MAT@';
 meta_dir = '@META_DIR@';
+meta32_allsat_dir = '@META32_ALLSAT_DIR@';
 boa_pden_root = '@BOA_PDEN_ROOT@';
 isas_density_mat = '@ISAS_DENSITY_MAT@';
 cache_root = '@CACHE_ROOT@';
@@ -28,6 +29,7 @@ diagnose_reversal_factors = @DIAGNOSE_REVERSAL_FACTORS@;
 compare_z_geometry_modes = @COMPARE_Z_GEOMETRY_MODES@;
 diagnose_threeway_z_background = @DIAGNOSE_THREEWAY_Z_BACKGROUND@;
 run_argo_absolute_term1_isas_term2 = @RUN_ARGO_ABSOLUTE_TERM1_ISAS_TERM2@;
+run_predecessor_allsat_validation = @RUN_PREDECESSOR_ALLSAT_VALIDATION@;
 z_geometry_mode = '@Z_GEOMETRY_MODE@';
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
@@ -152,6 +154,20 @@ if run_argo_absolute_term1_isas_term2
     grid_files = run_argo_absolute_term1_isas_term2_diagnosis(output_root, meta_dir, bbox, crossing_lats, intersect_radius_r, ...
         argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
         time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group, isas_density_mat);
+    manifest = struct();
+    manifest.grid_files = grid_files;
+    manifest.output_root = output_root;
+    text = jsonencode(manifest);
+    fid = fopen('@MANIFEST@', 'w');
+    fwrite(fid, text, 'char');
+    fclose(fid);
+    return
+end
+
+if run_predecessor_allsat_validation
+    grid_files = run_predecessor_allsat_validation_diagnosis(output_root, meta32_allsat_dir, bbox, crossing_lats, intersect_radius_r, ...
+        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
+        time_window_days, depth_levels, deg_m, cache_root, max_matches_per_group, isas_density_mat);
     manifest = struct();
     manifest.grid_files = grid_files;
     manifest.output_root = output_root;

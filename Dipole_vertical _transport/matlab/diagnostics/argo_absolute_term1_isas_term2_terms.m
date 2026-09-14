@@ -11,12 +11,17 @@ function hybrid = argo_absolute_term1_isas_term2_terms(grid3d, polarity, isas_de
     [dzdx_abs, dzdy_abs] = predecessor_isopycnal_slope(grid3d.rho_abs, depth_levels, dx_m, dy_m, false);
     log_step(sprintf('hybrid Argo absolute isopycnal slope ready in %.1f s', toc(t)));
 
-    isas_info = struct('path', '', 'available', false, 'message', 'ISAS density field not available.');
+    isas_info = struct('path', '', 'available', false, 'strict_polarity_match', false, 'message', 'ISAS density field not available.');
     rho_isas = load_predecessor_isas_density_stack(isas_density_mat, polarity, grid3d.x, grid3d.y, depth_levels);
     if any(isfinite(rho_isas(:)))
         isas_info.path = resolved_isas_density_path(isas_density_mat, polarity);
         isas_info.available = true;
-        isas_info.message = 'Loaded predecessor ISAS-derived background density composite.';
+        isas_info.strict_polarity_match = isas_path_matches_polarity(isas_info.path, polarity);
+        if isas_info.strict_polarity_match
+            isas_info.message = 'Loaded predecessor ISAS-derived background density composite with matching polarity.';
+        else
+            isas_info.message = 'Loaded predecessor ISAS-derived background density composite through fallback; polarity is not a strict match.';
+        end
     end
     support_isas = isfinite(rho_isas);
 
@@ -77,4 +82,13 @@ function hybrid = argo_absolute_term1_isas_term2_terms(grid3d, polarity, isas_de
     hybrid.term1_geometry = 'Argo composite absolute density isosurface slope';
     hybrid.term2_geometry = 'ISAS/background density isosurface slope';
     hybrid.thermal_wind_source = 'Argo composite absolute density';
+end
+
+function ok = isas_path_matches_polarity(path_in, polarity)
+    low = lower(char(path_in));
+    if strcmp(polarity, 'cyclonic')
+        ok = contains(low, '_ce_');
+    else
+        ok = contains(low, '_ae_');
+    end
 end

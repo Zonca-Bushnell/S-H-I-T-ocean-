@@ -16,6 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ARGO_MAT = Path(r"F:\Argo_data\ArgoData_SA_CT_PT_PDen_sigma.mat")
 DEFAULT_HISTORY_ARGO_MAT = Path(r"F:\Argo_data\Argo1000m_UVW_TSDen_199601_202306.mat")
 DEFAULT_META_DIR = Path(r"F:\Eddy\Eddy\META4.0_DT_allsat")
+DEFAULT_META32_ALLSAT_DIR = Path(r"F:\Eddy\Eddy\META3.2_DT_allsat")
 DEFAULT_BOA_PDEN_ROOT = Path(r"F:\Argo_data\Self_BOA_Argo_PotentialDensity")
 DEFAULT_ISAS_DENSITY_MAT = Path(r"D:\Users\Root\Output\Eddy Heat Flux\Argo04_data_DenField_ce_North_twosat_ISAS_7Sample.mat")
 DEFAULT_CACHE_ROOT = Path(r"E:\DATA\01_Eddy_correspond\01_Vertical_asymmetric\_cache")
@@ -267,6 +268,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     argo_mat = matlab_quote(args.argo_mat)
     history_argo_mat = matlab_quote(args.history_argo_mat)
     meta_dir = matlab_quote(args.meta_dir)
+    meta32_allsat_dir = matlab_quote(args.meta32_allsat_dir)
     boa_pden_root = matlab_quote(args.boa_pden_root)
     isas_density_mat = matlab_quote(args.isas_density_mat)
     cache_root = matlab_quote(args.cache_root)
@@ -280,6 +282,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         template.replace("@ARGO_MAT@", argo_mat)
         .replace("@HISTORY_ARGO_MAT@", history_argo_mat)
         .replace("@META_DIR@", meta_dir)
+        .replace("@META32_ALLSAT_DIR@", meta32_allsat_dir)
         .replace("@BOA_PDEN_ROOT@", boa_pden_root)
         .replace("@ISAS_DENSITY_MAT@", isas_density_mat)
         .replace("@CACHE_ROOT@", cache_root)
@@ -308,6 +311,7 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
         .replace("@DIAGNOSE_THREEWAY_Z_BACKGROUND@", "true" if args.diagnose_threeway_z_background else "false")
         .replace("@RUN_ARGO_ABSOLUTE_TERM1_ISAS_TERM2@", "true" if args.run_argo_absolute_term1_isas_term2 else "false")
+        .replace("@RUN_PREDECESSOR_ALLSAT_VALIDATION@", "true" if args.run_predecessor_allsat_validation else "false")
         .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
@@ -335,6 +339,7 @@ def main() -> int:
     parser.add_argument("--argo-mat", type=Path, default=DEFAULT_ARGO_MAT)
     parser.add_argument("--history-argo-mat", type=Path, default=DEFAULT_HISTORY_ARGO_MAT)
     parser.add_argument("--meta-dir", type=Path, default=DEFAULT_META_DIR)
+    parser.add_argument("--meta32-allsat-dir", type=Path, default=DEFAULT_META32_ALLSAT_DIR)
     parser.add_argument("--boa-pden-root", type=Path, default=DEFAULT_BOA_PDEN_ROOT)
     parser.add_argument("--isas-density-mat", type=Path, default=DEFAULT_ISAS_DENSITY_MAT)
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
@@ -440,6 +445,11 @@ def main() -> int:
         "--run-argo-absolute-term1-isas-term2",
         action="store_true",
         help="Run the predecessor-style hybrid test: term1 uses Argo composite absolute isopycnal slope, term2 uses ISAS/background isopycnal slope. Intended for selected crossing latitudes, not the default production flow.",
+    )
+    parser.add_argument(
+        "--run-predecessor-allsat-validation",
+        action="store_true",
+        help="Run an isolated predecessor-algorithm validation using META3.2 allsat NetCDF as the missing twosat track substitute.",
     )
     parser.add_argument(
         "--z-geometry-mode",
