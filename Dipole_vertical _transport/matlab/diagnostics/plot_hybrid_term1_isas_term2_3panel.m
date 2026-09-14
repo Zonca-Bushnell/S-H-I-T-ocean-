@@ -1,7 +1,7 @@
 function plot_hybrid_term1_isas_term2_3panel(path, hybrid, polarity, band_label)
-    [section_term1, info1] = regularize_field_for_plot(hybrid.section_term1, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
-    [section_term2, info2] = regularize_field_for_plot(hybrid.section_term2, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
-    [section_w, info3] = regularize_field_for_plot(hybrid.section_w, 8, 2, 'sigma', [8.0 2.4], 'min_neighbors', 2);
+    [section_term1, info1] = regularize_field_for_plot(hybrid.section_term1, 8, 2, 'sigma', [10.0 3.0], 'min_neighbors', 2);
+    [section_term2, info2] = regularize_field_for_plot(hybrid.section_term2, 8, 2, 'sigma', [10.0 3.0], 'min_neighbors', 2);
+    [section_w, info3] = regularize_field_for_plot(hybrid.section_w, 8, 2, 'sigma', [10.0 3.0], 'min_neighbors', 2);
     vals = [section_term1(:); section_term2(:); section_w(:)] * 1e6;
     lim = q95_abs(vals);
     if ~isfinite(lim) || lim <= 0
@@ -17,7 +17,8 @@ function plot_hybrid_term1_isas_term2_3panel(path, hybrid, polarity, band_label)
         ax = nexttile(tl);
         data = panels{ii} * 1e6;
         if any(isfinite(data(:)))
-            contourf(ax, x, depth_plot, data, 20, 'LineStyle', 'none');
+            [xq, depth_q, data_q] = upsample_field_for_plot(x, depth_plot, data, 4, 2);
+            contourf(ax, xq, depth_q, data_q, 20, 'LineStyle', 'none');
             set(ax, 'YDir', 'reverse');
             colormap(ax, redblue_colormap());
             clim(ax, [-lim lim]);

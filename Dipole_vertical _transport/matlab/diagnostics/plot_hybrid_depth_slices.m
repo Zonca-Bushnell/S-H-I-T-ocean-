@@ -1,7 +1,7 @@
 function plot_hybrid_depth_slices(path, hybrid, polarity, band_label)
     wanted = [200 500 1000 1500 1900];
     idx = arrayfun(@(d) nearest_depth_index(hybrid.depth_levels(:), d), wanted);
-    [w_plot, info] = regularize_stack_for_plot(hybrid.w(:,:,idx), 10, 2, 'sigma', [3.2 3.2], 'min_neighbors', 2);
+    [w_plot, info] = regularize_stack_for_plot(hybrid.w(:,:,idx), 10, 2, 'sigma', [5.5 5.5], 'min_neighbors', 2);
     vals = w_plot * 1e6;
     lim = q95_abs(vals(:));
     if ~isfinite(lim) || lim <= 0
@@ -15,7 +15,8 @@ function plot_hybrid_depth_slices(path, hybrid, polarity, band_label)
         ax = nexttile(tl);
         data = w_plot(:,:,ii) * 1e6;
         if any(isfinite(data(:)))
-            contourf(ax, x, y, data, 16, 'LineStyle', 'none');
+            [xq, yq, data_q] = upsample_field_for_plot(x, y, data, 4, 4);
+            contourf(ax, xq, yq, data_q, 14, 'LineStyle', 'none');
             axis(ax, 'equal');
             axis(ax, [-4 4 -4 4]);
             colormap(ax, redblue_colormap());
