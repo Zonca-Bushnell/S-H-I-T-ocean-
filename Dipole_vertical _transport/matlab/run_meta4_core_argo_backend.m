@@ -16,16 +16,11 @@ plot_filled_gradient = @PLOT_FILLED_GRADIENT@;
 smooth_passes = @SMOOTH_PASSES@;
 cressman_radius_r = @CRESSMAN_RADIUS_R@;
 cressman_min_obs = @CRESSMAN_MIN_OBS@;
-sample_gradient_max_profiles = @SAMPLE_GRADIENT_MAX_PROFILES@;
 vertical_mode = '@VERTICAL_MODE@';
-fast_sensitivity_2d = @FAST_SENSITIVITY_2D@;
-sensitivity_workers = @SENSITIVITY_WORKERS@;
-sensitivity_config_names = {@SENSITIVITY_CONFIGS@};
 compute_device = '@COMPUTE_DEVICE@';
 matlab_profile_enabled = @MATLAB_PROFILE@;
-diagnose_reversal_factors = @DIAGNOSE_REVERSAL_FACTORS@;
-compare_z_geometry_modes = @COMPARE_Z_GEOMETRY_MODES@;
-z_geometry_mode = '@Z_GEOMETRY_MODE@';
+geometry_mode = '@GEOMETRY_MODE@';
+track_scheme = '@TRACK_SCHEME@';
 write_matched_csv_flag = @WRITE_MATCHED_CSV@;
 write_grid_json_flag = @WRITE_GRID_JSON@;
 write_grid_nc_flag = @WRITE_GRID_NC@;
@@ -53,7 +48,7 @@ end
 global USE_GPU_CRESSMAN;
 USE_GPU_CRESSMAN = should_use_gpu(compute_device);
 global QC_WORKERS;
-QC_WORKERS = sensitivity_workers;
+QC_WORKERS = @WORKERS@;
 global WRITE_MATCHED_CSV WRITE_GRID_JSON WRITE_GRID_NC WRITE_SUMMARY_CSV;
 WRITE_MATCHED_CSV = write_matched_csv_flag;
 WRITE_GRID_JSON = write_grid_json_flag;
@@ -75,6 +70,13 @@ end
 
 method_md = fullfile(output_root, 'METHOD_ASSUMPTIONS_ZH.md');
 write_method_doc(method_md, argo_mat, history_argo_mat, meta_dir, boa_pden_root, output_root, bbox, crossing_lats, target_lat, intersect_radius_r, match_mode, boa_background_mode, time_window_days, core_min_m, core_max_m, density_variable, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
+
+if ~strcmp(geometry_mode, 'boa_anomaly')
+    error('This main-worktree entry currently keeps predecessor_hybrid as a documented retained geometry only; run it from the Original_Dipole_vertical_transport validation worktree until the ISAS cache is promoted here.');
+end
+if ~strcmp(track_scheme, 'meta4')
+    error('track_scheme=%s is a retained validation scheme, not a main-worktree production scheme yet.', track_scheme);
+end
 
 fprintf('Loading Argo vectors from %s\n', argo_mat);
 A = load(argo_mat, 'I_Time', 'I_Lon', 'I_Lat', 'I_ParkDepth', 'I_PF', density_variable, 'Depth');
@@ -103,56 +105,13 @@ fprintf('History velocity matched profiles: %d\n', nnz(history_match_mask));
 argo_base_mask = argo_lon >= bbox(1) & argo_lon <= bbox(2) & argo_lat >= bbox(3) & argo_lat <= bbox(4) & ...
     argo_park >= core_min_m & argo_park <= core_max_m & isfinite(argo_u) & isfinite(argo_v);
 
-if diagnose_reversal_factors
-    grid_files = run_reversal_factor_diagnosis(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
-        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
-        time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group);
-    manifest = struct();
-    manifest.grid_files = grid_files;
-    manifest.output_root = output_root;
-    text = jsonencode(manifest);
-    fid = fopen('@MANIFEST@', 'w');
-    fwrite(fid, text, 'char');
-    fclose(fid);
-    return
-end
-
-if compare_z_geometry_modes
-    grid_files = run_zgeometry_comparison(output_root, meta_dir, bbox, target_lat, intersect_radius_r, ...
-        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
-        time_window_days, depth_levels, deg_m, cache_root, boa_clim, max_matches_per_group, z_geometry_mode);
-    manifest = struct();
-    manifest.grid_files = grid_files;
-    manifest.output_root = output_root;
-    text = jsonencode(manifest);
-    fid = fopen('@MANIFEST@', 'w');
-    fwrite(fid, text, 'char');
-    fclose(fid);
-    return
-end
-
-if fast_sensitivity_2d
-    grid_files = run_fast_sensitivity_2d(output_root, meta_dir, bbox, crossing_lats, target_lat, intersect_radius_r, ...
-        argo_base_mask, argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
-        time_window_days, min_bin_count, plot_filled_gradient, sample_gradient_max_profiles, boa_clim, ...
-        z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m, sensitivity_workers, sensitivity_config_names);
-    manifest = struct();
-    manifest.grid_files = grid_files;
-    manifest.output_root = output_root;
-    text = jsonencode(manifest);
-    fid = fopen('@MANIFEST@', 'w');
-    fwrite(fid, text, 'char');
-    fclose(fid);
-    return
-end
-
 polarities = {'cyclonic','anticyclonic'};
 grid_files = {};
 summary_rows = {};
 if strcmp(vertical_mode, 'isopycnal_depth_stack') || strcmp(vertical_mode, 'thermal_wind_depth_stack')
     summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','depth_count','valid_voxels','valid_voxel_fraction','mean_valid_cells_per_depth','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','mean_boa_bg_valid_fraction','mean_profile_valid_fraction','q95_abs_w_1e6_m_s','output_dir'};
 else
-    summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','boa_bg_valid_count','boa_bg_valid_fraction','mean_wpk_observed_m_s','corr_rebuild_wpk','corr_sample_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_sample_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','output_dir'};
+    summary_header = {'polarity','lat_band','match_count','unique_argo_count','duplicate_match_count','ring_0_1R','ring_1_2R','ring_2_4R','valid_grid_cells','valid_grid_fraction','mean_cx_raw_m_s','mean_u_bg_m_s','cx_rel_m_s','mean_radius_km','history_velocity_match_count','boa_bg_valid_count','boa_bg_valid_fraction','mean_wpk_observed_m_s','corr_rebuild_wpk','q95_abs_rebuild_1e6_m_s','q95_abs_wpk_1e6_m_s','output_dir'};
 end
 group_count = numel(crossing_lats);
 for p = 1:numel(polarities)
@@ -199,7 +158,7 @@ for p = 1:numel(polarities)
             [matches, grid] = build_group(argo_band, meta_band, polarity, band_label, ...
                 argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
                 meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-                time_window_days, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, ...
+                time_window_days, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, ...
                 boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
             grid_file = write_group_outputs(group_dir, matches, grid, polarity, band_label, true);
             grid_files{end+1} = grid_file; %#ok<SAGROW>

@@ -65,17 +65,6 @@ def parse_depth_levels(value: str) -> list[float]:
     return levels
 
 
-def parse_sensitivity_configs(value: str) -> list[str]:
-    allowed = {"baseline", "recommended", "smoother", "strong_support", "low_res_smooth", "high_smooth"}
-    names = [item.strip() for item in value.split(",") if item.strip()]
-    if not names:
-        raise argparse.ArgumentTypeError("--sensitivity-configs must contain at least one name")
-    unknown = sorted(set(names) - allowed)
-    if unknown:
-        raise argparse.ArgumentTypeError(f"unknown sensitivity config(s): {', '.join(unknown)}")
-    return names
-
-
 def matlab_quote(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "''")
 
@@ -151,6 +140,8 @@ def write_npz_from_grid_json(json_path: Path, npz_path: Path) -> None:
         "sample_count",
         "mapped_support",
         "wpk_mapped_support",
+        "dDdx",
+        "dDdy",
         "term1_m_s",
         "term2_m_s",
         "rebuild_w_m_s",
@@ -163,9 +154,6 @@ def write_npz_from_grid_json(json_path: Path, npz_path: Path) -> None:
         "term2_rel_m_s",
         "rebuild_plus_abs_m_s",
         "rebuild_minus_rel_m_s",
-        "sample_term1_m_s",
-        "sample_term2_m_s",
-        "sample_rebuild_w_m_s",
     ]
     arrays = {key: grid[key] for key in array_keys if key in grid}
     with zipfile.ZipFile(npz_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -184,6 +172,8 @@ def write_npz_from_w3d_json(json_path: Path, npz_path: Path) -> None:
         "term1_3d_m_s",
         "term2_3d_m_s",
         "z_rho_anom_3d_m",
+        "dDdx_3d",
+        "dDdy_3d",
         "sample_count_3d",
         "mapped_support_3d",
         "section_axis_coord_over_R",
@@ -261,7 +251,6 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
     bbox = " ".join(f"{item:.12g}" for item in args.bbox)
     crossing_lats = " ".join(f"{lat:.12g}" for lat in args.crossing_lats)
     depth_levels = " ".join(f"{depth:.12g}" for depth in args.depth_levels)
-    sensitivity_configs = " ".join(f"'{name}'" for name in args.sensitivity_configs)
     target_label = latitude_crossing_label(args.target_lat, args.intersect_radius_r)
     argo_mat = matlab_quote(args.argo_mat)
     history_argo_mat = matlab_quote(args.history_argo_mat)
@@ -294,16 +283,12 @@ def _matlab_script(args: argparse.Namespace, manifest_path: Path) -> str:
         .replace("@SMOOTH_PASSES@", str(int(args.smooth_passes)))
         .replace("@CRESSMAN_RADIUS_R@", f"{float(args.cressman_radius_r):.12g}")
         .replace("@CRESSMAN_MIN_OBS@", str(int(args.cressman_min_obs)))
-        .replace("@SAMPLE_GRADIENT_MAX_PROFILES@", str(int(args.sample_gradient_max_profiles)))
         .replace("@VERTICAL_MODE@", str(args.vertical_mode).replace("'", "''"))
-        .replace("@FAST_SENSITIVITY_2D@", "true" if args.fast_sensitivity_2d else "false")
-        .replace("@SENSITIVITY_WORKERS@", str(int(args.workers)))
-        .replace("@SENSITIVITY_CONFIGS@", sensitivity_configs)
         .replace("@COMPUTE_DEVICE@", str(args.compute_device).replace("'", "''"))
         .replace("@MATLAB_PROFILE@", "true" if args.matlab_profile else "false")
-        .replace("@DIAGNOSE_REVERSAL_FACTORS@", "true" if args.diagnose_reversal_factors else "false")
-        .replace("@COMPARE_Z_GEOMETRY_MODES@", "true" if args.compare_z_geometry_modes else "false")
-        .replace("@Z_GEOMETRY_MODE@", str(args.z_geometry_mode).replace("'", "''"))
+        .replace("@GEOMETRY_MODE@", str(args.geometry_mode).replace("'", "''"))
+        .replace("@TRACK_SCHEME@", str(args.track_scheme).replace("'", "''"))
+        .replace("@WORKERS@", str(int(args.workers)))
         .replace("@WRITE_MATCHED_CSV@", "true" if args.write_matched_csv else "false")
         .replace("@WRITE_GRID_JSON@", "true" if args.write_grid_json else "false")
         .replace("@WRITE_GRID_NC@", "true" if args.write_grid_nc else "false")
@@ -376,27 +361,10 @@ def main() -> int:
         help="Minimum profiles within the Cressman influence radius required to map a grid point.",
     )
     parser.add_argument(
-        "--sample-gradient-max-profiles",
-        type=int,
-        default=1000,
-        help="Deterministic cap for the sample-gradient-then-composite diagnostic. Use 0 for all profiles.",
-    )
-    parser.add_argument(
         "--vertical-mode",
         choices=("single_isopycnal", "isopycnal_depth_stack", "thermal_wind_depth_stack"),
         default="single_isopycnal",
         help="single_isopycnal keeps the existing 2-D parking-depth W. isopycnal_depth_stack builds W(x/R,y/R,z). thermal_wind_depth_stack extends parking drift vertically with thermal-wind shear.",
-    )
-    parser.add_argument(
-        "--fast-sensitivity-2d",
-        action="store_true",
-        help="Run the cached 2-D 20N-style sensitivity sweep: match once, then remap the six built-in Cressman/smoothing configurations.",
-    )
-    parser.add_argument(
-        "--sensitivity-configs",
-        type=parse_sensitivity_configs,
-        default=parse_sensitivity_configs("baseline,recommended,smoother,strong_support,low_res_smooth,high_smooth"),
-        help="Comma-separated subset of fast sensitivity configs to run, e.g. baseline,recommended.",
     )
     parser.add_argument(
         "--workers",
@@ -416,20 +384,16 @@ def main() -> int:
         help="Save MATLAB profiler output under the output root for performance audits.",
     )
     parser.add_argument(
-        "--diagnose-reversal-factors",
-        action="store_true",
-        help="Run the 20N-style controlled diagnosis for density-slope, thermal-wind velocity, and term2 choices.",
-    )
-    parser.add_argument(
-        "--compare-z-geometry-modes",
-        action="store_true",
-        help="Run the controlled 20N comparison between BOA-referenced z_rho anomaly geometry and composite-density isosurface geometry.",
-    )
-    parser.add_argument(
-        "--z-geometry-mode",
-        choices=("boa_anomaly", "composite_density_isosurface"),
+        "--geometry-mode",
+        choices=("boa_anomaly", "predecessor_hybrid"),
         default="boa_anomaly",
-        help="Geometry used for z_rho gradients in diagnostic comparison modes.",
+        help="Production geometry mode. main worktree runs boa_anomaly; predecessor_hybrid is retained for the Original validation worktree.",
+    )
+    parser.add_argument(
+        "--track-scheme",
+        choices=("meta4", "meta32_allsat_validation"),
+        default="meta4",
+        help="Track scheme for retained geometry modes. main worktree production uses meta4.",
     )
     parser.add_argument(
         "--depth-levels",

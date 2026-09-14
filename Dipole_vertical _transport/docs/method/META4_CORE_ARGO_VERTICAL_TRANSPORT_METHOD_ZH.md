@@ -1,9 +1,9 @@
 # META4.0 + Core Argo 垂直速度重建方法
 
 本文档记录 `Dipole_vertical _transport/meta4_core_argo_vertical_transport.py`
-当前正式口径。早期 `lat_band`、非 BOA 背景、非 Cressman 映射和
-`profile_diff` 速度口径已从正式入口删除；相关科学疑问只保留在 diagnostics
-入口中。
+当前正式口径。早期 `lat_band`、非 BOA 背景、非 Cressman 映射、
+`profile_diff` 速度口径，以及 `fast-sensitivity/zgeometry/threeway`
+诊断入口已从正式入口删除。
 
 ## 数据源
 
@@ -31,31 +31,39 @@ Argo 使用 TEOS-10 派生密度，默认变量为 `I_sigma1`。历史文件中�
 - 推荐匹配：`--match-mode all`，允许同一 Argo profile 对所有满足条件的涡旋
   各计一次；`nearest` 仅保留为显式保守选项。
 
-## 正式几何与 W
+## 正式等密面几何
 
 正式几何固定为：
 
 ```text
-BOA monthly climatology -> z'_rho -> Cressman composite -> gradient/W
+BOA monthly climatology -> D'_rho -> Cressman composite -> isopycnal geometry
 ```
 
 对每条匹配 profile：
 
 ```text
 rho0 = rho_Argo(parking_depth)
-z_rho = z_Argo(rho0)
-z_rho_bg = z_BOA_monthly_clim(lon, lat, month, rho0)
-z'_rho = z_rho - z_rho_bg
+D_rho = D_Argo(rho0)
+D_rho_bg = D_BOA_monthly_clim(lon, lat, month, rho0)
+D'_rho = D_rho - D_rho_bg
 ```
 
-`z_rho` 和 `z_rho_bg` 都必须由严格 bracket crossing 反插值得到；无 crossing、
+`D_rho` 和 `D_rho_bg` 都必须由严格 bracket crossing 反插值得到；无 crossing、
 弱层结或 bracket 过厚的样本会被剔除。深度变量保存和图像标识均为正深度向下。
+正式流程禁止使用 `eta_rho ≈ rho' / (dρ/dD)` 这类密度导数反推等密面位移；
+密度导数只允许出现在热成风速度剪切等物理计算中，不作为等密面几何来源。
+
+Composite analysis 的边界停在等密面几何：它只输出 `D_rho/D_rho_bg/D'_rho`、
+合成速度、样本支撑和 QC。`term1/term2/rebuild_W` 由独立 physics rebuild
+模块在几何量之后计算。
+
+## W 计算
 
 W 使用向上为正：
 
 ```text
-term1 = + c_x_rel * dz'_rho/dx
-term2 = - [(u_pk - c_x_raw), v_pk] · grad(z'_rho)
+term1 = + c_x_rel * dD'_rho/dx
+term2 = - [(u_pk - c_x_raw), v_pk] · grad(D'_rho)
 rebuild_W = term1 + term2
 ```
 
@@ -89,33 +97,35 @@ dv/dD = -g/(f rho_ref) * d rho'/dx
 这里 `D` 为正深度向下。速度以匹配到的 1000 m parking drift 为锚点，从
 1000 m 向上、向下积分。W 仍向上为正；截面图纵坐标显示正深度数字。
 
-## 诊断入口
+## 保留口径
 
-以下入口保留为诊断，不改变正式生产口径：
+当前 main worktree 保留两个科学口径的命名：
 
-- `--fast-sensitivity-2d`：复用匹配/QC 缓存，对少量 Cressman 参数做 2D 敏感性。
-- `--diagnose-reversal-factors`：检查等密面斜率、热成风速度和 term2 口径对深层反转的影响。
-- `--compare-z-geometry-modes`：对比正式 BOA `z'_rho` 几何与前辈式
-  `composite density -> isosurface` 几何。
-- `--z-geometry-mode`：只在 zgeometry diagnostics 中有效，不允许影响正式生产结果。
+- `--geometry-mode boa_anomaly`：正式生产口径，已在 main worktree 可运行。
+- `--geometry-mode predecessor_hybrid`：前辈兼容口径，定义为
+  `term1` 用 Argo composite absolute density 等密面斜率、热成风速度优先从
+  Argo composite absolute density 积分、`term2` 用 ISAS/background density
+  等密面斜率。该口径目前保留在 Original 验证 worktree，尚未提升为 main
+  worktree 的生产入口。
+
+`META3.2 allsat validation` 是 `predecessor_hybrid` 的轨迹源验证方案，不作为
+独立科学口径。
 
 ## 默认运行
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --match-mode all
 ```
 
-20N 推荐 2D 诊断：
+20N 推荐 2D 运行：
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --target-lat 20 `
   --match-mode all `
-  --fast-sensitivity-2d `
-  --sensitivity-configs recommended `
   --grid-n 61 `
   --cressman-radius-r 1.0 `
   --cressman-min-obs 8 `
@@ -125,7 +135,7 @@ D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
 20N 三维热成风 smoke：
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\eddy_detection\python.exe `
+D:\Util\lever\02_miniforge\envs\Dipole_vertical_transport\python.exe `
   "D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Dipole_vertical _transport\meta4_core_argo_vertical_transport.py" `
   --target-lat 20 `
   --match-mode all `

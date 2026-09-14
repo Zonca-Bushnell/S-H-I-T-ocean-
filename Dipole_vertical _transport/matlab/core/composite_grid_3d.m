@@ -5,13 +5,15 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
     nz = numel(depth_levels);
     nan3 = nan(grid_n, grid_n, nz);
     count3 = zeros(grid_n, grid_n, nz);
-    grid3d = struct('x', X, 'y', Y, 'depth_levels', depth_levels(:), 'w', nan3, 'term1', nan3, 'term2', nan3, ...
+    grid3d = struct('x', X, 'y', Y, 'depth_levels', depth_levels(:), ...
         'z_anom', nan3, 'rho_anom', nan3, 'rho_abs', nan3, 'u_tw', nan3, 'v_tw', nan3, 'count', count3, 'mapped_support', count3, 'valid_profile_count', zeros(nz,1), ...
         'boa_bg_valid_count', zeros(nz,1), 'mean_cx_raw', NaN, 'mean_u_bg', NaN, 'cx_rel', NaN, ...
         'mean_radius_m', NaN, 'section_axis', section_axis, 'section_half_width_r', section_half_width_r, ...
         'section_coord', [], 'section_w', [], 'match_count', 0, 'unique_argo_count', 0, 'duplicate_match_count', 0, ...
         'match_mode', '', 'z_mode', '', 'vertical_mode', vertical_mode, 'thermal_wind_anchor_depth_m', 1000, ...
-        'thermal_wind_f_s_1', NaN, 'min_drho_dz', NaN, 'max_rho_bracket_dz_m', NaN);
+        'thermal_wind_f_s_1', NaN, 'min_drho_dz', NaN, 'max_rho_bracket_dz_m', NaN, ...
+        'grid_mapping', 'cressman', 'cressman_radius_r', cressman_radius_r, 'cressman_min_obs', cressman_min_obs, ...
+        'geometry_stage', 'composite_isopycnal_geometry_only');
     if isempty(matches) || isempty(fieldnames(boa_clim))
         return
     end
@@ -100,19 +102,4 @@ function grid3d = composite_grid_3d(matches, rho, depth, boa_clim, depth_levels,
         grid3d.u_tw = repmat(u_base, 1, 1, nz);
         grid3d.v_tw = repmat(v_base, 1, 1, nz);
     end
-    w_timer = tic;
-    for zz = 1:nz
-        z_grid = grid3d.z_anom(:,:,zz);
-        support = support3(:,:,zz) & isfinite(grid3d.u_tw(:,:,zz)) & isfinite(grid3d.v_tw(:,:,zz));
-        if isfinite(dx_m) && dx_m > 0 && isfinite(dy_m) && dy_m > 0
-            [dzdx, dzdy] = gradient_xy(fillmissing2(z_grid), dx_m, dy_m);
-            term1 = mask_to_support(grid3d.cx_rel .* dzdx, support);
-            term2 = mask_to_support(-((grid3d.u_tw(:,:,zz) - grid3d.mean_cx_raw) .* dzdx + grid3d.v_tw(:,:,zz) .* dzdy), support);
-            grid3d.term1(:,:,zz) = term1;
-            grid3d.term2(:,:,zz) = term2;
-            grid3d.w(:,:,zz) = mask_to_support(term1 + term2, support);
-        end
-    end
-    log_step(sprintf('%s %s W terms computed for %d layers in %.1f s', polarity, band_label, nz, toc(w_timer)));
-    [grid3d.section_coord, grid3d.section_w] = section_from_grid3d(grid3d, section_axis, section_half_width_r);
 end

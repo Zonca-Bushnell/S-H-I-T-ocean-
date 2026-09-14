@@ -32,8 +32,6 @@ function grid_file = write_group_outputs(group_dir, matches, grid, polarity, ban
         write_grid_json(fullfile(group_dir, 'composite_grid.json'), grid, polarity, band_label);
     end
     plot_three_panel(fullfile(group_dir, 'vertical_transport_terms.png'), grid, [polarity ' ' band_label]);
-    plot_sensitivity(fullfile(group_dir, 'velocity_sign_sensitivity.png'), grid, [polarity ' ' band_label]);
     plot_wpk_validation(fullfile(group_dir, 'wpk_validation.png'), grid, [polarity ' ' band_label]);
-    plot_gradient_order_comparison(fullfile(group_dir, 'gradient_order_comparison.png'), grid, [polarity ' ' band_label]);
     write_group_doc(fullfile(group_dir, 'METHOD_ASSUMPTIONS_ZH.md'), matches, grid, polarity, band_label);
 end

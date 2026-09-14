@@ -4,6 +4,16 @@
 当前分支：`Dipole`  
 当前判断：正式程序的问题主要不在 eddy-Argo composite 投影方式，而在 `w = c dz_rho/dx + u · grad(z_rho)` 的物理量构造链条。
 
+## 当前维护状态
+
+截至本次重构，`fast-sensitivity-2d`、`zgeometry comparison` 和
+`threeway z-background` 只作为历史诊断记录保留，不再作为可运行入口维护。
+
+正式 main worktree 的 composite analysis 已收敛为只得到等密面几何、合成速度、
+样本支撑和 QC。`term1/term2/rebuild_W` 不再由 composite 模块直接生成，而是由
+独立 physics rebuild 模块在等密面几何之后计算。正式等密面位移只能通过密度剖面
+严格 bracket 反插得到 `D_rho`；不使用 `eta_rho ≈ rho'/(dρ/dD)` 这类密度导数反推。
+
 ## 本地 PDF 状态
 
 已下载并用 PDF 解析确认可读：

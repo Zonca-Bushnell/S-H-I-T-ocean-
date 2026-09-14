@@ -1,7 +1,7 @@
 function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label, ...
     argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
     meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
-    time_window_days, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles, ...
+    time_window_days, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, ...
     boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m)
 
     if strcmp(match_mode, 'all')
@@ -9,13 +9,14 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
             argo_lon, argo_lat, argo_time, argo_park, argo_pf, argo_u, argo_v, argo_wpk, history_match_mask, rho, depth, ...
             meta_lon, meta_lat, meta_time, meta_track, meta_radius, meta_cx, ...
             time_window_days, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m, match_mode, max_matches_per_group, deg_m);
-        grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
+        grid = composite_grid(matches, grid_n, min_bin_count, smooth_passes, cressman_radius_r, cressman_min_obs);
         grid.match_mode = match_mode;
         grid.z_mode = 'anomaly_boa_climatology';
         grid.z_rho_min_m = z_rho_min_m;
         grid.z_rho_max_m = z_rho_max_m;
         grid.min_drho_dz = min_drho_dz;
         grid.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
+        grid = rebuild_w_from_geometry(grid, plot_filled_gradient);
         return
     end
 
@@ -69,11 +70,12 @@ function [matches, grid] = build_group(argo_idx, meta_idx, polarity, band_label,
     end
     rows = apply_rho0_mode(rows, rho, depth, argo_park, boa_clim, z_rho_min_m, z_rho_max_m, min_drho_dz, max_rho_bracket_dz_m);
     matches = rows;
-    grid = composite_grid(matches, grid_n, min_bin_count, plot_filled_gradient, smooth_passes, cressman_radius_r, cressman_min_obs, sample_gradient_max_profiles);
+    grid = composite_grid(matches, grid_n, min_bin_count, smooth_passes, cressman_radius_r, cressman_min_obs);
     grid.match_mode = match_mode;
     grid.z_mode = 'anomaly_boa_climatology';
     grid.z_rho_min_m = z_rho_min_m;
     grid.z_rho_max_m = z_rho_max_m;
     grid.min_drho_dz = min_drho_dz;
     grid.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
+    grid = rebuild_w_from_geometry(grid, plot_filled_gradient);
 end

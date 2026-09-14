@@ -20,6 +20,10 @@ function write_grid_json_3d(path, grid3d, polarity, band_label)
     if isfield(grid3d, 'rho_abs')
         G.rho_abs_3d = permute(grid3d.rho_abs, [3 1 2]);
     end
+    if isfield(grid3d, 'dDdx')
+        G.dDdx_3d = permute(grid3d.dDdx, [3 1 2]);
+        G.dDdy_3d = permute(grid3d.dDdy, [3 1 2]);
+    end
     G.u_thermal_wind_3d_m_s = permute(grid3d.u_tw, [3 1 2]);
     G.v_thermal_wind_3d_m_s = permute(grid3d.v_tw, [3 1 2]);
     G.sample_count_3d = permute(grid3d.count, [3 1 2]);

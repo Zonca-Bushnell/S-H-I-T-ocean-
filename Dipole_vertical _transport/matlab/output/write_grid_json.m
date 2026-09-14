@@ -10,8 +10,7 @@ function write_grid_json(path, grid, polarity, band_label)
         'max_rho_bracket_dz_m', grid.max_rho_bracket_dz_m, ...
         'match_count', grid.match_count, 'unique_argo_count', grid.unique_argo_count, 'duplicate_match_count', grid.duplicate_match_count, ...
         'boa_bg_valid_count', grid.boa_bg_valid_count, ...
-        'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count), ...
-        'corr_sample_rebuild_wpk', grid.corr_sample_rebuild_wpk);
+        'valid_grid_cells', sum(isfinite(grid.rebuild_w(:))), 'total_grid_cells', numel(grid.count));
     G.x_over_R = grid.x;
     G.y_over_R = grid.y;
     G.z_rho_m = grid.z;
@@ -23,6 +22,10 @@ function write_grid_json(path, grid, polarity, band_label)
     G.sample_count = grid.count;
     G.mapped_support = grid.mapped_support;
     G.wpk_mapped_support = grid.wpk_mapped_support;
+    if isfield(grid, 'dDdx')
+        G.dDdx = grid.dDdx;
+        G.dDdy = grid.dDdy;
+    end
     G.term1_m_s = grid.term1;
     G.term2_m_s = grid.term2;
     G.rebuild_w_m_s = grid.rebuild_w;
@@ -35,9 +38,6 @@ function write_grid_json(path, grid, polarity, band_label)
     G.term2_rel_m_s = grid.term2_rel;
     G.rebuild_plus_abs_m_s = grid.rebuild_plus_abs;
     G.rebuild_minus_rel_m_s = grid.rebuild_minus_rel;
-    G.sample_term1_m_s = grid.sample_term1;
-    G.sample_term2_m_s = grid.sample_term2;
-    G.sample_rebuild_w_m_s = grid.sample_rebuild_w;
     fid = fopen(path, 'w');
     fwrite(fid, jsonencode(G), 'char');
     fclose(fid);

@@ -25,4 +25,10 @@ function [matches, grid3d] = build_group_3d(argo_idx, meta_idx, polarity, band_l
     grid3d.z_mode = z_mode;
     grid3d.min_drho_dz = min_drho_dz;
     grid3d.max_rho_bracket_dz_m = max_rho_bracket_dz_m;
+    rebuild_timer = tic;
+    grid3d = rebuild_w_3d_from_geometry(grid3d);
+    grid3d.section_axis = section_axis;
+    grid3d.section_half_width_r = section_half_width_r;
+    [grid3d.section_coord, grid3d.section_w] = section_from_grid3d(grid3d, section_axis, section_half_width_r);
+    log_step(sprintf('%s %s W rebuilt from 3D geometry in %.1f s', polarity, band_label, toc(rebuild_timer)));
 end

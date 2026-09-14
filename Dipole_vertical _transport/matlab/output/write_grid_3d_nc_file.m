@@ -12,6 +12,11 @@ function write_grid_3d_nc_file(path, grid3d, polarity, band_label)
     write_nc_3d(path, 'term2_3d_m_s', grid3d.term2);
     write_nc_3d(path, 'z_rho_anom_3d_m', grid3d.z_anom);
     write_nc_3d(path, 'rho_anom_3d', grid3d.rho_anom);
+    write_nc_3d(path, 'rho_abs_3d', grid3d.rho_abs);
+    if isfield(grid3d, 'dDdx')
+        write_nc_3d(path, 'dDdx_3d', grid3d.dDdx);
+        write_nc_3d(path, 'dDdy_3d', grid3d.dDdy);
+    end
     write_nc_3d(path, 'u_thermal_wind_3d_m_s', grid3d.u_tw);
     write_nc_3d(path, 'v_thermal_wind_3d_m_s', grid3d.v_tw);
     write_nc_3d(path, 'sample_count_3d', grid3d.count);
