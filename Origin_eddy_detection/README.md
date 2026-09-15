@@ -271,6 +271,28 @@ rather than silently deleting the SSH object. Surface rows add
 `surface_definition=ssh_effective_contour_primary`,
 `ssh_contour_center_i/j`, `ssh_contour_center_lon/lat`,
 `ssh_contour_level`, and sampled `ssh_contour_boundary_i/j` for overview maps.
+The SSH-primary contour scan is multi-level: candidate closed contours are
+tested across SSH levels, weak-amplitude contours can be rejected with
+`--ssh-primary-min-amplitude-cm`, and contours enclosing multiple same-sign SSH
+extrema are skipped so broad wave packets are less likely to merge several
+eddies into one effective contour.
+
+The default OFES unified boundary mode is:
+
+```text
+boundary_mode = ssh_primary_velocity_streamline_effective
+SSH seed -> local velocity-minimum center
+         -> SSH anomaly multi-level effective-contour object discovery
+         -> closed velocity-streamline boundary/core
+         -> SSH discovery fields are retained but do not reject the object
+```
+
+In this mode, SSH anomaly contours are treated as the discovery layer, while the
+final surface boundary is the first accepted closed velocity streamline around
+the weak speed center. Accepted rows are marked
+`boundary_source=velocity_streamline_effective_contour` and include sampled
+`streamline_boundary_i/j` points. SSH discovery fields are preserved through
+`ssh_contour_*` and `ssh_primary_discovery_pass` for downstream shape/overlap QC.
 
 The seed and vertical-extension chain is unchanged: surface seeds still come
 from filtered `zos_glor`, surface centers still come from local
@@ -384,6 +406,7 @@ Set-Location 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Origin_eddy_detec
   --surface-search-cells 8 --deep-search-cells 6 --start-radius-cells 3 --max-radius-cells 8 `
   --boundary-mode ssh_effective_contour_primary `
   --ssh-primary-level-count 16 --ssh-primary-window-factor 4 --ssh-primary-max-radius-factor 2 `
+  --ssh-primary-min-amplitude-cm 2 `
   --ssh-consensus-min-finite-fraction 0.70 `
   --jet-core-speed-percentile 80 --jet-core-overlap-max 0.50 `
   --hua-backend python --preload-day-uv --write-day-figures --resume --skip-axis-examples

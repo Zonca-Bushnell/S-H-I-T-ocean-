@@ -206,7 +206,7 @@ class DetectionParams:
     deep_search_cells: int
     require_boundary_monotonic_rotation: bool = False
     boundary_monotonic_exception_limit: int = 0
-    boundary_mode: str = "circle_strict_original"
+    boundary_mode: str = "ssh_primary_velocity_streamline_effective"
     streamline_direction_exception_fraction: float = 0.10
     streamline_step_cells: float = 0.5
     streamline_max_steps: int = 180
@@ -1999,8 +1999,12 @@ def _ssh_primary_with_streamline_effective_boundary(
     lon: np.ndarray | None = None,
     lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
+    discovery = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
     out: dict[str, float | bool | str] = {
         **_empty_consensus_fields(),
+        **discovery,
+        "ssh_primary_discovery_pass": bool(discovery.get("hua_pass", False)),
+        "ssh_primary_discovery_reason": str(discovery.get("catalog_acceptance_reason", "ssh_primary_rejected")),
         "boundary_mode": "ssh_primary_velocity_streamline_effective",
         "surface_definition": "ssh_primary_velocity_streamline_effective",
         "circle_passed": False,
@@ -2020,13 +2024,6 @@ def _ssh_primary_with_streamline_effective_boundary(
         "streamline_winding_turns": 0.0,
         "streamline_direction_exception_fraction": np.nan,
         "streamline_effective_valid_contour_count": 0.0,
-        "ssh_contour_closed": False,
-        "ssh_contour_radius_cells": np.nan,
-        "ssh_contour_area_cells": 0.0,
-        "ssh_contour_center_i": np.nan,
-        "ssh_contour_center_j": np.nan,
-        "ssh_contour_center_lon": np.nan,
-        "ssh_contour_center_lat": np.nan,
     }
     center_i = float(seed_i)
     center_j = float(seed_j)
@@ -3642,6 +3639,7 @@ def _write_docs(output_dir: Path, args: argparse.Namespace, summary: dict[str, o
         "- `velocity_streamline_contour` 是 ACC TEST 实验口径：每层围绕速度弱中心寻找闭合速度流线轮廓，并在该轮廓上评估方向一致性和切向对齐。",
         "- `velocity_streamline_ssh_consensus` 是 OFES 诊断口径：把速度流线作为强动力核，再用 SSH/effective-contour 共识和 jet-core overlap 诊断决定是否接受为 isolated eddy interior；`no_closed_streamline` seed 可经 SSH+固定圆周 fallback 接受。",
         "- `ssh_effective_contour_primary` 是 OFES/META-like 表层口径：表层由 SSH anomaly 闭合等值线定义 eddy interior，velocity streamline 只作为动力核和边界质量诊断；深层仍沿用现有 Hua 速度检验延展。",
+        "- `ssh_primary_velocity_streamline_effective` 是 OFES 统一默认口径：SSH anomaly 只作为发现层，表层最终边界由速度弱中心附近的闭合 velocity streamline 圆判据决定；SSH discovery 字段保留供统一 shape/overlap/persistence QC。",
         "- `pre_hua` 是唯一中心加密顺序：速度弱中心先做连续坐标加密，再用 refined center 进入 Hua 检验。",
         "- `--hua-backend matlab` 使用 MATLAB Engine 执行同口径边界 kernel；Python 仍负责 IO、垂向延展、表格输出和后续 shape 链条。",
         "- `pass_rate_breakdown.csv/json` 给出 surface/all-layer 通过率与失败占比；新 SSH consensus 模式额外按 `boundary_source` 统计 pure streamline、fallback 与 jet/SSH 拒绝来源；`sensitivity_matrix.csv/parquet` 给出原流线模式下 tangent/monotonic 参数敏感度。",
@@ -3933,7 +3931,7 @@ def main() -> None:
             "ssh_effective_contour_primary",
             "ssh_primary_velocity_streamline_effective",
         ],
-        default="circle_strict_original",
+        default="ssh_primary_velocity_streamline_effective",
     )
     parser.add_argument(
         "--hua-backend",

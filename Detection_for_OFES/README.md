@@ -599,6 +599,40 @@ failures such as `no_closed_streamline`, `velocity_ratio`, `angle_jump`,
 `boundary_monotonic_rotation`, `opposite_reversal`, and `tangent_alignment`;
 there are no `ssh_primary_*` contour rejections.
 
+### Unified OFES Eddy Catalog
+
+For production-style runs, use the unified orchestrator. It first ensures the
+latest Rossby-radius filter exists, then runs the default
+`ssh_primary_velocity_streamline_effective` detection by day, applies shape,
+overlap, and persistence QC, and writes raw and final catalogs.
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.build_unified_eddy_catalog `
+  --filter-input-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter' `
+  --filter-output-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --output-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_streamline_rossby_19910101_smoke' `
+  --start 1991-01-01 --end 1991-01-01 `
+  --max-depth-m 3 `
+  --workers 1
+```
+
+The default filter is `rossby_lower_latadaptive_upper`:
+
+```text
+L_small(lat) = clip(0.5 * R1, 10, 180) km
+L_large(lat) = lat_adaptive(180, 180) = 180 km
+```
+
+The orchestrator writes:
+
+```text
+<output-root>/raw_detection/daily_runs/YYYYMMDD/
+<output-root>/daily_runs/YYYYMMDD/
+<output-root>/logs/
+<output-root>/unified_catalog_summary.csv/json
+```
+
 ### Latitude-Adaptive 50-180 km Smoke
 
 The fixed `LP50-LP500` experiment can over-retain broad wave packets in the

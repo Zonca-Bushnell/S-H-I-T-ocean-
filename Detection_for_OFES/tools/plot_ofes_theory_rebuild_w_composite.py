@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,9 +14,14 @@ from PIL import Image, ImageDraw, ImageFont
 from ..ofes_io import ctl_path, expected_dta_bytes, open_dta_memmap, parse_ctl, require_daily_file
 from ..run_ofes_rebuild_w import (
     SelectedObject,
+    add_composite_array,
     build_parser as build_w_parser,
-    finalize_composite_accumulator,
-    init_composite_accumulator,
+    cressman_kernel_1d,
+    cressman_kernel_2d,
+    cressman_map_3d,
+    cressman_map_section,
+    crossing_sections_for_keys,
+    finalize_sum_count,
     json_safe,
     load_detection_tables,
     lon_delta_deg,
@@ -27,7 +33,6 @@ from ..run_ofes_rebuild_w import (
     resolve_detection_table_dir,
     safe_token,
     summarize_object,
-    update_composite_accumulator,
     write_csv,
     write_json,
 )
@@ -37,6 +42,7 @@ from ..w_rebuild_config import DEFAULT_DATA_ROOT
 DEFAULT_RESULT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_streamline_cpu_jan01_jan19_life1")
 DEFAULT_OUTPUT_ROOT = DEFAULT_RESULT_ROOT / "w_rebuild_diagnostics" / "theory_rebuild_w_coherent_alpha_aligned_by_polarity_hemisphere"
 THEORY_KEYS = ["term1_m_s", "term2_m_s", "rebuild_w_m_s"]
+DENSITY_KEYS = ["prho_for_rebuild"]
 
 
 def main() -> None:
@@ -59,10 +65,21 @@ def main() -> None:
     raw_cache: dict[str, dict[str, np.memmap]] = {}
     summary_rows: list[dict[str, object]] = []
 
-    for group_key in ["NH_cyclonic", "NH_anticyclonic", "SH_cyclonic", "SH_anticyclonic"]:
+    selected_groups = parse_groups(cli.groups)
+    for group_key in selected_groups:
         group_objects = objects.get(group_key, [])
         if not group_objects:
             summary_rows.append(empty_summary_row(group_key, "no coherent object-days"))
+            continue
+        hemisphere, polarity = group_key.split("_", 1)
+        token = f"{hemisphere}_{polarity}"
+        npz_path = grids_dir / f"theory_rebuild_w_composite_alpha_{token}.npz"
+        json_path = grids_dir / f"theory_rebuild_w_composite_alpha_{token}.json"
+        section_png = figures_dir / f"theory_rebuild_w_section_alpha_{token}.png"
+        slices_png = figures_dir / f"theory_rebuild_w_slices_alpha_{token}.png"
+        if cli.resume and density_safe_outputs_exist(npz_path, json_path, section_png, slices_png):
+            print(f"[{group_key}] resume: existing composite outputs found, skipping rebuild", flush=True)
+            summary_rows.append(summary_row_from_existing(group_key, npz_path, json_path, section_png, slices_png, group_objects))
             continue
         composite = rebuild_group_composite(
             group_key,
@@ -78,7 +95,6 @@ def main() -> None:
         if composite is None:
             summary_rows.append(empty_summary_row(group_key, "all object rebuilds failed"))
             continue
-        hemisphere, polarity = group_key.split("_", 1)
         composite["hemisphere"] = hemisphere
         composite["polarity"] = polarity
         composite["shape_class_filter"] = "coherent"
@@ -87,22 +103,18 @@ def main() -> None:
         composite["alpha_source"] = "global_ls_centerline"
         composite["alpha_reference"] = "Zhe/composite_3d_lifecycle.py"
 
-        token = f"{hemisphere}_{polarity}"
-        npz_path = grids_dir / f"theory_rebuild_w_composite_alpha_{token}.npz"
-        json_path = grids_dir / f"theory_rebuild_w_composite_alpha_{token}.json"
         arrays = {key: value for key, value in composite.items() if isinstance(value, np.ndarray)}
         np.savez_compressed(npz_path, **arrays)
         write_json(json_path, {key: json_safe(value) for key, value in composite.items() if not isinstance(value, np.ndarray)})
 
-        section_png = figures_dir / f"theory_rebuild_w_section_alpha_{token}.png"
-        slices_png = figures_dir / f"theory_rebuild_w_slices_alpha_{token}.png"
         plot_theory_section(composite, section_png)
         plot_theory_slices(composite, slices_png)
 
         summary_rows.append(summary_row(group_key, composite, npz_path, json_path, section_png, slices_png, group_objects))
 
-    write_csv(output_root / "theory_rebuild_w_alpha_group_summary.csv", summary_rows)
-    write_json(output_root / "theory_rebuild_w_alpha_group_summary.json", summary_rows)
+    summary_suffix = "" if selected_groups == default_groups() else "_" + "_".join(safe_token(group) for group in selected_groups)
+    write_csv(output_root / f"theory_rebuild_w_alpha_group_summary{summary_suffix}.csv", summary_rows)
+    write_json(output_root / f"theory_rebuild_w_alpha_group_summary{summary_suffix}.json", summary_rows)
     cache_size = len(getattr(runtime_args, "_daily_memmap_cache", {}))
     print(f"[theory-rebuild-composite] cached daily memmaps: {cache_size}", flush=True)
     print(f"[theory-rebuild-composite] wrote {output_root}")
@@ -124,7 +136,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cressman-min-objects", type=int, default=8)
     parser.add_argument("--max-objects-per-group", type=int, default=0, help="Use >0 for smoke runs.")
     parser.add_argument("--workers", type=int, default=1, help="Parallel object rebuild workers. Use 4-8 for full OFES runs.")
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="Skip group outputs that already have npz/json/figures.")
+    parser.add_argument(
+        "--groups",
+        default=",".join(default_groups()),
+        help="Comma-separated groups to rebuild, e.g. NH_cyclonic. Defaults to all four hemisphere/polarity groups.",
+    )
     return parser.parse_args()
+
+
+def default_groups() -> list[str]:
+    return ["NH_cyclonic", "NH_anticyclonic", "SH_cyclonic", "SH_anticyclonic"]
+
+
+def parse_groups(value: str) -> list[str]:
+    allowed = set(default_groups())
+    groups = [part.strip() for part in str(value).split(",") if part.strip()]
+    if not groups:
+        raise ValueError("--groups must include at least one group")
+    unknown = [group for group in groups if group not in allowed]
+    if unknown:
+        raise ValueError(f"Unknown --groups value(s): {', '.join(unknown)}. Allowed: {', '.join(default_groups())}")
+    return groups
+
+
+def density_safe_outputs_exist(npz_path: Path, json_path: Path, section_png: Path, slices_png: Path) -> bool:
+    if not all(path.exists() for path in [npz_path, json_path, section_png, slices_png]):
+        return False
+    try:
+        with json_path.open("r", encoding="utf-8") as file:
+            meta = json.load(file)
+    except Exception:
+        return False
+    policy = str(meta.get("density_composite_policy", ""))
+    try:
+        with np.load(npz_path) as npz:
+            forbidden = {"composite_z_rho_anom_m", "section_z_rho_anom_m", "profile_rho_z_used", "composite_rho_prime_for_rebuild"}
+            if forbidden.intersection(npz.files):
+                return False
+    except Exception:
+        return False
+    return "no rho_z" in policy and "grad_eta" in policy
 
 
 def build_runtime_args(cli: argparse.Namespace) -> argparse.Namespace:
@@ -328,8 +380,8 @@ def rebuild_group_composite(
         nonlocal accumulator
         alpha_rows.append(info)
         if accumulator is None:
-            accumulator = init_composite_accumulator(grid, float(grid["center_lat"]), obj.polarity, args, "coherent")
-        update_composite_accumulator(accumulator, grid, args)
+            accumulator = init_theory_composite_accumulator(grid, float(grid["center_lat"]), obj.polarity, args)
+        update_theory_composite_accumulator(accumulator, grid, args)
         print(f"[{group_key}] {idx}/{len(objects)} {obj.hua_object_id} alpha={info['alpha_deg']:.1f} ok", flush=True)
 
     items = list(enumerate(objects, start=1))
@@ -356,7 +408,7 @@ def rebuild_group_composite(
                 print(f"[{group_key}] {idx}/{len(objects)} {obj.hua_object_id} failed: {exc}", flush=True)
     if accumulator is None:
         return None
-    composite = finalize_composite_accumulator(accumulator, args)
+    composite = finalize_theory_composite_accumulator(accumulator, args)
     composite["failed_object_count"] = int(failed)
     attach_alpha_summary(composite, alpha_rows)
     return composite
@@ -367,7 +419,7 @@ def apply_alpha_alignment(grid: dict[str, object], alpha_deg: float) -> None:
     y = np.asarray(grid["y_over_r"], dtype="f8")
     xx, yy = np.meshgrid(x, y)
     x_orig, y_orig = rotate_xy(xx, yy, -float(alpha_deg))
-    for key in THEORY_KEYS:
+    for key in THEORY_KEYS + DENSITY_KEYS:
         grid[key] = rotate_scalar_stack(np.asarray(grid[key], dtype="f4"), x, y, x_orig, y_orig)
 
 
@@ -418,6 +470,146 @@ def bilinear_nan_sample(field: np.ndarray, xi: np.ndarray, yi: np.ndarray) -> np
     return np.divide(num, den, out=np.full_like(num, np.nan, dtype="f8"), where=den > 1.0e-6).astype("f4")
 
 
+def init_theory_composite_accumulator(grid: dict[str, object], target_lat: float, polarity: str, args: argparse.Namespace) -> dict[str, object]:
+    depth = np.asarray(grid["depth_m"], dtype="f4")
+    x = np.asarray(grid["x_over_r"], dtype="f4")
+    y = np.asarray(grid["y_over_r"], dtype="f4")
+    shape3 = (depth.size, y.size, x.size)
+    shape2 = (depth.size, x.size)
+    keys3d = THEORY_KEYS + DENSITY_KEYS
+    return {
+        "target_lat": float(target_lat),
+        "polarity": polarity,
+        "depth_m": depth,
+        "x_over_r": x,
+        "y_over_r": y,
+        "cressman_radius_r": float(args.cressman_radius_r),
+        "cressman_min_objects": int(args.cressman_min_objects),
+        "multipole_class": "coherent",
+        "density_composite_policy": "composite prho only; no rho_z, rho_prime, eta_rho, or grad_eta composited",
+        "isopycnal_depth_policy": "interpolate depth where composite prho equals center-profile density levels; no density derivative",
+        "object_count": 0,
+        "object_ids": [],
+        "sum3d": {key: np.zeros(shape3, dtype="f8") for key in keys3d},
+        "count3d": {key: np.zeros(shape3, dtype="u2") for key in keys3d},
+        "sum_section": {key: np.zeros(shape2, dtype="f8") for key in keys3d},
+        "count_section": {key: np.zeros(shape2, dtype="u2") for key in keys3d},
+        "sum_profile": {"prho_center_profile": np.zeros(depth.shape, dtype="f8")},
+        "count_profile": {"prho_center_profile": np.zeros(depth.shape, dtype="u2")},
+    }
+
+
+def update_theory_composite_accumulator(accumulator: dict[str, object], grid: dict[str, object], args: argparse.Namespace) -> None:
+    accumulator["object_count"] = int(accumulator["object_count"]) + 1
+    accumulator["object_ids"].append(str(grid["hua_object_id"]))
+    x = np.asarray(accumulator["x_over_r"], dtype="f8")
+    y = np.asarray(accumulator["y_over_r"], dtype="f8")
+    radius_r = float(args.cressman_radius_r)
+    kernel2d = cressman_kernel_2d(x, y, radius_r)
+    kernel1d = cressman_kernel_1d(x, radius_r)
+    keys3d = THEORY_KEYS + DENSITY_KEYS
+
+    for key in keys3d:
+        mapped, support = cressman_map_3d(np.asarray(grid[key], dtype="f4"), kernel2d)
+        add_composite_array(accumulator["sum3d"][key], accumulator["count3d"][key], mapped, support)
+
+    sections = crossing_sections_for_keys(grid, keys3d)
+    for key in keys3d:
+        mapped, support = cressman_map_section(np.asarray(sections[key], dtype="f4"), kernel1d)
+        add_composite_array(accumulator["sum_section"][key], accumulator["count_section"][key], mapped, support)
+
+    cy = len(y) // 2
+    cx = len(x) // 2
+    profile = np.asarray(grid["prho_for_rebuild"], dtype="f4")[:, cy, cx]
+    valid = np.isfinite(profile)
+    accumulator["sum_profile"]["prho_center_profile"][valid] += profile[valid]
+    accumulator["count_profile"]["prho_center_profile"][valid] += 1
+
+
+def finalize_theory_composite_accumulator(accumulator: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    min_objects = int(args.cressman_min_objects)
+    out = {
+        "target_lat": float(accumulator["target_lat"]),
+        "polarity": str(accumulator["polarity"]),
+        "depth_m": np.asarray(accumulator["depth_m"], dtype="f4"),
+        "x_over_r": np.asarray(accumulator["x_over_r"], dtype="f4"),
+        "y_over_r": np.asarray(accumulator["y_over_r"], dtype="f4"),
+        "cressman_radius_r": float(accumulator["cressman_radius_r"]),
+        "cressman_min_objects": int(accumulator["cressman_min_objects"]),
+        "multipole_class": str(accumulator["multipole_class"]),
+        "density_composite_policy": str(accumulator["density_composite_policy"]),
+        "isopycnal_depth_policy": str(accumulator["isopycnal_depth_policy"]),
+        "object_count": int(accumulator["object_count"]),
+        "object_ids": list(accumulator["object_ids"]),
+    }
+    for key in THEORY_KEYS + DENSITY_KEYS:
+        values = finalize_sum_count(accumulator["sum3d"][key], accumulator["count3d"][key], min_objects)
+        out[f"composite_{key}"] = values
+        out[f"support_objects_{key}"] = accumulator["count3d"][key]
+        section = finalize_sum_count(accumulator["sum_section"][key], accumulator["count_section"][key], min_objects)
+        out[f"section_{key}"] = section
+        out[f"section_support_objects_{key}"] = accumulator["count_section"][key]
+    profile = finalize_sum_count(
+        accumulator["sum_profile"]["prho_center_profile"],
+        accumulator["count_profile"]["prho_center_profile"],
+        1,
+    )
+    out["profile_prho_center_profile"] = profile
+    out["profile_support_objects_prho_center_profile"] = accumulator["count_profile"]["prho_center_profile"]
+    iso = composite_isopycnal_depths(
+        np.asarray(out["composite_prho_for_rebuild"], dtype="f4"),
+        np.asarray(out["depth_m"], dtype="f4"),
+        profile,
+    )
+    out.update(iso)
+    rebuild = np.asarray(out["composite_rebuild_w_m_s"], dtype="f4")
+    section_rebuild = np.asarray(out["section_rebuild_w_m_s"], dtype="f4")
+    out["q95_abs_rebuild_1e6_m_s"] = q95_abs(rebuild) * 1.0e6
+    out["q95_abs_section_rebuild_1e6_m_s"] = q95_abs(section_rebuild) * 1.0e6
+    out["valid_grid_fraction"] = float(np.isfinite(rebuild).sum() / rebuild.size)
+    out["valid_section_fraction"] = float(np.isfinite(section_rebuild).sum() / section_rebuild.size)
+    support = np.asarray(out["support_objects_rebuild_w_m_s"])
+    out["mean_support_objects"] = float(np.nanmean(np.where(support > 0, support, np.nan)))
+    out["max_support_objects"] = int(np.nanmax(support)) if support.size else 0
+    return out
+
+
+def composite_isopycnal_depths(prho: np.ndarray, depth: np.ndarray, center_profile: np.ndarray) -> dict[str, object]:
+    reference_depths = np.asarray([300.0, 500.0, 800.0], dtype="f4")
+    finite_depth = np.isfinite(depth)
+    finite_profile = np.isfinite(center_profile) & finite_depth
+    if np.count_nonzero(finite_profile) < 2:
+        levels = np.full(reference_depths.shape, np.nan, dtype="f4")
+    else:
+        levels = np.interp(reference_depths, depth[finite_profile], center_profile[finite_profile]).astype("f4")
+    iso = np.full((levels.size, prho.shape[1], prho.shape[2]), np.nan, dtype="f4")
+    for idx, level in enumerate(levels):
+        if not np.isfinite(level):
+            continue
+        iso[idx] = interpolate_isopycnal_depth(prho, depth, float(level))
+    return {
+        "isopycnal_reference_depths_m": reference_depths,
+        "isopycnal_density_levels": levels,
+        "composite_isopycnal_depth_m": iso,
+        "section_isopycnal_depth_m": iso[:, iso.shape[1] // 2, :],
+    }
+
+
+def interpolate_isopycnal_depth(prho: np.ndarray, depth: np.ndarray, level: float) -> np.ndarray:
+    out = np.full(prho.shape[1:], np.nan, dtype="f4")
+    for k in range(len(depth) - 1):
+        r0 = prho[k]
+        r1 = prho[k + 1]
+        valid = np.isfinite(r0) & np.isfinite(r1)
+        crosses = valid & (((r0 <= level) & (level <= r1)) | ((r1 <= level) & (level <= r0))) & (np.abs(r1 - r0) > 1.0e-8)
+        fill = crosses & ~np.isfinite(out)
+        if not np.any(fill):
+            continue
+        frac = (level - r0[fill]) / (r1[fill] - r0[fill])
+        out[fill] = depth[k] + frac.astype("f4") * (depth[k + 1] - depth[k])
+    return out
+
+
 def attach_alpha_summary(composite: dict[str, object], alpha_rows: list[dict[str, float]]) -> None:
     if not alpha_rows:
         return
@@ -463,7 +655,8 @@ def summary_row(
         "q95_abs_term2_1e6_m_s": q95_abs(np.asarray(composite["composite_term2_m_s"])) * 1.0e6,
         "q95_abs_rebuild_1e6_m_s": q95_abs(np.asarray(composite["composite_rebuild_w_m_s"])) * 1.0e6,
         "q95_abs_section_rebuild_1e6_m_s": q95_abs(np.asarray(composite["section_rebuild_w_m_s"])) * 1.0e6,
-        "eta_rho_q95_abs_m": float(composite.get("eta_rho_q95_abs_m", np.nan)),
+        "density_composite_policy": str(composite.get("density_composite_policy", "")),
+        "isopycnal_depth_policy": str(composite.get("isopycnal_depth_policy", "")),
         "mean_radius_km": float(np.nanmean(radii)) if radii.size else np.nan,
         "mean_layer_count": float(np.nanmean(layer_counts)) if layer_counts.size else np.nan,
         "npz_path": str(npz_path),
@@ -471,6 +664,24 @@ def summary_row(
         "section_png": str(section_png),
         "slices_png": str(slices_png),
     }
+
+
+def summary_row_from_existing(
+    group_key: str,
+    npz_path: Path,
+    json_path: Path,
+    section_png: Path,
+    slices_png: Path,
+    source_objects: list[SelectedObject],
+) -> dict[str, object]:
+    with np.load(npz_path) as npz:
+        arrays = {key: npz[key] for key in npz.files}
+    with json_path.open("r", encoding="utf-8") as file:
+        meta = json.load(file)
+    composite: dict[str, object] = {**meta, **arrays}
+    row = summary_row(group_key, composite, npz_path, json_path, section_png, slices_png, source_objects)
+    row["resume_skipped_existing_outputs"] = True
+    return row
 
 
 def empty_summary_row(group_key: str, reason: str) -> dict[str, object]:
