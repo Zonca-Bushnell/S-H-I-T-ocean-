@@ -401,11 +401,21 @@ E:\DATA\01_Eddy_correspond\02_OFES\rossby_radius_chelton1998\...\rossrad.nc
   --max-depth-layers 1 --overwrite
 ```
 
-On the Jan1 `tile_topn=10` smoke, this scheme reduces `abs(lat)<20` accepted
-objects from `371` to `325`, keeps non-WBC subtropics at `510` versus `519`,
-and raises non-ACC south mid/high-lat objects from `80` to `91`. North
-mid/high-lat remains slightly lower (`156` versus `181`), so the filter is a
-first latitude-adaptive step, not a replacement for future radius/QC tuning.
+For the Jan1 smoke, also relax the SSH-contour minimum equivalent radius from
+`3` cells to `2` cells. High-latitude coherent eddies can be smaller than the
+3-cell gate, while the R1-scaled lower cutoff prevents the same relaxation from
+reintroducing near-equatorial speckle:
+
+```text
+--start-radius-cells 2 --max-radius-cells 12
+```
+
+With `tile_topn=10`, this combined scheme reduces `abs(lat)<20` accepted objects
+from `371` to `326`, keeps non-WBC subtropics at `515` versus `519`, and raises
+non-ACC mid/high-lat objects from `261` to `265`; south non-ACC mid/high rises
+from `80` to `88`. North mid/high remains `177` versus `181`, so the remaining
+gaps are subpolar-specific and should be handled in a later region-aware radius
+or persistence step rather than by further global filter retuning.
 
 Run the corresponding Jan1 SSH-primary smoke with the same detection settings
 and `--ssh-primary-min-amplitude-cm 1`. The SSH-primary scan can be slow on
