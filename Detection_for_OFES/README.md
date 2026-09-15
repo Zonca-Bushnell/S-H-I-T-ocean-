@@ -560,6 +560,45 @@ $env:PYTHONNOUSERSITE='1'
 
 Add `--exclude-jet-flagged` for the no-jet comparison views.
 
+### SSH-Primary Velocity-Streamline Effective Without SSH Gate
+
+`ssh_primary_velocity_streamline_effective` now uses SSH extrema only as seeds.
+The surface acceptance gate is the velocity streamline circle check around the
+speed weak center; the SSH anomaly closed contour is not used as an
+accept/reject threshold.
+
+```text
+SSH extremum seed
+  -> seeded speed-minimum center + subgrid refinement
+  -> radius scan start_radius_cells..max_radius_cells
+  -> closed velocity streamline circle check
+  -> pass = first valid streamline boundary
+  -> fail = no_closed_streamline_effective
+```
+
+Run the Jan1 surface smoke on the final Rossby-radius filter:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Origin_eddy_detection.src.eddy_pipeline.detection_hybrid `
+  --filter-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --raw-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --filter-template 'global_phy_{yyyymmdd}.nc' `
+  --raw-template 'global_phy_{yyyymmdd}.nc' `
+  --output-dir 'E:\DATA\01_Eddy_correspond\02_OFES\origin_ssh_primary_velocity_streamline_effective_weakcenter_rossby_19910101' `
+  --start 1991-01-01 --end 1991-01-01 --max-depth-m 3 `
+  --boundary-mode ssh_primary_velocity_streamline_effective `
+  --start-radius-cells 2 --max-radius-cells 12 `
+  --candidate-selection tile_topn --tile-top-n 10 `
+  --preload-day-uv --skip-axis-examples
+```
+
+In this Jan1 smoke, `1422` of `5025` surface candidates pass the velocity
+streamline circle check. Rejection reasons are now exclusively streamline/Hua
+failures such as `no_closed_streamline`, `velocity_ratio`, `angle_jump`,
+`boundary_monotonic_rotation`, `opposite_reversal`, and `tangent_alignment`;
+there are no `ssh_primary_*` contour rejections.
+
 ### Latitude-Adaptive 50-180 km Smoke
 
 The fixed `LP50-LP500` experiment can over-retain broad wave packets in the

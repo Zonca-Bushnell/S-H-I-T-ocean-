@@ -1999,38 +1999,51 @@ def _ssh_primary_with_streamline_effective_boundary(
     lon: np.ndarray | None = None,
     lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
-    primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
-    out = dict(primary)
-    out["boundary_mode"] = "ssh_primary_velocity_streamline_effective"
-    out["surface_definition"] = "ssh_primary_velocity_streamline_effective"
-    if not bool(primary.get("hua_pass", False)):
-        out["boundary_source"] = "ssh_primary_rejected"
-        out["catalog_acceptance_reason"] = str(primary.get("catalog_acceptance_reason", "ssh_primary_rejected"))
-        return out
-
-    center_i = float(primary.get("ssh_contour_center_i", np.nan))
-    center_j = float(primary.get("ssh_contour_center_j", np.nan))
-    if not np.isfinite(center_i) or not np.isfinite(center_j):
-        center_i = float(seed_i)
-        center_j = float(seed_j)
-    ssh_radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
-    if not np.isfinite(ssh_radius) or ssh_radius <= 0:
-        ssh_radius = float(params.start_radius_cells)
-    absolute_max_radius = int(max(params.start_radius_cells, math.ceil(float(params.max_radius_cells) * float(params.ssh_primary_max_radius_factor))))
-    max_radius = int(min(absolute_max_radius, max(params.start_radius_cells, math.ceil(1.25 * ssh_radius) + 2)))
+    out: dict[str, float | bool | str] = {
+        **_empty_consensus_fields(),
+        "boundary_mode": "ssh_primary_velocity_streamline_effective",
+        "surface_definition": "ssh_primary_velocity_streamline_effective",
+        "circle_passed": False,
+        "hua_pass": False,
+        "radius_cells": np.nan,
+        "accepted_radius_cells": 0.0,
+        "boundary_source": "velocity_streamline_effective_rejected",
+        "catalog_acceptance_reason": "no_closed_streamline_effective",
+        "dynamical_core_class": "no_streamline_core",
+        "streamline_boundary_quality": "not_evaluated",
+        "streamline_closed": False,
+        "streamline_radius_cells": np.nan,
+        "streamline_points": 0.0,
+        "streamline_boundary_i": "",
+        "streamline_boundary_j": "",
+        "streamline_closure_error_cells": np.nan,
+        "streamline_winding_turns": 0.0,
+        "streamline_direction_exception_fraction": np.nan,
+        "streamline_effective_valid_contour_count": 0.0,
+        "ssh_contour_closed": False,
+        "ssh_contour_radius_cells": np.nan,
+        "ssh_contour_area_cells": 0.0,
+        "ssh_contour_center_i": np.nan,
+        "ssh_contour_center_j": np.nan,
+        "ssh_contour_center_lon": np.nan,
+        "ssh_contour_center_lat": np.nan,
+    }
+    center_i = float(seed_i)
+    center_j = float(seed_j)
     best_stream: dict[str, float | bool | str] | None = None
     first_fail: dict[str, float | bool | str] | None = None
     valid_streamline_count = 0
-    for radius in range(max_radius, int(params.start_radius_cells) - 1, -1):
+    for radius in range(params.start_radius_cells, params.max_radius_cells + 1):
         stream = _streamline_contour_check(u, v, center_i, center_j, radius, params)
-        if first_fail is None:
+        if first_fail is None and not bool(stream.get("circle_passed", False)):
             first_fail = stream
         if bool(stream.get("circle_passed", False)):
             valid_streamline_count += 1
             best_stream = stream
             break
 
-    jet_radius = int(max(params.start_radius_cells, round(float(best_stream.get("radius_cells", ssh_radius)) if best_stream else ssh_radius)))
+    streamline_radius = float(best_stream.get("radius_cells", params.start_radius_cells)) if best_stream else float(params.start_radius_cells)
+    jet_radius = int(max(params.start_radius_cells, round(streamline_radius)))
     jet = _jet_core_overlap_check(speed, center_i, center_j, jet_radius, params)
     if best_stream is None:
         source = first_fail or {}
@@ -2062,10 +2075,10 @@ def _ssh_primary_with_streamline_effective_boundary(
         return out
 
     out.update(
-        {
-            "circle_passed": True,
-            "hua_pass": True,
-            "radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            {
+                "circle_passed": True,
+                "hua_pass": True,
+                "radius_cells": float(best_stream.get("radius_cells", np.nan)),
             "accepted_radius_cells": float(best_stream.get("radius_cells", np.nan)),
             "boundary_source": "velocity_streamline_effective_contour",
             "catalog_acceptance_reason": "ssh_primary_velocity_streamline_effective",
@@ -3173,8 +3186,8 @@ def _detect_day(
             if matlab_backend is not None:
                 check = matlab_backend.check(int(depth_index), hua_center_i, hua_center_j)
             else:
-                check_center_i = float(seed_i) if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 else hua_center_i
-                check_center_j = float(seed_j) if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 else hua_center_j
+                check_center_i = float(seed_i) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_i
+                check_center_j = float(seed_j) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_j
                 check = _hua_verify_radius(
                     u,
                     v,
@@ -3188,7 +3201,7 @@ def _detect_day(
                     lat=lat,
                 )
             refined = pre_hua_refined
-            if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 and bool(check.get("hua_pass", False)):
+            if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 and bool(check.get("hua_pass", False)):
                 contour_i = float(check.get("ssh_contour_center_i", np.nan))
                 contour_j = float(check.get("ssh_contour_center_j", np.nan))
                 if np.isfinite(contour_i) and np.isfinite(contour_j):
