@@ -489,6 +489,77 @@ $env:PYTHONNOUSERSITE='1'
 This diagnostic is only for preprocessing/filter tuning. It does not rerun
 detection.
 
+### SSH-Primary Boundary Shape Constraint
+
+For the final Rossby-radius `rossby_lower_upper180` surface smoke, the
+`ssh_effective_contour_primary` catalog now applies a PET/META-style fitted-circle
+shape check inside the core contour acceptance stage. The metric is:
+
+```text
+fit a best circle to the saved SSH contour boundary
+shape_error = (A_polygon + A_circle - 2 * A_intersection) / A_circle * 100
+```
+
+The default gates are:
+
+```text
+global shape_error <= 70%
+ACC shape_error <= 55%  (0-360E, 62S-40S)
+```
+
+This is not the older local `std(radius)/mean(radius)` heuristic. A contour
+that passes closure, boundary, radius, amplitude, and single-extremum checks
+but exceeds the shape gate is rejected with:
+
+```text
+catalog_acceptance_reason = ssh_primary_shape_error_high
+```
+
+Run the Jan1 smoke from the worktree root:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Origin_eddy_detection.src.eddy_pipeline.detection_hybrid `
+  --filter-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --raw-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --filter-template 'global_phy_{yyyymmdd}.nc' `
+  --raw-template 'global_phy_{yyyymmdd}.nc' `
+  --output-dir 'E:\DATA\01_Eddy_correspond\02_OFES\origin_ssh_primary_rossby_lower_upper180_r2_shape70_acc55_exact_amp1cm_smoke_19910101' `
+  --start 1991-01-01 --end 1991-01-01 `
+  --max-depth-m 3 `
+  --boundary-mode ssh_effective_contour_primary `
+  --ssh-primary-min-amplitude-cm 1 `
+  --ssh-primary-max-shape-error-percent 70 `
+  --ssh-primary-acc-max-shape-error-percent 55 `
+  --start-radius-cells 2 --max-radius-cells 12 `
+  --candidate-selection tile_topn --tile-top-n 10 `
+  --preload-day-uv --skip-axis-examples
+```
+
+The new core fields are `ssh_contour_shape_error_percent`,
+`ssh_contour_compactness`, and `ssh_contour_boundary_point_count`. In the Jan1
+smoke, this reduces the radius-only `1920` accepted surface objects to `1766`;
+the two direct shape failures are retained as
+`ssh_primary_shape_error_high`. Overview figures can be produced with the same
+North Pacific open-ocean and ACC boxes as:
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.plot_latest_ssh_vector_overview `
+  --day 1991-01-01 `
+  --result-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_ssh_primary_rossby_lower_upper180_r2_shape70_acc55_exact_amp1cm_smoke_19910101' `
+  --filter-root 'E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180' `
+  --run-tag shape70_acc55 `
+  --regional-zoom-name 'North Pacific open ocean' `
+  --regional-zoom-bbox 145 250 20 45 `
+  --regional-vector-step 3 `
+  --ocean-zoom-name 'ACC Southern Ocean' `
+  --ocean-zoom-bbox 0 360 -62 -40 `
+  --ocean-vector-step 3
+```
+
+Add `--exclude-jet-flagged` for the no-jet comparison views.
+
 ### Latitude-Adaptive 50-180 km Smoke
 
 The fixed `LP50-LP500` experiment can over-retain broad wave packets in the

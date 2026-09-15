@@ -151,6 +151,9 @@ FAILURE_LABELS = {
     14: "ssh_primary_no_closed_contour",
     15: "ssh_primary_touches_boundary",
     16: "ssh_primary_radius_out_of_range",
+    17: "ssh_primary_amplitude_below_min",
+    18: "ssh_primary_multiple_extrema",
+    19: "ssh_primary_shape_error_high",
 }
 OBJECT_VOXEL_COLUMNS = [
     "date",
@@ -215,6 +218,9 @@ class DetectionParams:
     ssh_primary_level_count: int = 16
     ssh_primary_window_factor: float = 4.0
     ssh_primary_max_radius_factor: float = 2.0
+    ssh_primary_min_amplitude_cm: float = 0.0
+    ssh_primary_max_shape_error_percent: float = 70.0
+    ssh_primary_acc_max_shape_error_percent: float = 55.0
     jet_core_speed_percentile: float = 80.0
     jet_core_overlap_max: float = 0.50
     hua_backend: str = "python"
@@ -1328,6 +1334,17 @@ def _best_streamline_contour(
     return best
 
 
+def _serialize_streamline_points(points: np.ndarray, limit: int = 720) -> tuple[str, str]:
+    arr = np.asarray(points, dtype="float64")
+    if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] < 3:
+        return "", ""
+    step = max(1, int(math.ceil(arr.shape[0] / max(3, int(limit)))))
+    sampled = arr[::step]
+    ii = np.rint(sampled[:, 0]).astype(int)
+    jj = np.rint(sampled[:, 1]).astype(int)
+    return ";".join(str(v) for v in ii), ";".join(str(v) for v in jj)
+
+
 def _streamline_contour_check(
     u: np.ndarray,
     v: np.ndarray,
@@ -1367,6 +1384,8 @@ def _streamline_contour_check(
             "boundary_mode": "velocity_streamline_contour",
             "streamline_closed": False,
             "streamline_points": 0.0,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
             "streamline_closure_error_cells": np.nan,
             "streamline_winding_turns": 0.0,
             "streamline_direction_exception_fraction": 1.0,
@@ -1378,6 +1397,7 @@ def _streamline_contour_check(
         }
 
     points = np.asarray(contour["points"], dtype="float64")
+    streamline_boundary_i, streamline_boundary_j = _serialize_streamline_points(points)
     uu = np.empty(len(points), dtype="float64")
     vv = np.empty(len(points), dtype="float64")
     for idx, (x, y) in enumerate(points):
@@ -1507,6 +1527,8 @@ def _streamline_contour_check(
         "boundary_mode": "velocity_streamline_contour",
         "streamline_closed": True,
         "streamline_points": float(len(points)),
+        "streamline_boundary_i": streamline_boundary_i,
+        "streamline_boundary_j": streamline_boundary_j,
         "streamline_closure_error_cells": float(contour["closure_error_cells"]),
         "streamline_winding_turns": float(contour["winding_turns"]),
         "streamline_direction_exception_fraction": direction_exception_fraction,
@@ -1636,12 +1658,92 @@ def _component_boundary_points(comp: np.ndarray, x0: int, y0: int, *, max_points
     return ";".join(map(str, bx.tolist())), ";".join(map(str, by.tolist()))
 
 
+def _count_same_sign_extrema_in_component(window: np.ndarray, comp: np.ndarray, is_max: bool) -> int:
+    finite = np.isfinite(window)
+    if not np.any(comp & finite):
+        return 0
+    if is_max:
+        filled = np.where(finite, window, -np.inf)
+        local = finite & (filled == ndimage.maximum_filter(filled, size=3, mode="nearest"))
+    else:
+        filled = np.where(finite, window, np.inf)
+        local = finite & (filled == ndimage.minimum_filter(filled, size=3, mode="nearest"))
+    local = local & comp
+    labels, count = ndimage.label(local, structure=np.ones((3, 3), dtype=bool))
+    return int(count)
+
+
+def _component_shape_metrics(comp: np.ndarray) -> tuple[float, float, int]:
+    """Return PET-style shape error percent, compactness, and boundary points.
+
+    The shape error follows py_eddy_tracker's ``fit_circle_`` / ``shape_error``
+    convention: fit the best circle to the contour boundary, then compare the
+    polygon area with the fitted-circle area.  This is more sensitive to
+    irregular contours than a simple std(radius)/mean(radius) metric.
+    """
+    up = np.zeros_like(comp, dtype=bool)
+    down = np.zeros_like(comp, dtype=bool)
+    left = np.zeros_like(comp, dtype=bool)
+    right = np.zeros_like(comp, dtype=bool)
+    up[1:, :] = comp[:-1, :]
+    down[:-1, :] = comp[1:, :]
+    left[:, 1:] = comp[:, :-1]
+    right[:, :-1] = comp[:, 1:]
+    boundary = comp & ~(up & down & left & right)
+    yy, xx = np.where(boundary)
+    if xx.size < 3:
+        return np.nan, np.nan, int(xx.size)
+    x = xx.astype("float64")
+    y = yy.astype("float64")
+
+    # Solve the linearized circle fit from py_eddy_tracker:
+    #   a*x_i + b*y_i + c = x_i^2 + y_i^2
+    # with x0 = a/2, y0 = b/2, r^2 = c + x0^2 + y0^2.
+    design = np.column_stack((x, y, np.ones_like(x)))
+    rhs = x * x + y * y
+    try:
+        a, b, c = np.linalg.lstsq(design, rhs, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return np.nan, np.nan, int(xx.size)
+    center_x = float(a) * 0.5
+    center_y = float(b) * 0.5
+    radius_sq = float(c) + center_x * center_x + center_y * center_y
+    if not np.isfinite(radius_sq) or radius_sq <= 0.0:
+        return np.nan, np.nan, int(xx.size)
+    radius = float(math.sqrt(radius_sq))
+
+    # The component and fitted circle are both represented on the same grid.
+    grid_y, grid_x = np.indices(comp.shape)
+    circle_mask = (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2 <= radius * radius
+    polygon_area = float(comp.sum())
+    circle_area = float(circle_mask.sum())
+    if circle_area <= 0.0:
+        return np.nan, np.nan, int(xx.size)
+    intersection_area = float((comp & circle_mask).sum())
+    shape_error = float((polygon_area + circle_area - 2.0 * intersection_area) / circle_area * 100.0)
+
+    mean_x = float(np.mean(x))
+    mean_y = float(np.mean(y))
+    order = np.argsort(np.arctan2(y - mean_y, x - mean_x))
+    x = xx[order].astype("float64")
+    y = yy[order].astype("float64")
+    if x[0] != x[-1] or y[0] != y[-1]:
+        x = np.r_[x, x[0]]
+        y = np.r_[y, y[0]]
+    area = 0.5 * abs(float(np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])))
+    perimeter = float(np.sum(np.hypot(np.diff(x), np.diff(y))))
+    compactness = float(4.0 * math.pi * area / max(perimeter * perimeter, 1.0e-12)) if perimeter > 0 else np.nan
+    return shape_error, compactness, int(xx.size)
+
+
 def _ssh_primary_contour_check(
     ssh: np.ndarray,
     seed_i: int,
     seed_j: int,
     params: DetectionParams,
     extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
     ci = int(np.clip(int(seed_i), 0, ssh.shape[1] - 1))
     cj = int(np.clip(int(seed_j), 0, ssh.shape[0] - 1))
@@ -1681,6 +1783,15 @@ def _ssh_primary_contour_check(
         "ssh_contour_center_lon": np.nan,
         "ssh_contour_center_lat": np.nan,
         "ssh_contour_level": np.nan,
+        "ssh_contour_amplitude_cm": np.nan,
+        "ssh_contour_same_extrema_count": np.nan,
+        "ssh_contour_shape_error_percent": np.nan,
+        "ssh_contour_compactness": np.nan,
+        "ssh_contour_boundary_point_count": 0.0,
+        "ssh_primary_valid_contour_count": 0.0,
+        "ssh_primary_rejected_multi_extrema_count": 0.0,
+        "ssh_primary_rejected_shape_error_count": 0.0,
+        "ssh_primary_min_amplitude_cm": float(params.ssh_primary_min_amplitude_cm),
         "ssh_contour_boundary_i": "",
         "ssh_contour_boundary_j": "",
         "dominant_failure_code": 14.0,
@@ -1718,8 +1829,18 @@ def _ssh_primary_contour_check(
     best: dict[str, float | bool | str] | None = None
     saw_boundary = False
     saw_radius_bad = False
+    saw_weak_amplitude = False
+    saw_multi_extrema = False
+    saw_shape_error = False
+    valid_contour_count = 0
+    rejected_multi_extrema_count = 0
+    rejected_shape_error_count = 0
     for frac in fractions:
         level = seed_value + float(frac) * (bg_value - seed_value)
+        amplitude_cm = abs(float(seed_value) - float(level))
+        if amplitude_cm < float(params.ssh_primary_min_amplitude_cm):
+            saw_weak_amplitude = True
+            continue
         mask = finite & ((window >= level) if is_max else (window <= level))
         labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
         component = int(labels[local_cj, local_ci])
@@ -1736,7 +1857,34 @@ def _ssh_primary_contour_check(
         if not radius_ok:
             saw_radius_bad = True
             continue
+        same_extrema_count = _count_same_sign_extrema_in_component(window, comp, is_max)
+        if same_extrema_count > 1:
+            saw_multi_extrema = True
+            rejected_multi_extrema_count += 1
+            continue
         yy, xx = np.where(comp)
+        shape_error, compactness, boundary_points = _component_shape_metrics(comp)
+        contour_lon = np.nan
+        contour_lat = np.nan
+        if lon is not None and lat is not None:
+            contour_lon = float(lon[min(int(round(x0 + np.nanmean(xx))), len(lon) - 1)])
+            contour_lat = float(lat[min(int(round(y0 + np.nanmean(yy))), len(lat) - 1)])
+        in_acc = bool(
+            np.isfinite(contour_lon)
+            and np.isfinite(contour_lat)
+            and 0.0 <= contour_lon <= 360.0
+            and -62.0 <= contour_lat <= -40.0
+        )
+        max_shape_error = (
+            float(params.ssh_primary_acc_max_shape_error_percent)
+            if in_acc
+            else float(params.ssh_primary_max_shape_error_percent)
+        )
+        if np.isfinite(shape_error) and float(shape_error) > max_shape_error:
+            saw_shape_error = True
+            rejected_shape_error_count += 1
+            continue
+        valid_contour_count += 1
         center_i = float(x0 + np.nanmean(xx))
         center_j = float(y0 + np.nanmean(yy))
         bi, bj = _component_boundary_points(comp, x0, y0)
@@ -1754,7 +1902,16 @@ def _ssh_primary_contour_check(
             "ssh_contour_area_cells": area,
             "ssh_contour_center_i": center_i,
             "ssh_contour_center_j": center_j,
+            "ssh_contour_center_lon": float(contour_lon) if np.isfinite(contour_lon) else np.nan,
+            "ssh_contour_center_lat": float(contour_lat) if np.isfinite(contour_lat) else np.nan,
             "ssh_contour_level": float(level),
+            "ssh_contour_amplitude_cm": float(amplitude_cm),
+            "ssh_contour_same_extrema_count": float(same_extrema_count),
+            "ssh_contour_shape_error_percent": float(shape_error),
+            "ssh_contour_compactness": float(compactness),
+            "ssh_contour_boundary_point_count": float(boundary_points),
+            "ssh_primary_valid_contour_count": float(valid_contour_count),
+            "ssh_primary_rejected_multi_extrema_count": float(rejected_multi_extrema_count),
             "ssh_contour_boundary_i": bi,
             "ssh_contour_boundary_j": bj,
             "dominant_failure_code": -1.0,
@@ -1765,11 +1922,20 @@ def _ssh_primary_contour_check(
         if best is None or float(row["ssh_contour_area_cells"]) > float(best["ssh_contour_area_cells"]):
             best = row
     if best is not None:
+        best["ssh_primary_valid_contour_count"] = float(valid_contour_count)
+        best["ssh_primary_rejected_multi_extrema_count"] = float(rejected_multi_extrema_count)
+        best["ssh_primary_rejected_shape_error_count"] = float(rejected_shape_error_count)
         return best
     if saw_boundary:
         code = 15
     elif saw_radius_bad:
         code = 16
+    elif saw_weak_amplitude:
+        code = 17
+    elif saw_multi_extrema:
+        code = 18
+    elif saw_shape_error:
+        code = 19
     else:
         code = 14
     base["dominant_failure_code"] = float(code)
@@ -1790,8 +1956,10 @@ def _ssh_primary_with_streamline_diagnostics(
     seed_j: int,
     params: DetectionParams,
     extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
-    primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type)
+    primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
     center_i = float(primary.get("ssh_contour_center_i", np.nan))
     center_j = float(primary.get("ssh_contour_center_j", np.nan))
     radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
@@ -1816,6 +1984,111 @@ def _ssh_primary_with_streamline_diagnostics(
     }
     if bool(out.get("jet_meander_flag", False)) and bool(out.get("hua_pass", False)):
         out["dynamical_core_class"] = f"{out['dynamical_core_class']}_jet_flagged"
+    return out
+
+
+def _ssh_primary_with_streamline_effective_boundary(
+    ssh: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    speed: np.ndarray,
+    seed_i: int,
+    seed_j: int,
+    params: DetectionParams,
+    extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+) -> dict[str, float | bool | str]:
+    primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
+    out = dict(primary)
+    out["boundary_mode"] = "ssh_primary_velocity_streamline_effective"
+    out["surface_definition"] = "ssh_primary_velocity_streamline_effective"
+    if not bool(primary.get("hua_pass", False)):
+        out["boundary_source"] = "ssh_primary_rejected"
+        out["catalog_acceptance_reason"] = str(primary.get("catalog_acceptance_reason", "ssh_primary_rejected"))
+        return out
+
+    center_i = float(primary.get("ssh_contour_center_i", np.nan))
+    center_j = float(primary.get("ssh_contour_center_j", np.nan))
+    if not np.isfinite(center_i) or not np.isfinite(center_j):
+        center_i = float(seed_i)
+        center_j = float(seed_j)
+    ssh_radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
+    if not np.isfinite(ssh_radius) or ssh_radius <= 0:
+        ssh_radius = float(params.start_radius_cells)
+    absolute_max_radius = int(max(params.start_radius_cells, math.ceil(float(params.max_radius_cells) * float(params.ssh_primary_max_radius_factor))))
+    max_radius = int(min(absolute_max_radius, max(params.start_radius_cells, math.ceil(1.25 * ssh_radius) + 2)))
+    best_stream: dict[str, float | bool | str] | None = None
+    first_fail: dict[str, float | bool | str] | None = None
+    valid_streamline_count = 0
+    for radius in range(max_radius, int(params.start_radius_cells) - 1, -1):
+        stream = _streamline_contour_check(u, v, center_i, center_j, radius, params)
+        if first_fail is None:
+            first_fail = stream
+        if bool(stream.get("circle_passed", False)):
+            valid_streamline_count += 1
+            best_stream = stream
+            break
+
+    jet_radius = int(max(params.start_radius_cells, round(float(best_stream.get("radius_cells", ssh_radius)) if best_stream else ssh_radius)))
+    jet = _jet_core_overlap_check(speed, center_i, center_j, jet_radius, params)
+    if best_stream is None:
+        source = first_fail or {}
+        out.update(
+            {
+                "circle_passed": False,
+                "hua_pass": False,
+                "accepted_radius_cells": 0.0,
+                "boundary_source": "velocity_streamline_effective_rejected",
+                "catalog_acceptance_reason": "no_closed_streamline_effective",
+                "dynamical_core_class": "no_streamline_core",
+                "streamline_boundary_quality": str(source.get("first_hard_failure", "no_closed_streamline")),
+                "streamline_closed": bool(source.get("streamline_closed", False)),
+                "streamline_radius_cells": float(source.get("radius_cells", np.nan)),
+                "streamline_points": float(source.get("streamline_points", 0.0)),
+                "streamline_boundary_i": str(source.get("streamline_boundary_i", "")),
+                "streamline_boundary_j": str(source.get("streamline_boundary_j", "")),
+                "streamline_closure_error_cells": float(source.get("streamline_closure_error_cells", np.nan)),
+                "streamline_winding_turns": float(source.get("streamline_winding_turns", 0.0)),
+                "streamline_direction_exception_fraction": float(source.get("streamline_direction_exception_fraction", np.nan)),
+                "streamline_effective_valid_contour_count": float(valid_streamline_count),
+                "dominant_failure_code": float(source.get("dominant_failure_code", 10.0)),
+                "dominant_failure": str(source.get("dominant_failure", "no_closed_streamline")),
+                "first_hard_failure_code": float(source.get("first_hard_failure_code", 10.0)),
+                "first_hard_failure": str(source.get("first_hard_failure", "no_closed_streamline")),
+                **jet,
+            }
+        )
+        return out
+
+    out.update(
+        {
+            "circle_passed": True,
+            "hua_pass": True,
+            "radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "accepted_radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "boundary_source": "velocity_streamline_effective_contour",
+            "catalog_acceptance_reason": "ssh_primary_velocity_streamline_effective",
+            "dynamical_core_class": "closed_streamline_core",
+            "streamline_boundary_quality": "closed_streamline_effective",
+            "streamline_closed": True,
+            "streamline_radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "streamline_points": float(best_stream.get("streamline_points", 0.0)),
+            "streamline_boundary_i": str(best_stream.get("streamline_boundary_i", "")),
+            "streamline_boundary_j": str(best_stream.get("streamline_boundary_j", "")),
+            "streamline_closure_error_cells": float(best_stream.get("streamline_closure_error_cells", np.nan)),
+            "streamline_winding_turns": float(best_stream.get("streamline_winding_turns", 0.0)),
+            "streamline_direction_exception_fraction": float(best_stream.get("streamline_direction_exception_fraction", np.nan)),
+            "streamline_effective_valid_contour_count": float(valid_streamline_count),
+            "dominant_failure_code": -1.0,
+            "dominant_failure": "none",
+            "first_hard_failure_code": -1.0,
+            "first_hard_failure": "none",
+            **jet,
+        }
+    )
+    if bool(out.get("jet_meander_flag", False)):
+        out["dynamical_core_class"] = "closed_streamline_core_jet_flagged"
     return out
 
 
@@ -1992,6 +2265,8 @@ def _hua_verify_radius(
     ssh: np.ndarray | None = None,
     speed: np.ndarray | None = None,
     extremum_type: str = "",
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
     if params.boundary_mode == "ssh_effective_contour_primary" and ssh is not None:
         if speed is None:
@@ -2005,6 +2280,23 @@ def _hua_verify_radius(
             int(round(float(center_j))),
             params,
             extremum_type,
+            lon,
+            lat,
+        )
+    if params.boundary_mode == "ssh_primary_velocity_streamline_effective" and ssh is not None:
+        if speed is None:
+            speed = np.hypot(u, v)
+        return _ssh_primary_with_streamline_effective_boundary(
+            ssh,
+            u,
+            v,
+            speed,
+            int(round(float(center_i))),
+            int(round(float(center_j))),
+            params,
+            extremum_type,
+            lon,
+            lat,
         )
     if params.boundary_mode == "velocity_streamline_ssh_consensus":
         return _hua_verify_radius_ssh_consensus(
@@ -2179,7 +2471,7 @@ def _pass_rate_breakdown(centers: pd.DataFrame, params: DetectionParams) -> pd.D
                     "boundary_mode": params.boundary_mode,
                 }
             )
-        if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary"} and "boundary_source" in part.columns:
+        if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and "boundary_source" in part.columns:
             source_counts = part["boundary_source"].fillna("unknown").value_counts(dropna=False).to_dict()
             for source, count_value in source_counts.items():
                 rows.append(
@@ -2194,7 +2486,7 @@ def _pass_rate_breakdown(centers: pd.DataFrame, params: DetectionParams) -> pd.D
                         "boundary_mode": params.boundary_mode,
                     }
                 )
-        if params.boundary_mode == "ssh_effective_contour_primary" and "dynamical_core_class" in part.columns:
+        if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and "dynamical_core_class" in part.columns:
             core_counts = part["dynamical_core_class"].fillna("unknown").value_counts(dropna=False).to_dict()
             for core_class, count_value in core_counts.items():
                 rows.append(
@@ -2294,7 +2586,7 @@ def _write_detection_diagnostics(output_dir: Path, centers: pd.DataFrame, params
                 )
     sensitivity = pd.DataFrame(rows)
     sensitivity.to_csv(output_dir / "sensitivity_matrix.csv", index=False)
-    sensitivity.to_parquet(output_dir / "sensitivity_matrix.parquet", engine=DEFAULT_PARQUET_ENGINE, index=False)
+    _write_parquet(sensitivity, output_dir / "sensitivity_matrix.parquet", index=False)
 
 
 def _extremum_polarity(extremum: str, lat_value: float, circulation_sign: float) -> str:
@@ -2881,8 +3173,8 @@ def _detect_day(
             if matlab_backend is not None:
                 check = matlab_backend.check(int(depth_index), hua_center_i, hua_center_j)
             else:
-                check_center_i = float(seed_i) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_i
-                check_center_j = float(seed_j) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_j
+                check_center_i = float(seed_i) if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 else hua_center_i
+                check_center_j = float(seed_j) if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 else hua_center_j
                 check = _hua_verify_radius(
                     u,
                     v,
@@ -2892,9 +3184,11 @@ def _detect_day(
                     ssh=zos if int(depth_index) == 0 else None,
                     speed=speed,
                     extremum_type=str(seed["ssh_extremum_type"]),
+                    lon=lon,
+                    lat=lat,
                 )
             refined = pre_hua_refined
-            if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 and bool(check.get("hua_pass", False)):
+            if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and int(depth_index) == 0 and bool(check.get("hua_pass", False)):
                 contour_i = float(check.get("ssh_contour_center_i", np.nan))
                 contour_j = float(check.get("ssh_contour_center_j", np.nan))
                 if np.isfinite(contour_i) and np.isfinite(contour_j):
@@ -3424,12 +3718,15 @@ def run(args: argparse.Namespace) -> None:
         ssh_primary_level_count=args.ssh_primary_level_count,
         ssh_primary_window_factor=args.ssh_primary_window_factor,
         ssh_primary_max_radius_factor=args.ssh_primary_max_radius_factor,
+        ssh_primary_min_amplitude_cm=args.ssh_primary_min_amplitude_cm,
+        ssh_primary_max_shape_error_percent=args.ssh_primary_max_shape_error_percent,
+        ssh_primary_acc_max_shape_error_percent=args.ssh_primary_acc_max_shape_error_percent,
         jet_core_speed_percentile=args.jet_core_speed_percentile,
         jet_core_overlap_max=args.jet_core_overlap_max,
         hua_backend=args.hua_backend,
         matlab_use_gpu=bool(args.matlab_use_gpu),
     )
-    if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary"} and params.hua_backend != "python":
+    if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and params.hua_backend != "python":
         raise SystemExit(
             f"--boundary-mode {params.boundary_mode} currently requires --hua-backend python "
             "because the SSH contour and jet-axis diagnostics are implemented in the Python catalog layer."
@@ -3461,7 +3758,10 @@ def run(args: argparse.Namespace) -> None:
                     structures_path = part_root / "structures" / f"date={day:%Y%m%d}.parquet"
                     voxels_path = output_dir / "object_voxels_parts" / f"year={day.year}" / f"date={day:%Y%m%d}.parquet"
                     voxel_ready = (not args.write_object_voxels) or voxels_path.exists()
-                    if args.resume and centers_path.exists() and circle_path.exists() and structures_path.exists() and voxel_ready:
+                    centers_ready = centers_path.exists() or centers_path.with_suffix(".csv").exists()
+                    circle_ready = circle_path.exists() or circle_path.with_suffix(".csv").exists()
+                    structures_ready = structures_path.exists() or structures_path.with_suffix(".csv").exists()
+                    if args.resume and centers_ready and circle_ready and structures_ready and voxel_ready:
                         continue
                     centers, circle, structures, voxels = _detect_day(
                         day,
@@ -3613,7 +3913,13 @@ def main() -> None:
     parser.add_argument("--boundary-monotonic-exception-limit", type=int, default=0)
     parser.add_argument(
         "--boundary-mode",
-        choices=["circle_strict_original", "velocity_streamline_contour", "velocity_streamline_ssh_consensus", "ssh_effective_contour_primary"],
+        choices=[
+            "circle_strict_original",
+            "velocity_streamline_contour",
+            "velocity_streamline_ssh_consensus",
+            "ssh_effective_contour_primary",
+            "ssh_primary_velocity_streamline_effective",
+        ],
         default="circle_strict_original",
     )
     parser.add_argument(
@@ -3635,6 +3941,9 @@ def main() -> None:
     parser.add_argument("--ssh-primary-level-count", type=int, default=16)
     parser.add_argument("--ssh-primary-window-factor", type=float, default=4.0)
     parser.add_argument("--ssh-primary-max-radius-factor", type=float, default=2.0)
+    parser.add_argument("--ssh-primary-min-amplitude-cm", type=float, default=0.0)
+    parser.add_argument("--ssh-primary-max-shape-error-percent", type=float, default=70.0)
+    parser.add_argument("--ssh-primary-acc-max-shape-error-percent", type=float, default=55.0)
     parser.add_argument("--jet-core-speed-percentile", type=float, default=80.0)
     parser.add_argument("--jet-core-overlap-max", type=float, default=0.50)
     parser.add_argument("--sensitivity-tangent-fractions", default="0.50,0.60,0.70")
