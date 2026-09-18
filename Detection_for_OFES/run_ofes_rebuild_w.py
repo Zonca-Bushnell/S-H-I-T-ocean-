@@ -892,7 +892,7 @@ def classify_native_w_multipole(grid: dict[str, object], args: argparse.Namespac
         sector_valid_fraction[i] = valid_count / float(radial_count)
         if sector_valid_fraction[i] >= min_sector_valid_fraction:
             if valid_count >= 2:
-                integral = float(np.trapezoid(samples[finite_ray], radial_r[finite_ray]))
+                integral = float(np.trapz(samples[finite_ray], radial_r[finite_ray]))
                 values[i] = integral / radial_length
             elif valid_count == 1:
                 values[i] = float(samples[finite_ray][0])
@@ -1322,7 +1322,13 @@ def rebuild_object_w(raw: dict[str, np.memmap], metas: dict[str, object], center
     if velocity_reference == "farfield_relative":
         u_for_rebuild = u - u_bg[:, None, None]
         v_for_rebuild = v - v_bg[:, None, None]
-        if translation_profile in {"layerwise", "layer_tracking"}:
+        if not c_valid:
+            # A single-date catalog has no temporal center displacement. Keep
+            # term1 neutral instead of manufacturing c_rel=-u_bg from c=0.
+            cx_profile = np.zeros(nlev, dtype="f4")
+            cy_profile = np.zeros(nlev, dtype="f4")
+            c_method = f"{c_method}_no_valid_translation"
+        elif translation_profile in {"layerwise", "layer_tracking"}:
             cx_profile = cx_profile - np.nan_to_num(u_bg.astype("f4"), nan=0.0)
             cy_profile = cy_profile - np.nan_to_num(v_bg.astype("f4"), nan=0.0)
             c_bg_x = finite_median_or_zero(u_bg)
@@ -2642,11 +2648,15 @@ def write_composite_outputs(composite: dict[str, object], token: str, polarity: 
     write_json(json_path, scalar_payload)
 
     native_prefix = "native_w_meso_aligned" if "composite_ofes_w_native_meso_aligned_m_s" in composite else "native_w"
-    w_section = figures_dir / f"{native_prefix}_cross_section_{stem}.png"
+    native_section = figures_dir / f"{native_prefix}_cross_section_{stem}.png"
     w_focus = figures_dir / f"{native_prefix}_focus_300_500m_450m_surface_{stem}.png"
     density_profiles = figures_dir / f"density_profiles_{stem}.png"
     density_sections = figures_dir / f"density_sections_{stem}.png"
-    plot_composite_native_w_cross_section_pillow(composite, w_section)
+    w_section = figures_dir / f"ofes_w_cross_section_{stem}.png"
+    w_slices = figures_dir / f"ofes_w_slices_{stem}.png"
+    plot_composite_native_w_cross_section_pillow(composite, native_section)
+    plot_composite_w_cross_section_pillow(composite, w_section)
+    plot_composite_w_slices_pillow(composite, w_slices)
     plot_composite_native_w_focus_pillow(composite, w_focus)
     plot_composite_density_profiles_pillow(composite, density_profiles)
     plot_composite_density_sections_pillow(composite, density_sections)
@@ -2654,7 +2664,9 @@ def write_composite_outputs(composite: dict[str, object], token: str, polarity: 
         **scalar_payload,
         "grid_npz": str(npz_path),
         "grid_json": str(json_path),
-        "native_w_cross_section_image": str(w_section),
+        "native_w_cross_section_image": str(native_section),
+        "w_cross_section_image": str(w_section),
+        "w_slices_image": str(w_slices),
         "native_w_focus_image": str(w_focus),
         "density_profiles_image": str(density_profiles),
         "density_sections_image": str(density_sections),
@@ -3031,7 +3043,8 @@ def plot_composite_w_cross_section_pillow(composite: dict[str, object], png_path
         )
     else:
         fields.append(("OFES native W", np.asarray(composite["section_ofes_w_native_m_s"], dtype="f4")))
-    vals = np.concatenate([arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()])
+    finite_parts = [arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()]
+    vals = np.concatenate(finite_parts) if finite_parts else np.array([], dtype="f4")
     lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
     if len(fields) == 5:
         canvas = Image.new("RGB", (2500, 1500), "white")
@@ -3133,7 +3146,8 @@ def plot_composite_w_slices_pillow(composite: dict[str, object], png_path: Path)
     ]
     desired_depths = [50.0, 200.0, 500.0, 1000.0]
     indices = [int(np.nanargmin(np.abs(depth - target))) for target in desired_depths if depth.size]
-    vals = np.concatenate([arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()])
+    finite_parts = [arr[np.isfinite(arr)] for _, arr in fields if np.isfinite(arr).any()]
+    vals = np.concatenate(finite_parts) if finite_parts else np.array([], dtype="f4")
     lim = max(float(np.nanpercentile(np.abs(vals), 95)) * 1.0e6 if vals.size else 1.0, 1.0e-12)
     canvas = Image.new("RGB", (2420, 2300), "white")
     draw = ImageDraw.Draw(canvas)

@@ -39,18 +39,33 @@ def main() -> None:
         "thresholds": {
             "max_shape_error_percent": float(args.max_shape_error_percent),
             "acc_max_shape_error_percent": float(args.acc_max_shape_error_percent),
+            "open_ocean_max_shape_error_percent": float(args.open_ocean_max_shape_error_percent),
             "acc_bbox": [float(v) for v in args.acc_bbox],
             "min_compactness": float(args.min_compactness),
+            "open_ocean_min_compactness": float(args.open_ocean_min_compactness),
             "min_boundary_points": int(args.min_boundary_points),
+            "open_ocean_min_boundary_points": int(args.open_ocean_min_boundary_points),
             "min_radius_km": float(args.min_radius_km),
+            "open_ocean_min_radius_km": float(args.open_ocean_min_radius_km),
             "min_area_cells": float(args.min_area_cells),
+            "open_ocean_min_area_cells": float(args.open_ocean_min_area_cells),
             "jet_core_overlap_max": float(args.jet_core_overlap_max),
             "enable_jet_split": bool(args.enable_jet_split),
             "overlap_center_factor": float(args.overlap_center_factor),
             "overlap_area_fraction": float(args.overlap_area_fraction),
             "persistence_lookahead_days": int(args.persistence_lookahead_days),
+            "persistence_min_consecutive_days": int(args.persistence_min_consecutive_days),
             "persistence_distance_factor": float(args.persistence_distance_factor),
             "persistence_radius_ratio_max": float(args.persistence_radius_ratio_max),
+            "persistence_open_ocean_distance_factor": float(args.persistence_open_ocean_distance_factor),
+            "persistence_open_ocean_radius_ratio_max": float(args.persistence_open_ocean_radius_ratio_max),
+            "persistence_open_ocean_distance_factor_max": float(args.persistence_open_ocean_distance_factor_max),
+            "persistence_open_ocean_radius_ratio_max_max": float(args.persistence_open_ocean_radius_ratio_max_max),
+            "persistence_open_ocean_lat_min": float(args.persistence_open_ocean_lat_min),
+            "persistence_open_ocean_lat_max": float(args.persistence_open_ocean_lat_max),
+            "persistence_open_ocean_drift_fraction_min": float(args.persistence_open_ocean_drift_fraction_min),
+            "persistence_open_ocean_drift_fraction_max": float(args.persistence_open_ocean_drift_fraction_max),
+            "persistence_open_ocean_max_gap_days": int(args.persistence_open_ocean_max_gap_days),
         },
         "counts": summary_rows,
     }
@@ -67,19 +82,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--day", default="1991-01-01")
     parser.add_argument("--max-shape-error-percent", type=float, default=70.0)
     parser.add_argument("--acc-max-shape-error-percent", type=float, default=55.0)
+    parser.add_argument("--open-ocean-max-shape-error-percent", type=float, default=80.0)
     parser.add_argument("--acc-bbox", type=float, nargs=4, metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"), default=(0.0, 360.0, -62.0, -40.0))
     parser.add_argument("--min-compactness", type=float, default=0.20)
+    parser.add_argument("--open-ocean-min-compactness", type=float, default=0.12)
     parser.add_argument("--min-boundary-points", type=int, default=9)
+    parser.add_argument("--open-ocean-min-boundary-points", type=int, default=6)
     parser.add_argument("--min-radius-km", type=float, default=25.0)
+    parser.add_argument("--open-ocean-min-radius-km", type=float, default=18.0)
     parser.add_argument("--min-area-cells", type=float, default=16.0)
+    parser.add_argument("--open-ocean-min-area-cells", type=float, default=9.0)
     parser.add_argument("--jet-core-overlap-max", type=float, default=0.50)
     parser.add_argument("--enable-jet-split", action="store_true")
     parser.add_argument("--overlap-center-factor", type=float, default=0.75)
     parser.add_argument("--overlap-area-fraction", type=float, default=0.50)
     parser.add_argument("--persistence-source-root", type=Path, default=None)
     parser.add_argument("--persistence-lookahead-days", type=int, default=5)
+    parser.add_argument("--persistence-min-consecutive-days", type=int, default=2)
     parser.add_argument("--persistence-distance-factor", type=float, default=1.5)
     parser.add_argument("--persistence-radius-ratio-max", type=float, default=2.0)
+    parser.add_argument("--persistence-open-ocean-distance-factor", type=float, default=2.5)
+    parser.add_argument("--persistence-open-ocean-radius-ratio-max", type=float, default=3.0)
+    parser.add_argument("--persistence-open-ocean-distance-factor-max", type=float, default=3.0)
+    parser.add_argument("--persistence-open-ocean-radius-ratio-max-max", type=float, default=3.5)
+    parser.add_argument("--persistence-open-ocean-lat-min", type=float, default=20.0)
+    parser.add_argument("--persistence-open-ocean-lat-max", type=float, default=60.0)
+    parser.add_argument("--persistence-open-ocean-drift-fraction-min", type=float, default=0.10)
+    parser.add_argument("--persistence-open-ocean-drift-fraction-max", type=float, default=0.35)
+    parser.add_argument("--persistence-open-ocean-max-gap-days", type=int, default=1)
     return parser.parse_args()
 
 
@@ -167,16 +197,27 @@ def apply_qc(
         for key, value in metrics.items():
             out.at[idx, key] = value
         reasons = []
-        if int(metrics["boundary_point_count"]) < int(args.min_boundary_points):
+        open_ocean = is_open_ocean(out.loc[idx])
+        min_boundary_points = int(args.open_ocean_min_boundary_points if open_ocean else args.min_boundary_points)
+        min_area_cells = float(args.open_ocean_min_area_cells if open_ocean else args.min_area_cells)
+        min_compactness = float(args.open_ocean_min_compactness if open_ocean else args.min_compactness)
+        if int(metrics["boundary_point_count"]) < min_boundary_points:
             reasons.append("boundary_points_too_few")
-        max_shape = float(args.acc_max_shape_error_percent) if in_bbox(out.loc[idx], tuple(float(v) for v in args.acc_bbox)) else float(args.max_shape_error_percent)
+        max_shape = (
+            float(args.open_ocean_max_shape_error_percent)
+            if open_ocean
+            else float(args.acc_max_shape_error_percent)
+            if in_bbox(out.loc[idx], tuple(float(v) for v in args.acc_bbox))
+            else float(args.max_shape_error_percent)
+        )
         if np.isfinite(metrics["shape_error_percent"]) and float(metrics["shape_error_percent"]) > max_shape:
             reasons.append("shape_error_high")
-        if np.isfinite(metrics["compactness"]) and float(metrics["compactness"]) < float(args.min_compactness):
+        if np.isfinite(metrics["compactness"]) and float(metrics["compactness"]) < min_compactness:
             reasons.append("compactness_low")
-        if np.isfinite(metrics["pixel_area_cells"]) and float(metrics["pixel_area_cells"]) < float(args.min_area_cells):
+        if np.isfinite(metrics["pixel_area_cells"]) and float(metrics["pixel_area_cells"]) < min_area_cells:
             reasons.append("area_too_small")
-        if np.isfinite(metrics["radius_km"]) and float(metrics["radius_km"]) < float(args.min_radius_km):
+        min_radius_km = float(args.open_ocean_min_radius_km if open_ocean else args.min_radius_km)
+        if np.isfinite(metrics["radius_km"]) and float(metrics["radius_km"]) < min_radius_km:
             reasons.append("radius_too_small")
         same_extrema = pd.to_numeric(pd.Series([out.at[idx, "ssh_contour_same_extrema_count"]]) if "ssh_contour_same_extrema_count" in out.columns else pd.Series([1]), errors="coerce").iloc[0]
         out.at[idx, "single_extremum_pass"] = bool(np.isfinite(same_extrema) and float(same_extrema) <= 1.0)
@@ -509,7 +550,7 @@ def rank_tuple(row: pd.Series) -> tuple[float, float, float, float]:
 def apply_persistence_diagnostic(out: pd.DataFrame, args: argparse.Namespace) -> None:
     root = args.persistence_source_root or args.source_root
     day0 = pd.Timestamp(str(args.day))
-    future_parts: list[pd.DataFrame] = []
+    future_by_day: dict[str, pd.DataFrame] = {}
     for offset in range(1, int(args.persistence_lookahead_days) + 1):
         day = (day0 + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
         ymd = day.replace("-", "")
@@ -525,57 +566,138 @@ def apply_persistence_diagnostic(out: pd.DataFrame, args: argparse.Namespace) ->
             future = future[future["depth_index"].astype(int).eq(0)].copy()
         if "hua_pass" in future.columns:
             future = future[future["hua_pass"].fillna(False).astype(bool)].copy()
-        if not future.empty:
-            future_parts.append(future)
+        # Keep empty existing days: an empty day is a real break in a
+        # consecutive track, unlike a missing file outside the run window.
+        future_by_day[day] = future
 
     accepted_idx = out.index[out["qc_pass"].astype(bool)]
-    if not future_parts:
+    if not future_by_day:
         out.loc[accepted_idx, "persistence_class"] = "not_evaluated_no_future_days"
         return
 
-    future_all = pd.concat(future_parts, ignore_index=True)
-    days_available = int(future_all["date"].nunique()) if "date" in future_all.columns else 0
-    future_by_polarity: dict[str, dict[str, np.ndarray]] = {}
-    future_all = future_all.copy()
-    future_all["_lon"] = future_all.apply(row_lon, axis=1)
-    future_all["_lat"] = future_all.apply(row_lat, axis=1)
-    future_all["_radius_km"] = future_all.apply(radius_km, axis=1)
-    future_all = future_all[
-        np.isfinite(future_all["_lon"])
-        & np.isfinite(future_all["_lat"])
-        & np.isfinite(future_all["_radius_km"])
-        & (future_all["_radius_km"] > 0)
-    ].copy()
-    for polarity, part in future_all.groupby(future_all.get("polarity", pd.Series("", index=future_all.index)).astype(str)):
-        future_by_polarity[str(polarity)] = {
-            "lon": part["_lon"].to_numpy(dtype="f8"),
-            "lat": part["_lat"].to_numpy(dtype="f8"),
-            "radius": part["_radius_km"].to_numpy(dtype="f8"),
+    days_available = len(future_by_day)
+    future_arrays: dict[str, dict[str, np.ndarray]] = {}
+    for day, future in future_by_day.items():
+        if future.empty:
+            future_arrays[day] = {
+                "lon": np.empty(0, dtype="f8"),
+                "lat": np.empty(0, dtype="f8"),
+                "radius": np.empty(0, dtype="f8"),
+                "polarity": np.empty(0, dtype=object),
+            }
+            continue
+        future = future.copy()
+        future["_lon"] = future.apply(row_lon, axis=1)
+        future["_lat"] = future.apply(row_lat, axis=1)
+        future["_radius_km"] = future.apply(radius_km, axis=1)
+        valid = (
+            np.isfinite(future["_lon"])
+            & np.isfinite(future["_lat"])
+            & np.isfinite(future["_radius_km"])
+            & (future["_radius_km"] > 0)
+        )
+        future = future.loc[valid].copy()
+        future_arrays[day] = {
+            "lon": future["_lon"].to_numpy(dtype="f8"),
+            "lat": future["_lat"].to_numpy(dtype="f8"),
+            "radius": future["_radius_km"].to_numpy(dtype="f8"),
+            "polarity": future.get("polarity", pd.Series("", index=future.index)).astype(str).to_numpy(dtype=object),
         }
+
+    min_days = max(2, int(args.persistence_min_consecutive_days))
     for idx in accepted_idx:
         row = out.loc[idx]
-        future = future_by_polarity.get(str(row.get("polarity", "")))
         r0 = radius_km(row)
         lon0 = row_lon(row)
         lat0 = row_lat(row)
         matches = 0
-        if future is not None and np.isfinite(r0) and r0 > 0 and np.isfinite(lon0) and np.isfinite(lat0):
-            dlon = ((future["lon"] - lon0 + 180.0) % 360.0) - 180.0
-            dlat = future["lat"] - lat0
-            lat_mid = 0.5 * (future["lat"] + lat0)
-            dist = np.hypot(dlon * 111.2 * np.maximum(np.cos(np.deg2rad(lat_mid)), 0.2), dlat * 111.2)
-            r1 = future["radius"]
-            ratio = np.maximum(r0, r1) / np.maximum(np.minimum(r0, r1), 1.0e-12)
-            ok = (dist <= float(args.persistence_distance_factor) * np.maximum(r0, r1)) & (ratio <= float(args.persistence_radius_ratio_max))
-            matches = int(np.count_nonzero(ok))
+        if np.isfinite(r0) and r0 > 0 and np.isfinite(lon0) and np.isfinite(lat0):
+            polarity = str(row.get("polarity", ""))
+            open_ocean = is_open_ocean(row)
+            lat_abs = abs(float(lat0))
+            lat_min = float(args.persistence_open_ocean_lat_min)
+            lat_max = max(lat_min + 1.0, float(args.persistence_open_ocean_lat_max))
+            latitude_weight = np.clip((lat_abs - lat_min) / (lat_max - lat_min), 0.0, 1.0)
+            if open_ocean:
+                # Open-ocean features are weaker and drift farther between
+                # daily snapshots; relax smoothly toward higher latitudes.
+                distance_factor = float(args.persistence_open_ocean_distance_factor) + latitude_weight * (
+                    float(args.persistence_open_ocean_distance_factor_max)
+                    - float(args.persistence_open_ocean_distance_factor)
+                )
+                radius_ratio_max = float(args.persistence_open_ocean_radius_ratio_max) + latitude_weight * (
+                    float(args.persistence_open_ocean_radius_ratio_max_max)
+                    - float(args.persistence_open_ocean_radius_ratio_max)
+                )
+            else:
+                distance_factor = float(args.persistence_distance_factor)
+                radius_ratio_max = float(args.persistence_radius_ratio_max)
+            for offset in range(1, int(args.persistence_lookahead_days) + 1):
+                day = (day0 + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
+                future = future_arrays.get(day)
+                if future is None:
+                    break
+                same = future["polarity"] == polarity
+                if open_ocean:
+                    drift_fraction = float(args.persistence_open_ocean_drift_fraction_min) + latitude_weight * (
+                        float(args.persistence_open_ocean_drift_fraction_max)
+                        - float(args.persistence_open_ocean_drift_fraction_min)
+                    )
+                    max_gap_days = int(round(latitude_weight * max(0, int(args.persistence_open_ocean_max_gap_days))))
+                else:
+                    drift_fraction = 0.0
+                    max_gap_days = 0
+                ok = np.zeros(future["lon"].size, dtype=bool)
+                if np.any(same):
+                    lon1 = future["lon"][same]
+                    lat1 = future["lat"][same]
+                    r1 = future["radius"][same]
+                    dlon = ((lon1 - lon0 + 180.0) % 360.0) - 180.0
+                    dlat = lat1 - lat0
+                    lat_mid = 0.5 * (lat1 + lat0)
+                    dist = np.hypot(dlon * 111.2 * np.maximum(np.cos(np.deg2rad(lat_mid)), 0.2), dlat * 111.2)
+                    ratio = np.maximum(r0, r1) / np.maximum(np.minimum(r0, r1), 1.0e-12)
+                    drift_allowance = drift_fraction * np.maximum(np.maximum(r0, r1), 50.0)
+                    ok[same] = (dist <= distance_factor * np.maximum(r0, r1) + drift_allowance) & (ratio <= radius_ratio_max)
+                if not np.any(ok):
+                    if open_ocean and max_gap_days > 0 and offset - matches <= max_gap_days + 1:
+                        continue
+                    break
+                matches += 1
         out.at[idx, "persistence_days_available"] = days_available
         out.at[idx, "persistence_match_count"] = int(matches)
-        if matches <= 0:
+        total_track_days = matches + 1
+        if total_track_days < min_days:
             out.at[idx, "persistence_class"] = "transient"
-        elif matches < max(2, days_available // 2):
+        elif total_track_days == min_days:
             out.at[idx, "persistence_class"] = "short_track"
         else:
             out.at[idx, "persistence_class"] = "persistent_like"
+
+
+def is_open_ocean(row: pd.Series) -> bool:
+    """Use relaxed persistence only away from major boundary-current belts."""
+    lon = row_lon(row)
+    lat = row_lat(row)
+    if not (np.isfinite(lon) and np.isfinite(lat)):
+        return False
+    jet_flag = row.get("jet_meander_flag", False)
+    if isinstance(jet_flag, str):
+        jet_flag = jet_flag.strip().lower() in {"1", "true", "yes", "y"}
+    if bool(jet_flag):
+        return False
+    if -62.0 <= lat <= -40.0:
+        return False
+    boundary_boxes = (
+        (120.0, 160.0, 20.0, 45.0),   # Kuroshio/Oyashio transition
+        (260.0, 320.0, 20.0, 50.0),   # Gulf Stream/North Atlantic drift
+        (225.0, 260.0, 15.0, 40.0),   # California Current
+        (330.0, 360.0, 15.0, 40.0),   # Canary Current
+        (0.0, 50.0, -50.0, -15.0),    # Benguela/Agulhas
+        (140.0, 185.0, -50.0, -15.0), # East Australia/Leeuwin sector
+        (285.0, 335.0, -50.0, -15.0), # Brazil/Malvinas sector
+    )
+    return not any(lon_min <= lon <= lon_max and lat_min <= lat <= lat_max for lon_min, lon_max, lat_min, lat_max in boundary_boxes)
 
 
 def summarize(out: pd.DataFrame, candidate_idx: list[int]) -> list[dict[str, object]]:

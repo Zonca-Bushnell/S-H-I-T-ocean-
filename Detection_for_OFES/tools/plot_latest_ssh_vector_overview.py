@@ -11,8 +11,10 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_RESULT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_ssh_effective_contour_primary_rawnc4_jan01_jan19_parallel")
-DEFAULT_FILTER_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter")
+DEFAULT_RESULT_ROOT = Path(
+    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_recovery_surface_jan01_jan19"
+)
+DEFAULT_FILTER_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180")
 
 
 def main() -> None:
@@ -113,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot latest OFES SSH-primary eddy overview over SSH anomaly with velocity vectors.")
     parser.add_argument("--result-root", type=Path, default=DEFAULT_RESULT_ROOT)
     parser.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
-    parser.add_argument("--day", default="1991-01-10")
+    parser.add_argument("--day", default="1991-01-01")
     parser.add_argument("--global-vector-step", type=int, default=120)
     parser.add_argument("--regional-vector-step", "--kuroshio-vector-step", dest="regional_vector_step", type=int, default=3)
     parser.add_argument("--regional-zoom-name", default="Kuroshio")
@@ -121,9 +123,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ocean-vector-step", type=int, default=3)
     parser.add_argument("--ocean-zoom-name", default="North Pacific interior dense")
     parser.add_argument("--ocean-zoom-bbox", type=float, nargs=4, metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"), default=(170.0, 210.0, 20.0, 40.0))
-    parser.add_argument("--catalog-layer", choices=["all", "isolated", "jet_meander"], default="all")
+    parser.add_argument("--catalog-layer", choices=["all", "isolated", "jet_meander"], default="isolated")
     parser.add_argument("--exclude-jet-flagged", action="store_true", help="Hide rows with jet_meander_flag=True without changing the saved catalog.")
-    parser.add_argument("--exclude-transient", action="store_true", help="Hide rows with persistence_class=transient without changing the saved catalog.")
+    parser.add_argument("--exclude-transient", dest="exclude_transient", action="store_true", default=True, help="Hide rows with persistence_class=transient (default).")
+    parser.add_argument("--include-transient", dest="exclude_transient", action="store_false", help="Show transient rows for a diagnostic-only plot.")
     parser.add_argument("--run-tag", default="", help="Short diagnostic label included in figure titles and the manifest.")
     return parser.parse_args()
 
@@ -170,6 +173,7 @@ def attr_text(value: object) -> str:
 def read_detection_tables(result_root: Path, day: str) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     ymd = day.replace("-", "")
     candidates = [
+        result_root / "final_catalog" / "daily_runs" / ymd,
         result_root / "daily_runs" / ymd,
         result_root,
         result_root / "hua_b3_start2_detection",

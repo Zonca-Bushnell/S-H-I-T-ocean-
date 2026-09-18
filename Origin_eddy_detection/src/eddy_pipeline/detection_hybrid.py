@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from multiprocessing.shared_memory import SharedMemory
 import json
 import math
 import os
@@ -11,6 +13,38 @@ from pathlib import Path
 
 
 _MATLAB_DLL_HANDLES: list[object] = []
+_SHARED_SURFACE_ARRAYS: dict[str, np.ndarray] = {}
+_SHARED_SURFACE_HANDLES: list[SharedMemory] = []
+
+
+def _init_shared_surface_arrays(specs: dict[str, tuple[str, tuple[int, ...], str]], lon: np.ndarray, lat: np.ndarray) -> None:
+    global _SHARED_SURFACE_ARRAYS, _SHARED_SURFACE_HANDLES
+    _SHARED_SURFACE_ARRAYS = {"lon": np.asarray(lon), "lat": np.asarray(lat)}
+    _SHARED_SURFACE_HANDLES = []
+    for key, (name, shape, dtype_text) in specs.items():
+        handle = SharedMemory(name=name)
+        _SHARED_SURFACE_HANDLES.append(handle)
+        _SHARED_SURFACE_ARRAYS[key] = np.ndarray(shape, dtype=np.dtype(dtype_text), buffer=handle.buf)
+
+
+def _prepare_surface_seed_shared(payload: tuple[int, dict[str, object], float, float, DetectionParams, argparse.Namespace]) -> tuple[int, dict[str, object]]:
+    seed_order, seed_dict, dx_km, dy_km, params, args = payload
+    seed = pd.Series(seed_dict)
+    arrays = _SHARED_SURFACE_ARRAYS
+    return _prepare_surface_seed_parallel(
+        seed_order,
+        seed,
+        arrays["speed0"],
+        arrays["u0"],
+        arrays["v0"],
+        arrays["zos"],
+        arrays["lon"],
+        arrays["lat"],
+        dx_km,
+        dy_km,
+        params,
+        args,
+    )
 
 
 def _prepare_matlab_dll_search_path() -> None:
@@ -219,10 +253,28 @@ class DetectionParams:
     ssh_primary_window_factor: float = 4.0
     ssh_primary_max_radius_factor: float = 2.0
     ssh_primary_min_amplitude_cm: float = 0.0
+    ssh_primary_open_ocean_min_amplitude_cm: float = 0.4
+    ssh_primary_open_ocean_low_lat_amplitude_cm: float = 0.8
+    ssh_primary_open_ocean_high_lat_amplitude_cm: float = 0.25
+    ssh_primary_open_ocean_window_factor: float = 4.0
+    ssh_primary_open_ocean_max_radius_factor: float = 3.5
+    ssh_open_ocean_seed_window_cells: int = 3
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (
+        (190.0, 245.0, 25.0, 55.0, "north_pacific"),
+        (190.0, 280.0, -50.0, -30.0, "south_pacific"),
+        (320.0, 330.0, 25.0, 45.0, "north_atlantic"),
+        (335.0, 355.0, -45.0, -20.0, "south_atlantic"),
+    )
+    target_open_ocean_tile_top_n: int = 60
+    target_open_ocean_min_amplitude_cm: float = 0.10
+    target_open_ocean_window_factor: float = 8.0
+    target_open_ocean_max_radius_factor: float = 6.0
+    regional_amplitude_profile: dict[str, object] | None = None
     ssh_primary_max_shape_error_percent: float = 70.0
     ssh_primary_acc_max_shape_error_percent: float = 55.0
     jet_core_speed_percentile: float = 80.0
     jet_core_overlap_max: float = 0.50
+    skip_open_ocean_streamline_diagnostic: bool = False
     hua_backend: str = "python"
     matlab_use_gpu: bool = False
 
@@ -685,6 +737,17 @@ def _grid_spacing_km(lon: np.ndarray, lat: np.ndarray) -> tuple[float, float]:
     return abs(dx), abs(dy)
 
 
+def _in_target_open_ocean_box(
+    lon_value: float,
+    lat_value: float,
+    boxes: tuple[tuple[float, float, float, float, str], ...],
+) -> bool:
+    return any(
+        lon_min <= lon_value <= lon_max and lat_min <= lat_value <= lat_max
+        for lon_min, lon_max, lat_min, lat_max, _ in boxes
+    )
+
+
 def _select_extrema_candidates(
     extrema: pd.DataFrame,
     lon: np.ndarray,
@@ -695,6 +758,10 @@ def _select_extrema_candidates(
     tile_lon_deg: float,
     tile_lat_deg: float,
     tile_top_n: int,
+    open_ocean_tile_top_n: int,
+    open_ocean_low_lat_tile_top_n: int,
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (),
+    target_open_ocean_tile_top_n: int = 60,
 ) -> pd.DataFrame:
     if extrema.empty:
         return extrema
@@ -729,7 +796,36 @@ def _select_extrema_candidates(
     selected_parts = []
     group_cols = ["tile_lon_min", "tile_lat_min"]
     for _, part in out.groupby(group_cols, sort=True, dropna=False):
-        part = part.sort_values("abs_ssh_value_m", ascending=False).head(int(tile_top_n)).copy()
+        part = part.assign(
+            _tile_open_ocean=[
+                bool(_is_open_ocean_detection_location(lon, lat, int(ii), int(jj)))
+                for ii, jj in zip(part["seed_i"], part["seed_j"])
+            ]
+        )
+        part["_tile_target_open_ocean"] = [
+            _in_target_open_ocean_box(float(seed_lon[pos]), float(seed_lat[pos]), target_open_ocean_boxes)
+            for pos in part.index
+        ]
+        part["_tile_low_lat_open"] = part["_tile_open_ocean"] & (np.abs(seed_lat[part.index]) < 20.0)
+        kept = []
+        # Separate caps prevent the larger open-ocean allowance from spilling
+        # into low-latitude or boundary-current candidates in the same tile.
+        for (is_open, low_lat, is_target), cap_part in part.groupby(
+            ["_tile_open_ocean", "_tile_low_lat_open", "_tile_target_open_ocean"], sort=False
+        ):
+            cap = (
+                target_open_ocean_tile_top_n
+                if bool(is_target)
+                else
+                open_ocean_low_lat_tile_top_n
+                if bool(is_open) and bool(low_lat)
+                else open_ocean_tile_top_n
+                if bool(is_open)
+                else tile_top_n
+            )
+            kept.append(cap_part.sort_values("abs_ssh_value_m", ascending=False).head(int(cap)))
+        part = pd.concat(kept, ignore_index=False).sort_values("abs_ssh_value_m", ascending=False)
+        part = part.drop(columns=["_tile_open_ocean", "_tile_low_lat_open", "_tile_target_open_ocean"])
         part["tile_rank"] = np.arange(1, len(part) + 1, dtype=int)
         selected_parts.append(part)
     if not selected_parts:
@@ -750,38 +846,93 @@ def _local_extrema(
     tile_lon_deg: float,
     tile_lat_deg: float,
     tile_top_n: int,
+    open_ocean_tile_top_n: int = 30,
+    open_ocean_low_lat_tile_top_n: int = 15,
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (),
+    target_open_ocean_tile_top_n: int = 60,
+    adaptive_window_min: int | None = None,
+    seed_windows_cells: tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
     finite = np.isfinite(zos)
     fill_max = np.where(finite, zos, -np.inf)
     fill_min = np.where(finite, zos, np.inf)
-    max_mask = finite & (fill_max == ndimage.maximum_filter(fill_max, size=window, mode="nearest"))
-    min_mask = finite & (fill_min == ndimage.minimum_filter(fill_min, size=window, mode="nearest"))
+    windows = tuple(sorted({int(w) for w in (seed_windows_cells or (window,)) if int(w) >= 3}))
+    if not windows:
+        windows = (int(window),)
     rows = []
     structure = np.ones((3, 3), dtype=bool)
-    for kind, mask in (("ssh_max", max_mask), ("ssh_min", min_mask)):
-        labels, count = ndimage.label(mask, structure=structure)
-        for label in range(1, count + 1):
-            yy, xx = np.where(labels == label)
-            n = len(xx)
-            if n == 0 or n > 100:
+    for current_window in windows:
+        max_mask = finite & (fill_max == ndimage.maximum_filter(fill_max, size=current_window, mode="nearest"))
+        min_mask = finite & (fill_min == ndimage.minimum_filter(fill_min, size=current_window, mode="nearest"))
+        if seed_windows_cells is None and adaptive_window_min is not None and int(adaptive_window_min) < int(current_window):
+            small = max(3, int(adaptive_window_min))
+            small_max = finite & (fill_max == ndimage.maximum_filter(fill_max, size=small, mode="nearest"))
+            small_min = finite & (fill_min == ndimage.minimum_filter(fill_min, size=small, mode="nearest"))
+            abs_lat = np.abs(np.asarray(lat, dtype="f8"))
+            use_small = np.clip((abs_lat - 20.0) / 40.0, 0.0, 1.0)[:, None] > 0.0
+            max_mask = np.where(use_small, small_max, max_mask) & finite
+            min_mask = np.where(use_small, small_min, min_mask) & finite
+        for kind, mask in (("ssh_max", max_mask), ("ssh_min", min_mask)):
+            # Labeling is fast in SciPy.  The former implementation then used
+            # ``np.where(labels == label)`` once per component, which rescanned
+            # the global field thousands of times.  Sort the labeled pixels once
+            # instead and take one extremum from each acceptable plateau.
+            labels, count = ndimage.label(mask, structure=structure)
+            if count == 0:
                 continue
-            values = zos[yy, xx]
-            if kind == "ssh_max":
-                pick = int(np.nanargmax(values))
-            else:
-                pick = int(np.nanargmin(values))
-            rows.append(
+            flat = np.flatnonzero(mask)
+            label_values = labels.ravel()[flat]
+            component_sizes = np.bincount(label_values, minlength=count + 1)
+            keep_component = component_sizes[label_values] <= 100
+            flat = flat[keep_component]
+            label_values = label_values[keep_component]
+            if flat.size == 0:
+                continue
+            values = np.asarray(zos, dtype="float64").ravel()[flat]
+            value_key = -values if kind == "ssh_max" else values
+            order = np.lexsort((value_key, label_values))
+            ordered_labels = label_values[order]
+            first = np.r_[True, ordered_labels[1:] != ordered_labels[:-1]]
+            selected_flat = flat[order[first]]
+            selected_labels = ordered_labels[first]
+            selected_values = np.asarray(zos, dtype="float64").ravel()[selected_flat]
+            yy, xx = np.divmod(selected_flat, zos.shape[1])
+            rows.extend(
                 {
                     "ssh_extremum_type": kind,
-                    "seed_i": int(xx[pick]),
-                    "seed_j": int(yy[pick]),
-                    "ssh_value_m": float(values[pick]),
-                    "component_pixels": int(n),
+                    "seed_i": int(i),
+                    "seed_j": int(j),
+                    "ssh_value_m": float(value),
+                    "component_pixels": int(component_sizes[label]),
+                    "seed_scale_cells": int(current_window),
+                    "seed_pool_source": "multiscale_local_extrema" if seed_windows_cells else "local_extrema",
                 }
+                for i, j, value, label in zip(xx, yy, selected_values, selected_labels, strict=True)
             )
     out = pd.DataFrame(rows)
     if out.empty:
         return out
+    if seed_windows_cells and len(windows) > 1:
+        kept = []
+        height, width = zos.shape
+        for _, part in out.groupby("ssh_extremum_type", sort=False):
+            ordered = part.assign(abs_ssh_value_m=part["ssh_value_m"].abs()).sort_values(
+                "abs_ssh_value_m", ascending=False
+            )
+            occupied = np.zeros((height, width), dtype=bool)
+            for row in ordered.to_dict("records"):
+                i, j = int(row["seed_i"]), int(row["seed_j"])
+                y0, y1 = max(0, j - 2), min(height, j + 3)
+                x0, x1 = max(0, i - 2), min(width, i + 3)
+                local = occupied[y0:y1, x0:x1]
+                yy, xx = np.ogrid[y0:y1, x0:x1]
+                within_two_cells = (xx - i) ** 2 + (yy - j) ** 2 <= 4
+                if np.any(local & within_two_cells):
+                    continue
+                row["seed_merge_group"] = len(kept) + 1
+                kept.append(row)
+                occupied[y0:y1, x0:x1][within_two_cells] = True
+        out = pd.DataFrame(kept)
     out["abs_ssh_value_m"] = out["ssh_value_m"].abs()
     return _select_extrema_candidates(
         out,
@@ -792,6 +943,10 @@ def _local_extrema(
         tile_lon_deg=tile_lon_deg,
         tile_lat_deg=tile_lat_deg,
         tile_top_n=tile_top_n,
+        open_ocean_tile_top_n=open_ocean_tile_top_n,
+        open_ocean_low_lat_tile_top_n=open_ocean_low_lat_tile_top_n,
+        target_open_ocean_boxes=target_open_ocean_boxes,
+        target_open_ocean_tile_top_n=target_open_ocean_tile_top_n,
     )
 
 
@@ -1748,6 +1903,7 @@ def _ssh_primary_contour_check(
     ci = int(np.clip(int(seed_i), 0, ssh.shape[1] - 1))
     cj = int(np.clip(int(seed_j), 0, ssh.shape[0] - 1))
     seed_value = float(ssh[cj, ci]) if np.isfinite(ssh[cj, ci]) else np.nan
+    seed_lat = float(lat[cj]) if lat is not None and np.isfinite(lat[cj]) else np.nan
     base = {
         "circle_passed": False,
         "hua_pass": False,
@@ -1788,6 +1944,8 @@ def _ssh_primary_contour_check(
         "ssh_contour_shape_error_percent": np.nan,
         "ssh_contour_compactness": np.nan,
         "ssh_contour_boundary_point_count": 0.0,
+        "ssh_primary_requested_window_half_cells": np.nan,
+        "ssh_primary_effective_window_half_cells": np.nan,
         "ssh_primary_valid_contour_count": 0.0,
         "ssh_primary_rejected_multi_extrema_count": 0.0,
         "ssh_primary_rejected_shape_error_count": 0.0,
@@ -1803,8 +1961,89 @@ def _ssh_primary_contour_check(
     if not np.isfinite(seed_value):
         base["failure_14_ssh_primary_no_closed_contour_count"] = 1.0
         return base
-    max_radius = float(params.max_radius_cells) * float(params.ssh_primary_max_radius_factor)
-    half = max(int(math.ceil(max_radius * float(params.ssh_primary_window_factor))), int(params.max_radius_cells) + 4)
+    target_open_ocean = bool(
+        lon is not None
+        and lat is not None
+        and _in_target_open_ocean_box(
+            float(lon[ci]), float(lat[cj]), params.target_open_ocean_boxes
+        )
+    )
+    open_ocean = bool(
+        lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, ci, cj)
+    )
+    regional_policy = _regional_amplitude_policy(params.regional_amplitude_profile, lon, lat, ci, cj)
+    if regional_policy is not None:
+        min_amplitude_cm = float(regional_policy["threshold_cm"])
+    elif target_open_ocean:
+        min_amplitude_cm = float(params.target_open_ocean_min_amplitude_cm)
+    elif open_ocean:
+        # Re-read the one-dimensional latitude coordinate at the clipped seed
+        # index here so adaptive thresholds cannot depend on stale worker state.
+        seed_lat = float(lat[cj]) if lat is not None and np.isfinite(lat[cj]) else np.nan
+        abs_lat = abs(seed_lat)
+        if abs_lat <= 15.0:
+            min_amplitude_cm = float(params.ssh_primary_open_ocean_low_lat_amplitude_cm)
+        elif abs_lat >= 60.0:
+            min_amplitude_cm = float(params.ssh_primary_open_ocean_high_lat_amplitude_cm)
+        else:
+            # Preserve the existing mid-latitude open-ocean threshold while
+            # tapering it between the equatorial and high-latitude values.
+            if abs_lat <= 30.0:
+                weight = (abs_lat - 15.0) / 15.0
+                min_amplitude_cm = (1.0 - weight) * float(params.ssh_primary_open_ocean_low_lat_amplitude_cm) + weight * float(params.ssh_primary_open_ocean_min_amplitude_cm)
+            else:
+                weight = (abs_lat - 30.0) / 30.0
+                min_amplitude_cm = (1.0 - weight) * float(params.ssh_primary_open_ocean_min_amplitude_cm) + weight * float(params.ssh_primary_open_ocean_high_lat_amplitude_cm)
+    else:
+        min_amplitude_cm = float(params.ssh_primary_min_amplitude_cm)
+    window_factor = (
+        float(params.target_open_ocean_window_factor)
+        if target_open_ocean
+        else float(params.ssh_primary_open_ocean_window_factor)
+        if open_ocean
+        else float(params.ssh_primary_window_factor)
+    )
+    max_radius_factor = (
+        float(params.target_open_ocean_max_radius_factor)
+        if target_open_ocean
+        else float(params.ssh_primary_open_ocean_max_radius_factor)
+        if open_ocean
+        else float(params.ssh_primary_max_radius_factor)
+    )
+    base["ssh_primary_min_amplitude_cm"] = min_amplitude_cm
+    if regional_policy is not None:
+        base["regional_threshold_cm"] = min_amplitude_cm
+        base["threshold_region"] = str(regional_policy["region"])
+        base["threshold_lat_band"] = str(regional_policy["lat_band"])
+        base["threshold_iteration"] = int(regional_policy.get("iteration", 0))
+        base["threshold_source"] = str(regional_policy.get("source", "regional_amplitude_density_feedback"))
+        base["threshold_adjustment_reason"] = str(regional_policy.get("adjustment_reason", "profile"))
+        base["local_amplitude_percentile"] = float(regional_policy.get("local_amplitude_percentile", np.nan))
+        base["fragmentation_rate"] = float(regional_policy.get("fragmentation_rate", np.nan))
+        base["contour_quality_score"] = float(regional_policy.get("contour_quality_score", np.nan))
+    else:
+        base["regional_threshold_cm"] = np.nan
+        base["threshold_region"] = ""
+        base["threshold_lat_band"] = ""
+        base["threshold_iteration"] = np.nan
+        base["threshold_source"] = "latitude_initial_fallback"
+        base["threshold_adjustment_reason"] = "no_regional_profile"
+        base["local_amplitude_percentile"] = np.nan
+        base["fragmentation_rate"] = np.nan
+        base["contour_quality_score"] = np.nan
+    max_radius = float(params.max_radius_cells) * max_radius_factor
+    requested_half = int(math.ceil(max_radius * window_factor))
+    # A contour whose equivalent radius must be <= max_radius cannot need an
+    # 8R search window.  The previous multiplication of both recovery factors
+    # made target seeds label >1 million grid cells per contour level and also
+    # encouraged connections to distant background features.  A 1.5R window
+    # retains a generous boundary margin while bounding the local operation.
+    radius_bounded_half = max(int(math.ceil(max_radius * 1.5)), int(math.ceil(max_radius)) + 4)
+    half = min(max(requested_half, int(math.ceil(max_radius)) + 4), radius_bounded_half)
+    base["ssh_primary_requested_window_half_cells"] = float(requested_half)
+    base["ssh_primary_effective_window_half_cells"] = float(half)
     x0, x1 = max(0, ci - half), min(ssh.shape[1], ci + half + 1)
     y0, y1 = max(0, cj - half), min(ssh.shape[0], cj + half + 1)
     window = np.asarray(ssh[y0:y1, x0:x1], dtype="float64")
@@ -1837,8 +2076,9 @@ def _ssh_primary_contour_check(
     rejected_shape_error_count = 0
     for frac in fractions:
         level = seed_value + float(frac) * (bg_value - seed_value)
+        # OFES Origin-compatible zos_glor is stored in centimetres.
         amplitude_cm = abs(float(seed_value) - float(level))
-        if amplitude_cm < float(params.ssh_primary_min_amplitude_cm):
+        if amplitude_cm < min_amplitude_cm:
             saw_weak_amplitude = True
             continue
         mask = finite & ((window >= level) if is_max else (window <= level))
@@ -1947,6 +2187,71 @@ def _ssh_primary_contour_check(
     return base
 
 
+def _regional_amplitude_policy(
+    profile: dict[str, object] | None,
+    lon: np.ndarray | None,
+    lat: np.ndarray | None,
+    ci: int,
+    cj: int,
+) -> dict[str, object] | None:
+    """Return a calibrated regional threshold for a surface seed, if covered."""
+    if not profile or lon is None or lat is None:
+        return None
+    try:
+        seed_lon = float(lon[ci])
+        seed_lat = float(lat[cj])
+    except (IndexError, TypeError, ValueError):
+        return None
+    for region in profile.get("regions", []):
+        if not isinstance(region, dict):
+            continue
+        lon_min, lon_max = float(region["lon_min"]), float(region["lon_max"])
+        lat_min, lat_max = float(region["lat_min"]), float(region["lat_max"])
+        if not (lon_min <= seed_lon <= lon_max and lat_min <= seed_lat <= lat_max):
+            continue
+        for band in region.get("bands", []):
+            if not isinstance(band, dict):
+                continue
+            if float(band["lat_min"]) <= abs(seed_lat) <= float(band["lat_max"]):
+                return {
+                    "threshold_cm": float(band["threshold_cm"]),
+                    "region": str(region["name"]),
+                    "lat_band": str(band["name"]),
+                    "iteration": int(band.get("iteration", 0)),
+                    "source": str(band.get("source", "regional_amplitude_density_feedback")),
+                    "adjustment_reason": str(band.get("adjustment_reason", "profile")),
+                    "local_amplitude_percentile": float(band.get("local_amplitude_percentile", np.nan)),
+                    "fragmentation_rate": float(band.get("fragmentation_rate", np.nan)),
+                    "contour_quality_score": float(band.get("contour_quality_score", np.nan)),
+                }
+    return None
+
+
+def _load_regional_amplitude_profile(path: Path | None) -> dict[str, object] | None:
+    if path is None:
+        return None
+    profile_path = Path(path)
+    if not profile_path.exists():
+        raise FileNotFoundError(f"Regional amplitude profile not found: {profile_path}")
+    with profile_path.open("r", encoding="utf-8") as handle:
+        profile = json.load(handle)
+    if not isinstance(profile, dict) or not isinstance(profile.get("regions"), list):
+        raise ValueError("Regional amplitude profile must be a JSON object with a regions list")
+    return profile
+
+
+def _parse_target_open_ocean_boxes(value: str) -> tuple[tuple[float, float, float, float, str], ...]:
+    boxes = []
+    for item in str(value or "").split(";"):
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 5:
+            raise ValueError(
+                "--target-open-ocean-boxes expects lon_min,lon_max,lat_min,lat_max,name;..."
+            )
+        boxes.append((float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), parts[4]))
+    return tuple(boxes)
+
+
 def _ssh_primary_with_streamline_diagnostics(
     ssh: np.ndarray,
     u: np.ndarray,
@@ -1960,6 +2265,57 @@ def _ssh_primary_with_streamline_diagnostics(
     lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
     primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
+    if (
+        params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate"
+        and lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j)
+        and not bool(primary.get("hua_pass", False))
+    ):
+        # Failed SSH candidates do not need an expensive streamline trace.
+        # Keep the diagnostic schema complete so downstream QC remains uniform.
+        return {
+            **primary,
+            "streamline_closed": False,
+            "streamline_radius_cells": np.nan,
+            "streamline_points": 0.0,
+            "streamline_closure_error_cells": np.nan,
+            "streamline_winding_turns": np.nan,
+            "streamline_direction_exception_fraction": np.nan,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
+            "streamline_boundary_quality": "not_evaluated_ssh_rejected",
+            "dynamical_core_class": "not_evaluated_ssh_rejected",
+            "jet_core_overlap_fraction": np.nan,
+            "jet_core_speed_percentile": float(params.jet_core_speed_percentile),
+            "jet_meander_flag": False,
+        }
+    if (
+        params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate"
+        and lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j)
+        and params.skip_open_ocean_streamline_diagnostic
+    ):
+        center_i = float(primary.get("ssh_contour_center_i", seed_i))
+        center_j = float(primary.get("ssh_contour_center_j", seed_j))
+        radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
+        if not np.isfinite(radius) or radius <= 0.0:
+            radius = float(params.start_radius_cells)
+        return {
+            **primary,
+            "streamline_closed": False,
+            "streamline_radius_cells": np.nan,
+            "streamline_points": 0.0,
+            "streamline_closure_error_cells": np.nan,
+            "streamline_winding_turns": np.nan,
+            "streamline_direction_exception_fraction": np.nan,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
+            "streamline_boundary_quality": "not_evaluated_open_ocean",
+            "dynamical_core_class": "weak_or_no_streamline_core",
+            **_jet_core_overlap_check(speed, center_i, center_j, int(max(params.start_radius_cells, round(radius))), params),
+        }
     center_i = float(primary.get("ssh_contour_center_i", np.nan))
     center_j = float(primary.get("ssh_contour_center_j", np.nan))
     radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
@@ -2005,8 +2361,8 @@ def _ssh_primary_with_streamline_effective_boundary(
         **discovery,
         "ssh_primary_discovery_pass": bool(discovery.get("hua_pass", False)),
         "ssh_primary_discovery_reason": str(discovery.get("catalog_acceptance_reason", "ssh_primary_rejected")),
-        "boundary_mode": "ssh_primary_velocity_streamline_effective",
-        "surface_definition": "ssh_primary_velocity_streamline_effective",
+        "boundary_mode": params.boundary_mode,
+        "surface_definition": params.boundary_mode,
         "circle_passed": False,
         "hua_pass": False,
         "radius_cells": np.nan,
@@ -2069,6 +2425,23 @@ def _ssh_primary_with_streamline_effective_boundary(
                 **jet,
             }
         )
+        if params.boundary_mode == "ssh_primary_velocity_streamline_effective_open_ocean_fallback" and bool(discovery.get("hua_pass", False)) and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j):
+            out.update(
+                {
+                    "circle_passed": True,
+                    "hua_pass": True,
+                    "radius_cells": float(discovery.get("ssh_contour_radius_cells", np.nan)),
+                    "accepted_radius_cells": float(discovery.get("ssh_contour_radius_cells", np.nan)),
+                    "boundary_source": "ssh_effective_contour_open_ocean_fallback",
+                    "catalog_acceptance_reason": "ssh_effective_contour_open_ocean_fallback",
+                    "dynamical_core_class": "weak_or_no_streamline_core",
+                    "streamline_boundary_quality": "no_closed_streamline_ssh_fallback",
+                    "dominant_failure_code": -1.0,
+                    "dominant_failure": "none",
+                    "first_hard_failure_code": -1.0,
+                    "first_hard_failure": "none",
+                }
+            )
         return out
 
     out.update(
@@ -2100,6 +2473,30 @@ def _ssh_primary_with_streamline_effective_boundary(
     if bool(out.get("jet_meander_flag", False)):
         out["dynamical_core_class"] = "closed_streamline_core_jet_flagged"
     return out
+
+
+def _is_open_ocean_detection_location(
+    lon: np.ndarray | None,
+    lat: np.ndarray | None,
+    seed_i: int,
+    seed_j: int,
+) -> bool:
+    if lon is None or lat is None:
+        return False
+    x = float(lon[int(seed_i)])
+    y = float(lat[int(seed_j)])
+    if not (np.isfinite(x) and np.isfinite(y)) or -62.0 <= y <= -40.0:
+        return False
+    boundary_boxes = (
+        (120.0, 160.0, 20.0, 45.0),
+        (260.0, 320.0, 20.0, 50.0),
+        (225.0, 260.0, 15.0, 40.0),
+        (330.0, 360.0, 15.0, 40.0),
+        (0.0, 50.0, -50.0, -15.0),
+        (140.0, 185.0, -50.0, -15.0),
+        (285.0, 335.0, -50.0, -15.0),
+    )
+    return not any(x0 <= x <= x1 and y0 <= y <= y1 for x0, x1, y0, y1 in boundary_boxes)
 
 
 def _jet_core_overlap_check(
@@ -2293,7 +2690,19 @@ def _hua_verify_radius(
             lon,
             lat,
         )
-    if params.boundary_mode == "ssh_primary_velocity_streamline_effective" and ssh is not None:
+    if params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate" and ssh is not None:
+        if speed is None:
+            speed = np.hypot(u, v)
+        ci = int(round(float(center_i)))
+        cj = int(round(float(center_j)))
+        if _is_open_ocean_detection_location(lon, lat, ci, cj):
+            return _ssh_primary_with_streamline_diagnostics(
+                ssh, u, v, speed, ci, cj, params, extremum_type, lon, lat
+            )
+        return _ssh_primary_with_streamline_effective_boundary(
+            ssh, u, v, speed, ci, cj, params, extremum_type, lon, lat
+        )
+    if params.boundary_mode in {"ssh_primary_velocity_streamline_effective", "ssh_primary_velocity_streamline_effective_open_ocean_fallback"} and ssh is not None:
         if speed is None:
             speed = np.hypot(u, v)
         return _ssh_primary_with_streamline_effective_boundary(
@@ -2481,7 +2890,7 @@ def _pass_rate_breakdown(centers: pd.DataFrame, params: DetectionParams) -> pd.D
                     "boundary_mode": params.boundary_mode,
                 }
             )
-        if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and "boundary_source" in part.columns:
+        if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_open_ocean_no_streamline_gate"} and "boundary_source" in part.columns:
             source_counts = part["boundary_source"].fillna("unknown").value_counts(dropna=False).to_dict()
             for source, count_value in source_counts.items():
                 rows.append(
@@ -2496,7 +2905,7 @@ def _pass_rate_breakdown(centers: pd.DataFrame, params: DetectionParams) -> pd.D
                         "boundary_mode": params.boundary_mode,
                     }
                 )
-        if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and "dynamical_core_class" in part.columns:
+        if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_open_ocean_no_streamline_gate"} and "dynamical_core_class" in part.columns:
             core_counts = part["dynamical_core_class"].fillna("unknown").value_counts(dropna=False).to_dict()
             for core_class, count_value in core_counts.items():
                 rows.append(
@@ -2711,6 +3120,82 @@ def _load_year_arrays(args: argparse.Namespace, year: int) -> tuple[Dataset, Dat
     return filt, raw, lon, lat, depth
 
 
+def _prepare_surface_seed_parallel(
+    seed_order: int,
+    seed: pd.Series,
+    speed0: np.ndarray,
+    u0: np.ndarray,
+    v0: np.ndarray,
+    zos: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    dx_km: float,
+    dy_km: float,
+    params: DetectionParams,
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    seed_i = int(seed["seed_i"])
+    seed_j = int(seed["seed_j"])
+    center_i, center_j, center_speed, min_steps = _seeded_speed_min(
+        speed0, seed_i, seed_j, params.surface_search_cells
+    )
+    grid_lon_value = float(lon[center_i])
+    grid_lat_value = float(lat[center_j])
+    refined = _refine_speed_min_subgrid(
+        speed0,
+        u0,
+        v0,
+        lon,
+        lat,
+        center_i,
+        center_j,
+        target_degree=float(args.subgrid_target_degree),
+        window_radius_cells=int(args.subgrid_window_radius_cells),
+        min_finite_fraction=float(args.subgrid_min_finite_fraction),
+    )
+    hua_center_i = float(refined["center_i_refined"])
+    hua_center_j = float(refined["center_j_refined"])
+    check_center_i = hua_center_i
+    check_center_j = hua_center_j
+    check = _hua_verify_radius(
+        u0,
+        v0,
+        check_center_i,
+        check_center_j,
+        params,
+        ssh=zos,
+        speed=speed0,
+        extremum_type=str(seed["ssh_extremum_type"]),
+        lon=lon,
+        lat=lat,
+    )
+    if params.boundary_mode == "ssh_effective_contour_primary" and bool(check.get("hua_pass", False)):
+        contour_i = float(check.get("ssh_contour_center_i", np.nan))
+        contour_j = float(check.get("ssh_contour_center_j", np.nan))
+        if np.isfinite(contour_i) and np.isfinite(contour_j):
+            refined = {
+                **refined,
+                "center_i_refined": contour_i,
+                "center_j_refined": contour_j,
+                "center_lon_refined": _interp_1d_from_fraction(lon, contour_i),
+                "center_lat_refined": _interp_1d_from_fraction(lat, contour_j),
+            }
+    return seed_order, {
+        "seed_i": seed_i,
+        "seed_j": seed_j,
+        "center_i": center_i,
+        "center_j": center_j,
+        "center_speed": center_speed,
+        "min_steps": min_steps,
+        "grid_lon_value": grid_lon_value,
+        "grid_lat_value": grid_lat_value,
+        "refined": refined,
+        "hua_center_i": hua_center_i,
+        "hua_center_j": hua_center_j,
+        "check": check,
+    }
+
+
 def _detect_day(
     day: date,
     filt: Dataset,
@@ -2743,7 +3228,36 @@ def _detect_day(
             tile_lon_deg=args.tile_lon_deg,
             tile_lat_deg=args.tile_lat_deg,
             tile_top_n=args.tile_top_n,
+            open_ocean_tile_top_n=args.open_ocean_tile_top_n,
+            open_ocean_low_lat_tile_top_n=args.open_ocean_low_lat_tile_top_n,
+            target_open_ocean_boxes=_parse_target_open_ocean_boxes(args.target_open_ocean_boxes),
+            target_open_ocean_tile_top_n=args.target_open_ocean_tile_top_n,
+            seed_windows_cells=tuple(
+                int(value.strip())
+                for value in str(args.seed_windows_cells).split(",")
+                if value.strip()
+            ) or None,
+            adaptive_window_min=args.ssh_open_ocean_seed_window_cells,
         )
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scale_counts = (
+        {str(int(scale)): int(count) for scale, count in extrema["seed_scale_cells"].value_counts().sort_index().items()}
+        if not extrema.empty and "seed_scale_cells" in extrema.columns
+        else {}
+    )
+    (output_dir / "candidate_pool_summary.json").write_text(
+        json.dumps(
+            {
+                "date": day.isoformat(),
+                "candidate_count_after_merge_and_tile_cap": int(len(extrema)),
+                "seed_scale_counts_after_merge_and_tile_cap": scale_counts,
+                "candidate_selection": str(args.candidate_selection),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     if extrema.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(columns=OBJECT_VOXEL_COLUMNS)
@@ -2832,6 +3346,9 @@ def _detect_day(
                 "polarity": polarity,
                 "time_index": int(time_index),
                 "candidate_selection": str(seed.get("candidate_selection", args.candidate_selection)),
+                "seed_scale_cells": float(seed.get("seed_scale_cells", args.ssh_window_cells)),
+                "seed_pool_source": str(seed.get("seed_pool_source", "local_extrema")),
+                "seed_merge_group": float(seed.get("seed_merge_group", np.nan)),
                 "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
                 "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
                 "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
@@ -3126,15 +3643,52 @@ def _detect_day(
             _plot_day_summary(day, centers, zos, lon, lat, output_dir / "figures", speed=speed0)
         return centers, circle, structures, voxels
 
+    parallel_surface_cache: dict[int, dict[str, object]] = {}
+    if (
+        len(depth_indices) == 1
+        and matlab_backend is None
+        and int(args.intra_day_workers) > 1
+    ):
+        shared_arrays: dict[str, SharedMemory] = {}
+        shared_specs: dict[str, tuple[str, tuple[int, ...], str]] = {}
+        try:
+            for key, array in {"zos": zos, "u0": u0, "v0": v0, "speed0": speed0}.items():
+                shared = SharedMemory(create=True, size=int(array.nbytes))
+                np.ndarray(array.shape, dtype=array.dtype, buffer=shared.buf)[:] = array
+                shared_arrays[key] = shared
+                shared_specs[key] = (shared.name, tuple(array.shape), array.dtype.str)
+            payloads = [
+                (int(seed_order), seed.to_dict(), dx_km, dy_km, params, args)
+                for seed_order, seed in extrema.iterrows()
+            ]
+            with ProcessPoolExecutor(
+                max_workers=max(1, int(args.intra_day_workers)),
+                initializer=_init_shared_surface_arrays,
+                initargs=(shared_specs, lon, lat),
+            ) as pool:
+                futures = [pool.submit(_prepare_surface_seed_shared, payload) for payload in payloads]
+                for future in as_completed(futures):
+                    seed_order, prepared = future.result()
+                    parallel_surface_cache[seed_order] = prepared
+        finally:
+            for shared in shared_arrays.values():
+                shared.close()
+                shared.unlink()
+
+    candidate_total = int(len(extrema))
     for seed_order, seed in extrema.iterrows():
         seed_i = int(seed["seed_i"])
         seed_j = int(seed["seed_j"])
-        center_i, center_j, center_speed, min_steps = _seeded_speed_min(
-            speed0,
-            seed_i,
-            seed_j,
-            params.surface_search_cells,
-        )
+        prepared = parallel_surface_cache.get(int(seed_order))
+        if prepared is None:
+            center_i, center_j, center_speed, min_steps = _seeded_speed_min(
+                speed0, seed_i, seed_j, params.surface_search_cells
+            )
+        else:
+            center_i = int(prepared["center_i"])
+            center_j = int(prepared["center_j"])
+            center_speed = float(prepared["center_speed"])
+            min_steps = int(prepared["min_steps"])
         prev_i, prev_j = center_i, center_j
         object_id = f"{day:%Y%m%d}_{int(seed_order):05d}"
         stopped = False
@@ -3162,26 +3716,31 @@ def _detect_day(
                 "refined_ok": False,
                 "subgrid_fit_quality": "not_attempted",
             }
-            pre_hua_refined = (
-                _refine_speed_min_subgrid(
-                    speed,
-                    u,
-                    v,
-                    lon,
-                    lat,
-                    center_i,
-                    center_j,
-                    target_degree=float(args.subgrid_target_degree),
-                    window_radius_cells=int(args.subgrid_window_radius_cells),
-                    min_finite_fraction=float(args.subgrid_min_finite_fraction),
+            if prepared is not None and int(depth_index) == 0:
+                pre_hua_refined = dict(prepared["refined"])
+            else:
+                pre_hua_refined = (
+                    _refine_speed_min_subgrid(
+                        speed,
+                        u,
+                        v,
+                        lon,
+                        lat,
+                        center_i,
+                        center_j,
+                        target_degree=float(args.subgrid_target_degree),
+                        window_radius_cells=int(args.subgrid_window_radius_cells),
+                        min_finite_fraction=float(args.subgrid_min_finite_fraction),
+                    )
+                    if refinement_enabled
+                    else fallback_refined
                 )
-                if refinement_enabled
-                else fallback_refined
-            )
             hua_center_i = float(pre_hua_refined["center_i_refined"])
             hua_center_j = float(pre_hua_refined["center_j_refined"])
             if matlab_backend is not None:
                 check = matlab_backend.check(int(depth_index), hua_center_i, hua_center_j)
+            elif prepared is not None and int(depth_index) == 0:
+                check = dict(prepared["check"])
             else:
                 check_center_i = float(seed_i) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_i
                 check_center_j = float(seed_j) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_j
@@ -3229,6 +3788,9 @@ def _detect_day(
                 "polarity": polarity,
                 "time_index": int(time_index),
                 "candidate_selection": str(seed.get("candidate_selection", args.candidate_selection)),
+                "seed_scale_cells": float(seed.get("seed_scale_cells", args.ssh_window_cells)),
+                "seed_pool_source": str(seed.get("seed_pool_source", "local_extrema")),
+                "seed_merge_group": float(seed.get("seed_merge_group", np.nan)),
                 "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
                 "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
                 "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
@@ -3311,6 +3873,22 @@ def _detect_day(
                     )
             if args.stop_at_first_failed_layer and stopped:
                 break
+        if (int(seed_order) + 1) % 250 == 0 or int(seed_order) + 1 == candidate_total:
+            (output_dir / "candidate_processing_progress.json").write_text(
+                json.dumps(
+                    {
+                        "date": day.isoformat(),
+                        "processed_candidates": int(seed_order) + 1,
+                        "candidate_total": candidate_total,
+                        "accepted_surface_candidates_so_far": int(
+                            sum(bool(row.get("hua_pass", False)) for row in centers_rows if int(row.get("depth_index", -1)) == 0)
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
     centers = pd.DataFrame(centers_rows)
     circle = pd.DataFrame(circle_rows)
@@ -3701,6 +4279,7 @@ def run(args: argparse.Namespace) -> None:
             "--disable-subgrid-center-refinement has been retired for ACC TEST. "
             "Search-stage pre-Hua subgrid center refinement is now mandatory."
         )
+    target_boxes = _parse_target_open_ocean_boxes(args.target_open_ocean_boxes)
     params = DetectionParams(
         ssh_window_cells=args.ssh_window_cells,
         start_radius_cells=args.start_radius_cells,
@@ -3730,14 +4309,27 @@ def run(args: argparse.Namespace) -> None:
         ssh_primary_window_factor=args.ssh_primary_window_factor,
         ssh_primary_max_radius_factor=args.ssh_primary_max_radius_factor,
         ssh_primary_min_amplitude_cm=args.ssh_primary_min_amplitude_cm,
+        ssh_primary_open_ocean_min_amplitude_cm=args.ssh_primary_open_ocean_min_amplitude_cm,
+        ssh_primary_open_ocean_low_lat_amplitude_cm=args.ssh_primary_open_ocean_low_lat_amplitude_cm,
+        ssh_primary_open_ocean_high_lat_amplitude_cm=args.ssh_primary_open_ocean_high_lat_amplitude_cm,
+        ssh_primary_open_ocean_window_factor=args.ssh_primary_open_ocean_window_factor,
+        ssh_primary_open_ocean_max_radius_factor=args.ssh_primary_open_ocean_max_radius_factor,
+        ssh_open_ocean_seed_window_cells=args.ssh_open_ocean_seed_window_cells,
+        target_open_ocean_boxes=target_boxes,
+        target_open_ocean_tile_top_n=args.target_open_ocean_tile_top_n,
+        target_open_ocean_min_amplitude_cm=args.target_open_ocean_min_amplitude_cm,
+        target_open_ocean_window_factor=args.target_open_ocean_window_factor,
+        target_open_ocean_max_radius_factor=args.target_open_ocean_max_radius_factor,
+        regional_amplitude_profile=_load_regional_amplitude_profile(args.regional_amplitude_profile),
         ssh_primary_max_shape_error_percent=args.ssh_primary_max_shape_error_percent,
         ssh_primary_acc_max_shape_error_percent=args.ssh_primary_acc_max_shape_error_percent,
         jet_core_speed_percentile=args.jet_core_speed_percentile,
         jet_core_overlap_max=args.jet_core_overlap_max,
+        skip_open_ocean_streamline_diagnostic=bool(args.skip_open_ocean_streamline_diagnostic),
         hua_backend=args.hua_backend,
         matlab_use_gpu=bool(args.matlab_use_gpu),
     )
-    if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective"} and params.hua_backend != "python":
+    if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_velocity_streamline_effective_open_ocean_fallback", "ssh_primary_open_ocean_no_streamline_gate"} and params.hua_backend != "python":
         raise SystemExit(
             f"--boundary-mode {params.boundary_mode} currently requires --hua-backend python "
             "because the SSH contour and jet-axis diagnostics are implemented in the Python catalog layer."
@@ -3908,6 +4500,10 @@ def main() -> None:
     parser.add_argument("--tile-lon-deg", type=float, default=10.0)
     parser.add_argument("--tile-lat-deg", type=float, default=10.0)
     parser.add_argument("--tile-top-n", type=int, default=15)
+    parser.add_argument("--open-ocean-tile-top-n", type=int, default=30)
+    parser.add_argument("--open-ocean-low-lat-tile-top-n", type=int, default=15)
+    parser.add_argument("--seed-windows-cells", default="", help="Comma-separated SSH seed windows; empty preserves the single --ssh-window-cells scale.")
+    parser.add_argument("--intra-day-workers", type=int, default=1, help="Shared-memory worker count for surface-only seed checks within one day.")
     parser.add_argument("--surface-search-cells", type=int, default=8)
     parser.add_argument("--deep-search-cells", type=int, default=6)
     parser.add_argument("--start-radius-cells", type=int, default=3)
@@ -3930,6 +4526,8 @@ def main() -> None:
             "velocity_streamline_ssh_consensus",
             "ssh_effective_contour_primary",
             "ssh_primary_velocity_streamline_effective",
+            "ssh_primary_velocity_streamline_effective_open_ocean_fallback",
+            "ssh_primary_open_ocean_no_streamline_gate",
         ],
         default="ssh_primary_velocity_streamline_effective",
     )
@@ -3953,10 +4551,29 @@ def main() -> None:
     parser.add_argument("--ssh-primary-window-factor", type=float, default=4.0)
     parser.add_argument("--ssh-primary-max-radius-factor", type=float, default=2.0)
     parser.add_argument("--ssh-primary-min-amplitude-cm", type=float, default=0.0)
+    parser.add_argument("--ssh-primary-open-ocean-min-amplitude-cm", type=float, default=0.4)
+    parser.add_argument("--ssh-primary-open-ocean-low-lat-amplitude-cm", type=float, default=0.8)
+    parser.add_argument("--ssh-primary-open-ocean-high-lat-amplitude-cm", type=float, default=0.25)
+    parser.add_argument("--ssh-primary-open-ocean-window-factor", type=float, default=4.0)
+    parser.add_argument("--ssh-primary-open-ocean-max-radius-factor", type=float, default=3.5)
+    parser.add_argument("--ssh-open-ocean-seed-window-cells", type=int, default=3)
+    parser.add_argument(
+        "--target-open-ocean-boxes",
+        default=(
+            "190,245,25,55,north_pacific;190,280,-50,-30,south_pacific;"
+            "320,330,25,45,north_atlantic;335,355,-45,-20,south_atlantic"
+        ),
+    )
+    parser.add_argument("--target-open-ocean-tile-top-n", type=int, default=60)
+    parser.add_argument("--target-open-ocean-min-amplitude-cm", type=float, default=0.10)
+    parser.add_argument("--target-open-ocean-window-factor", type=float, default=8.0)
+    parser.add_argument("--target-open-ocean-max-radius-factor", type=float, default=6.0)
+    parser.add_argument("--regional-amplitude-profile", type=Path, default=None)
     parser.add_argument("--ssh-primary-max-shape-error-percent", type=float, default=70.0)
     parser.add_argument("--ssh-primary-acc-max-shape-error-percent", type=float, default=55.0)
     parser.add_argument("--jet-core-speed-percentile", type=float, default=80.0)
     parser.add_argument("--jet-core-overlap-max", type=float, default=0.50)
+    parser.add_argument("--skip-open-ocean-streamline-diagnostic", action="store_true")
     parser.add_argument("--sensitivity-tangent-fractions", default="0.50,0.60,0.70")
     parser.add_argument("--sensitivity-tangent-tolerances-deg", default="24,30,36,45")
     parser.add_argument("--sensitivity-direction-exception-fractions", default="0.05,0.10,0.15")
