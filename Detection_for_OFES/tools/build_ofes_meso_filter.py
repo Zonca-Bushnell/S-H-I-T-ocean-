@@ -42,6 +42,8 @@ def main() -> None:
         rossby_max_km=float(args.rossby_max_km),
         rossby_large_fixed_km=float(args.rossby_large_fixed_km),
         zonal_scale_mode=str(args.zonal_scale_mode),
+        meridional_scale_mode=str(args.meridional_scale_mode),
+        min_valid_weight_fraction=float(args.min_valid_weight_fraction),
         max_depth_layers=int(args.max_depth_layers),
         overwrite=bool(args.overwrite),
     )
@@ -96,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="km converts cutoff to zonal grid sigma with cos(lat); degree uses a fixed longitude-degree sigma.",
     )
     parser.add_argument(
+        "--meridional-scale-mode",
+        choices=["median", "local"],
+        default="median",
+        help="median preserves the legacy global meridional sigma; local uses each latitude's physical cutoff.",
+    )
+    parser.add_argument(
+        "--min-valid-weight-fraction",
+        type=float,
+        default=0.0,
+        help="Leave a filtered cell missing when its NaN-aware convolution support is below this fraction.",
+    )
+    parser.add_argument(
         "--max-depth-layers",
         type=int,
         default=1,
@@ -128,6 +142,8 @@ def build_meso_filter(
     rossby_max_km: float,
     rossby_large_fixed_km: float,
     zonal_scale_mode: str,
+    meridional_scale_mode: str,
+    min_valid_weight_fraction: float,
     max_depth_layers: int,
     overwrite: bool,
 ) -> list[Path]:
@@ -228,44 +244,69 @@ def build_meso_filter(
             large_cutoff_by_lat,
             filter_mode,
             zonal_scale_mode,
+            meridional_scale_mode,
+            min_valid_weight_fraction,
         )
-        meso_u = np.empty((depth_count, len(lat), len(lon)), dtype="f4")
-        meso_v = np.empty_like(meso_u)
-        for k in range(depth_count):
-            slow_u = temporal_mean_velocity_layer(input_root, window_days, "uo_glor", k)
-            slow_v = temporal_mean_velocity_layer(input_root, window_days, "vo_glor", k)
-            meso_u[k] = horizontal_scale_filter(slow_u, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode, zonal_scale_mode)
-            meso_v[k] = horizontal_scale_filter(slow_v, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode, zonal_scale_mode)
+        # Keep full-depth exports disk-backed.  A 105-layer global u/v pair is
+        # roughly 4.6 GiB, so ndarray allocation is needless pressure before
+        # the NetCDF writer can consume it layer by layer.
+        scratch_u = output_root / f".{target_day:%Y%m%d}.uo_glor.f4.tmp"
+        scratch_v = output_root / f".{target_day:%Y%m%d}.vo_glor.f4.tmp"
+        meso_u = np.memmap(scratch_u, dtype="f4", mode="w+", shape=(depth_count, len(lat), len(lon)))
+        meso_v = np.memmap(scratch_v, dtype="f4", mode="w+", shape=(depth_count, len(lat), len(lon)))
+        try:
+            for k in range(depth_count):
+                slow_u = temporal_mean_velocity_layer(input_root, window_days, "uo_glor", k)
+                slow_v = temporal_mean_velocity_layer(input_root, window_days, "vo_glor", k)
+                meso_u[k] = horizontal_scale_filter(
+                    slow_u, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
+                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction,
+                )
+                meso_v[k] = horizontal_scale_filter(
+                    slow_v, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
+                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction,
+                )
+                if (k + 1) % 8 == 0 or k + 1 == depth_count:
+                    print(f"[ofes-meso-filter] {target_day.isoformat()} depth {k + 1}/{depth_count}", flush=True)
 
-        write_daily_netcdf(
-            out_path,
-            target_day=target_day,
-            lon=lon,
-            lat=lat,
-            depth=depth,
-            ssh=meso_ssh,
-            u=meso_u,
-            v=meso_v,
-            attrs=attrs,
-            window_days=window_days,
-            temporal_window_days=temporal_window_days,
-            small_cutoff_km=small_cutoff_km,
-            large_cutoff_km=large_cutoff_km,
-            filter_mode=filter_mode,
-            large_cutoff_mode=large_cutoff_mode,
-            adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
-            adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
-            rossby_radius_path=rossby_radius_path,
-            rossby_small_factor=rossby_small_factor,
-            rossby_large_factor=rossby_large_factor,
-            rossby_min_km=rossby_min_km,
-            rossby_max_km=rossby_max_km,
-            rossby_large_fixed_km=rossby_large_fixed_km,
-            large_cutoff_by_lat=large_cutoff_by_lat,
-            small_cutoff_by_lat=small_cutoff_for_filter,
-            zonal_scale_mode=zonal_scale_mode,
-            science_tag=science_tag,
-        )
+            meso_u.flush()
+            meso_v.flush()
+            write_daily_netcdf(
+                out_path,
+                target_day=target_day,
+                lon=lon,
+                lat=lat,
+                depth=depth,
+                ssh=meso_ssh,
+                u=meso_u,
+                v=meso_v,
+                attrs=attrs,
+                window_days=window_days,
+                temporal_window_days=temporal_window_days,
+                small_cutoff_km=small_cutoff_km,
+                large_cutoff_km=large_cutoff_km,
+                filter_mode=filter_mode,
+                large_cutoff_mode=large_cutoff_mode,
+                adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
+                adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
+                rossby_radius_path=rossby_radius_path,
+                rossby_small_factor=rossby_small_factor,
+                rossby_large_factor=rossby_large_factor,
+                rossby_min_km=rossby_min_km,
+                rossby_max_km=rossby_max_km,
+                rossby_large_fixed_km=rossby_large_fixed_km,
+                large_cutoff_by_lat=large_cutoff_by_lat,
+                small_cutoff_by_lat=small_cutoff_for_filter,
+                zonal_scale_mode=zonal_scale_mode,
+                meridional_scale_mode=meridional_scale_mode,
+                min_valid_weight_fraction=min_valid_weight_fraction,
+                science_tag=science_tag,
+            )
+        finally:
+            del meso_u
+            del meso_v
+            scratch_u.unlink(missing_ok=True)
+            scratch_v.unlink(missing_ok=True)
         written.append(out_path)
         print(f"[ofes-meso-filter] wrote {target_day.isoformat()} -> {out_path}", flush=True)
 
@@ -291,6 +332,8 @@ def build_meso_filter(
         "rossby_max_km": rossby_max_km,
         "rossby_large_fixed_km": rossby_large_fixed_km,
         "zonal_scale_mode": zonal_scale_mode,
+        "meridional_scale_mode": meridional_scale_mode,
+        "min_valid_weight_fraction": min_valid_weight_fraction,
         "large_cutoff_actual_min_km": float(np.nanmin(large_cutoff_by_lat)),
         "large_cutoff_actual_max_km": float(np.nanmax(large_cutoff_by_lat)),
         "spatial_band": spatial_band_label(
@@ -381,16 +424,27 @@ def horizontal_scale_filter(
     large_km: float | np.ndarray,
     filter_mode: str,
     zonal_scale_mode: str = "km",
+    meridional_scale_mode: str = "median",
+    min_valid_weight_fraction: float = 0.0,
 ) -> np.ndarray:
     if filter_mode == "highpass":
-        large = nan_gaussian_lowpass(field, lon, lat, large_km, zonal_scale_mode)
+        large = nan_gaussian_lowpass(
+            field, lon, lat, large_km, zonal_scale_mode,
+            meridional_scale_mode, min_valid_weight_fraction,
+        )
         out = np.asarray(field, dtype="f4") - large
         out[~np.isfinite(field) | ~np.isfinite(large)] = np.nan
         return out.astype("f4")
     if filter_mode != "bandpass":
         raise ValueError(f"Unsupported filter_mode {filter_mode!r}")
-    small = nan_gaussian_lowpass(field, lon, lat, small_km, zonal_scale_mode)
-    large = nan_gaussian_lowpass(field, lon, lat, large_km, zonal_scale_mode)
+    small = nan_gaussian_lowpass(
+        field, lon, lat, small_km, zonal_scale_mode,
+        meridional_scale_mode, min_valid_weight_fraction,
+    )
+    large = nan_gaussian_lowpass(
+        field, lon, lat, large_km, zonal_scale_mode,
+        meridional_scale_mode, min_valid_weight_fraction,
+    )
     out = small - large
     out[~np.isfinite(small) | ~np.isfinite(large)] = np.nan
     return out.astype("f4")
@@ -402,7 +456,11 @@ def nan_gaussian_lowpass(
     lat: np.ndarray,
     fwhm_km: float | np.ndarray,
     zonal_scale_mode: str = "km",
+    meridional_scale_mode: str = "median",
+    min_valid_weight_fraction: float = 0.0,
 ) -> np.ndarray:
+    if not 0.0 <= min_valid_weight_fraction < 1.0:
+        raise ValueError("min_valid_weight_fraction must be in [0, 1)")
     arr = np.asarray(field, dtype="f8")
     finite = np.isfinite(arr)
     values = np.where(finite, arr, 0.0)
@@ -416,10 +474,15 @@ def nan_gaussian_lowpass(
     if fwhm_by_lat.shape != (len(lat),):
         raise ValueError(f"fwhm_km must be scalar or len(lat), got shape {fwhm_by_lat.shape}")
     sigma_km_by_lat = fwhm_by_lat / 2.354820045
-    sigma_y = max(0.01, float(np.nanmedian(sigma_km_by_lat)) / (111.32 * abs(dlat)))
-
-    values = gaussian_filter1d(values, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
-    weights = gaussian_filter1d(weights, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
+    sigma_y_by_lat = np.maximum(0.01, sigma_km_by_lat / (111.32 * abs(dlat)))
+    if meridional_scale_mode == "median":
+        sigma_y = float(np.nanmedian(sigma_y_by_lat))
+        values = gaussian_filter1d(values, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
+        weights = gaussian_filter1d(weights, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
+    elif meridional_scale_mode == "local":
+        values, weights = local_meridional_gaussian(values, weights, sigma_y_by_lat)
+    else:
+        raise ValueError(f"Unsupported meridional_scale_mode {meridional_scale_mode!r}")
 
     out_num = np.empty_like(values)
     out_den = np.empty_like(weights)
@@ -434,7 +497,28 @@ def nan_gaussian_lowpass(
         out_num[j, :] = gaussian_filter1d(values[j, :], sigma=sigma_x, axis=0, mode="wrap", truncate=3.0)
         out_den[j, :] = gaussian_filter1d(weights[j, :], sigma=sigma_x, axis=0, mode="wrap", truncate=3.0)
 
-    return np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=out_den > 1.0e-6)
+    valid = out_den > max(1.0e-6, min_valid_weight_fraction)
+    return np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=valid)
+
+
+def local_meridional_gaussian(
+    values: np.ndarray,
+    weights: np.ndarray,
+    sigma_by_lat: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a Gaussian y-kernel at the physical width of each output latitude."""
+    nlat = values.shape[0]
+    out_values = np.empty_like(values)
+    out_weights = np.empty_like(weights)
+    for j, sigma in enumerate(sigma_by_lat):
+        radius = max(1, int(np.ceil(3.0 * float(sigma))))
+        indices = np.clip(np.arange(j - radius, j + radius + 1), 0, nlat - 1)
+        offsets = np.arange(-radius, radius + 1, dtype="f8")
+        kernel = np.exp(-0.5 * (offsets / float(sigma)) ** 2)
+        kernel /= kernel.sum()
+        out_values[j, :] = kernel @ values[indices, :]
+        out_weights[j, :] = kernel @ weights[indices, :]
+    return out_values, out_weights
 
 
 def large_cutoff_profile(
@@ -577,6 +661,8 @@ def write_daily_netcdf(
     large_cutoff_by_lat: np.ndarray,
     small_cutoff_by_lat: float | np.ndarray,
     zonal_scale_mode: str,
+    meridional_scale_mode: str,
+    min_valid_weight_fraction: float,
     science_tag: str,
 ) -> None:
     with Dataset(path, "w", format="NETCDF4") as ds:
@@ -611,6 +697,8 @@ def write_daily_netcdf(
         ds.temporal_filter_dates_used = ",".join(day.isoformat() for day in window_days)
         ds.horizontal_filter_mode = filter_mode
         ds.zonal_scale_mode = zonal_scale_mode
+        ds.meridional_scale_mode = meridional_scale_mode
+        ds.min_valid_weight_fraction = float(min_valid_weight_fraction)
         if large_cutoff_mode == "rossby_radius":
             if filter_mode == "highpass":
                 ds.horizontal_filter = (
@@ -682,8 +770,11 @@ def write_daily_netcdf(
         lat_var[:] = lat
         lon_var[:] = lon
         zos[0, :, :] = ssh
-        uo[0, :, :, :] = u
-        vo[0, :, :, :] = v
+        # `u`/`v` can be disk-backed memmaps for full-depth exports.  Write
+        # one layer at a time so NetCDF never requests a materialized 3-D copy.
+        for depth_index in range(len(depth)):
+            uo[0, depth_index, :, :] = u[depth_index]
+            vo[0, depth_index, :, :] = v[depth_index]
 
 
 def available_running_window(target: date, window_days: int, available_start: date, available_end: date) -> list[date]:
