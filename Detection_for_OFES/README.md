@@ -60,6 +60,36 @@ E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter
 E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180
 ```
 
+## OFES2 Monthly Climatology
+
+`tools.download_ofes2_monthly_climatology` reads JAMSTEC's official OFES2
+monthly `eta` and `pair` fields on their native grid and constructs:
+
+```text
+H_cm = eta_cm - (pair_hPa - 1000)
+```
+
+The default `1993-2012` run caches the monthly source fields and writes both
+monthly and seasonal climatologies under:
+
+```text
+E:\DATA\01_Eddy_correspond\02_OFES\ofes2_monthly_climatology_1993_2012
+```
+
+Start it in the background (stdout and stderr are separate logs):
+
+```powershell
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\tools\start_ofes2_monthly_climatology_download.ps1'
+```
+
+For the default 1993-2012 period, use the two-worker launcher. It downloads
+`1993-2002` and `2003-2012` into the same resumable cache, then aggregates only
+after both workers finish successfully:
+
+```powershell
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\tools\start_ofes2_monthly_climatology_parallel.ps1'
+```
+
 ## OFES W Diagnostics
 
 `run_ofes_rebuild_w.py`, `w_rebuild_config.py`, and the coherent-theory plotting tools remain OFES-specific diagnostics. They currently use `origin_streamline_cpu_jan01_jan19_life1` as their coherent-object input; that legacy catalog is retained until the vertical-extension definition for the new surface catalog is decided.
