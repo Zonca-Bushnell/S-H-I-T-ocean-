@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$python = 'D:\Util\lever\02_miniforge\envs\OFES_detection\python.exe'
+$python = 'D:\Util\lever\02_miniforge\envs\OFES_climatology_pydap\python.exe'
 $logDir = Join-Path $OutputRoot 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $env:PYTHONNOUSERSITE = '1'

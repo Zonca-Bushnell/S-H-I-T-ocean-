@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 from netCDF4 import Dataset
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import convolve1d, gaussian_filter1d
+from scipy.signal import bessel, sosfreqz
 
 
 DEFAULT_INPUT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter")
@@ -31,6 +32,7 @@ def main() -> None:
         small_cutoff_km=float(args.small_cutoff_km),
         large_cutoff_km=float(args.large_cutoff_km),
         filter_mode=str(args.filter_mode),
+        spatial_kernel=str(args.spatial_kernel),
         science_tag=str(args.science_tag) if args.science_tag else "",
         large_cutoff_mode=str(args.large_cutoff_mode),
         adaptive_large_cutoff_min_km=float(args.adaptive_large_cutoff_min_km),
@@ -68,6 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["bandpass", "highpass"],
         default="bandpass",
         help="bandpass computes LP_small - LP_large; highpass computes field - LP_large.",
+    )
+    parser.add_argument(
+        "--spatial-kernel",
+        choices=["gaussian", "lanczos", "bessel"],
+        default="gaussian",
+        help=(
+            "Kernel used for each low-pass in the scale separation. Gaussian uses "
+            "FWHM directly; Lanczos and order-3 Bessel are calibrated to the Gaussian "
+            "half-power wavelength at the requested physical scale."
+        ),
     )
     parser.add_argument("--science-tag", default="", help="Optional explicit science_tag written into NetCDF metadata.")
     parser.add_argument(
@@ -131,6 +143,7 @@ def build_meso_filter(
     small_cutoff_km: float,
     large_cutoff_km: float,
     filter_mode: str,
+    spatial_kernel: str,
     science_tag: str,
     large_cutoff_mode: str,
     adaptive_large_cutoff_min_km: float,
@@ -227,6 +240,7 @@ def build_meso_filter(
             rossby_large_factor,
             rossby_large_fixed_km,
             filter_mode,
+            spatial_kernel,
         )
 
         out_path = output_root / f"global_phy_{target_day:%Y%m%d}.nc"
@@ -246,6 +260,7 @@ def build_meso_filter(
             zonal_scale_mode,
             meridional_scale_mode,
             min_valid_weight_fraction,
+            spatial_kernel,
         )
         # Keep full-depth exports disk-backed.  A 105-layer global u/v pair is
         # roughly 4.6 GiB, so ndarray allocation is needless pressure before
@@ -260,11 +275,11 @@ def build_meso_filter(
                 slow_v = temporal_mean_velocity_layer(input_root, window_days, "vo_glor", k)
                 meso_u[k] = horizontal_scale_filter(
                     slow_u, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
-                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction,
+                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
                 )
                 meso_v[k] = horizontal_scale_filter(
                     slow_v, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
-                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction,
+                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
                 )
                 if (k + 1) % 8 == 0 or k + 1 == depth_count:
                     print(f"[ofes-meso-filter] {target_day.isoformat()} depth {k + 1}/{depth_count}", flush=True)
@@ -286,6 +301,7 @@ def build_meso_filter(
                 small_cutoff_km=small_cutoff_km,
                 large_cutoff_km=large_cutoff_km,
                 filter_mode=filter_mode,
+                spatial_kernel=spatial_kernel,
                 large_cutoff_mode=large_cutoff_mode,
                 adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
                 adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
@@ -321,6 +337,7 @@ def build_meso_filter(
         "small_cutoff_km": small_cutoff_km,
         "large_cutoff_km": large_cutoff_km,
         "filter_mode": filter_mode,
+        "spatial_kernel": spatial_kernel,
         "large_cutoff_mode": large_cutoff_mode,
         "adaptive_large_cutoff_min_km": adaptive_large_cutoff_min_km,
         "adaptive_large_cutoff_max_km": adaptive_large_cutoff_max_km,
@@ -426,11 +443,12 @@ def horizontal_scale_filter(
     zonal_scale_mode: str = "km",
     meridional_scale_mode: str = "median",
     min_valid_weight_fraction: float = 0.0,
+    spatial_kernel: str = "gaussian",
 ) -> np.ndarray:
     if filter_mode == "highpass":
         large = nan_gaussian_lowpass(
             field, lon, lat, large_km, zonal_scale_mode,
-            meridional_scale_mode, min_valid_weight_fraction,
+            meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
         )
         out = np.asarray(field, dtype="f4") - large
         out[~np.isfinite(field) | ~np.isfinite(large)] = np.nan
@@ -439,11 +457,11 @@ def horizontal_scale_filter(
         raise ValueError(f"Unsupported filter_mode {filter_mode!r}")
     small = nan_gaussian_lowpass(
         field, lon, lat, small_km, zonal_scale_mode,
-        meridional_scale_mode, min_valid_weight_fraction,
+        meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
     )
     large = nan_gaussian_lowpass(
         field, lon, lat, large_km, zonal_scale_mode,
-        meridional_scale_mode, min_valid_weight_fraction,
+        meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
     )
     out = small - large
     out[~np.isfinite(small) | ~np.isfinite(large)] = np.nan
@@ -458,6 +476,7 @@ def nan_gaussian_lowpass(
     zonal_scale_mode: str = "km",
     meridional_scale_mode: str = "median",
     min_valid_weight_fraction: float = 0.0,
+    spatial_kernel: str = "gaussian",
 ) -> np.ndarray:
     if not 0.0 <= min_valid_weight_fraction < 1.0:
         raise ValueError("min_valid_weight_fraction must be in [0, 1)")
@@ -475,12 +494,14 @@ def nan_gaussian_lowpass(
         raise ValueError(f"fwhm_km must be scalar or len(lat), got shape {fwhm_by_lat.shape}")
     sigma_km_by_lat = fwhm_by_lat / 2.354820045
     sigma_y_by_lat = np.maximum(0.01, sigma_km_by_lat / (111.32 * abs(dlat)))
+    if spatial_kernel not in {"gaussian", "lanczos", "bessel"}:
+        raise ValueError(f"Unsupported spatial_kernel {spatial_kernel!r}")
     if meridional_scale_mode == "median":
         sigma_y = float(np.nanmedian(sigma_y_by_lat))
-        values = gaussian_filter1d(values, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
-        weights = gaussian_filter1d(weights, sigma=sigma_y, axis=0, mode="nearest", truncate=3.0)
+        values = convolve_axis(values, lowpass_kernel(spatial_kernel, sigma_y), axis=0, mode="nearest")
+        weights = convolve_axis(weights, lowpass_kernel(spatial_kernel, sigma_y), axis=0, mode="nearest")
     elif meridional_scale_mode == "local":
-        values, weights = local_meridional_gaussian(values, weights, sigma_y_by_lat)
+        values, weights = local_meridional_kernel(values, weights, sigma_y_by_lat, spatial_kernel)
     else:
         raise ValueError(f"Unsupported meridional_scale_mode {meridional_scale_mode!r}")
 
@@ -494,28 +515,71 @@ def nan_gaussian_lowpass(
             sigma_x = max(0.01, float(sigma_km_by_lat[j]) / (111.32 * coslat * abs(dlon)))
         else:
             raise ValueError(f"Unsupported zonal_scale_mode {zonal_scale_mode!r}")
-        out_num[j, :] = gaussian_filter1d(values[j, :], sigma=sigma_x, axis=0, mode="wrap", truncate=3.0)
-        out_den[j, :] = gaussian_filter1d(weights[j, :], sigma=sigma_x, axis=0, mode="wrap", truncate=3.0)
+        kernel = lowpass_kernel(spatial_kernel, sigma_x)
+        out_num[j, :] = convolve_axis(values[j, :], kernel, axis=0, mode="wrap")
+        out_den[j, :] = convolve_axis(weights[j, :], kernel, axis=0, mode="wrap")
 
     valid = out_den > max(1.0e-6, min_valid_weight_fraction)
     return np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=valid)
 
 
-def local_meridional_gaussian(
+def convolve_axis(values: np.ndarray, kernel: np.ndarray, *, axis: int, mode: str) -> np.ndarray:
+    """One separable, zero-phase convolution used for values and validity weights."""
+    return convolve1d(values, kernel, axis=axis, mode=mode)
+
+
+def lowpass_kernel(kind: str, sigma_cells: float) -> np.ndarray:
+    """Return a symmetric unit-sum low-pass kernel at a Gaussian-equivalent scale."""
+    sigma = max(0.25, float(sigma_cells))
+    if kind == "gaussian":
+        radius = max(1, int(np.ceil(3.0 * sigma)))
+        offsets = np.arange(-radius, radius + 1, dtype="f8")
+        kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+    else:
+        # The requested cutoff is expressed as Gaussian FWHM.  Convert it to
+        # the Gaussian half-power wavelength so all three kernels use the same
+        # physical scale convention.
+        half_power_wavelength = 2.0 * np.pi * sigma / np.sqrt(np.log(2.0))
+        if kind == "lanczos":
+            radius = max(3, int(np.ceil(3.0 * half_power_wavelength)))
+            offsets = np.arange(-radius, radius + 1, dtype="f8")
+            cutoff = 1.0 / max(half_power_wavelength, 2.05)
+            kernel = 2.0 * cutoff * np.sinc(2.0 * cutoff * offsets)
+            kernel *= np.sinc(offsets / float(radius + 1))
+        elif kind == "bessel":
+            cutoff = min(0.49, 1.0 / max(half_power_wavelength, 2.05))
+            sos = bessel(3, 2.0 * cutoff, btype="lowpass", output="sos", norm="mag")
+            size = 1
+            while size < max(257, int(np.ceil(24.0 * half_power_wavelength))):
+                size *= 2
+            _, response = sosfreqz(sos, worN=size // 2 + 1, fs=1.0)
+            impulse = np.fft.fftshift(np.fft.irfft(np.abs(response) ** 2, n=size))
+            center = size // 2
+            keep = np.flatnonzero(np.abs(impulse) > np.max(np.abs(impulse)) * 1.0e-5)
+            radius = max(2, min(center - int(keep.min()), int(keep.max()) - center))
+            kernel = impulse[center - radius : center + radius + 1]
+        else:
+            raise ValueError(f"Unsupported spatial_kernel {kind!r}")
+    total = float(kernel.sum())
+    if not np.isfinite(total) or abs(total) < 1.0e-12:
+        raise ValueError(f"Invalid {kind} low-pass kernel")
+    return (kernel / total).astype("f8")
+
+
+def local_meridional_kernel(
     values: np.ndarray,
     weights: np.ndarray,
     sigma_by_lat: np.ndarray,
+    spatial_kernel: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply a Gaussian y-kernel at the physical width of each output latitude."""
     nlat = values.shape[0]
     out_values = np.empty_like(values)
     out_weights = np.empty_like(weights)
     for j, sigma in enumerate(sigma_by_lat):
-        radius = max(1, int(np.ceil(3.0 * float(sigma))))
+        kernel = lowpass_kernel(spatial_kernel, float(sigma))
+        radius = kernel.size // 2
         indices = np.clip(np.arange(j - radius, j + radius + 1), 0, nlat - 1)
-        offsets = np.arange(-radius, radius + 1, dtype="f8")
-        kernel = np.exp(-0.5 * (offsets / float(sigma)) ** 2)
-        kernel /= kernel.sum()
         out_values[j, :] = kernel @ values[indices, :]
         out_weights[j, :] = kernel @ weights[indices, :]
     return out_values, out_weights
@@ -584,26 +648,28 @@ def science_tag_for(
     rossby_large_factor: float,
     rossby_large_fixed_km: float,
     filter_mode: str,
+    spatial_kernel: str,
 ) -> str:
+    suffix = f"_{spatial_kernel}"
     if large_cutoff_mode == "rossby_radius":
         if filter_mode == "bandpass" and rossby_large_fixed_km > 0:
             small = f"{rossby_small_factor:g}".replace(".", "p")
             upper = f"{rossby_large_fixed_km:g}".replace(".", "p")
-            return f"rossby_radius_lower_r1x{small}_upper{upper}km_diagnostic"
+            return f"rossby_radius_lower_r1x{small}_upper{upper}km{suffix}_diagnostic"
         if filter_mode == "highpass":
             factor = f"{rossby_large_factor:g}".replace(".", "p")
-            return f"rossby_radius_highpass_r1x{factor}_diagnostic"
+            return f"rossby_radius_highpass_r1x{factor}{suffix}_diagnostic"
         factors = f"{rossby_small_factor:g}_{rossby_large_factor:g}".replace(".", "p")
-        return f"rossby_radius_bandpass_r1x{factors}_diagnostic"
+        return f"rossby_radius_bandpass_r1x{factors}{suffix}_diagnostic"
     if large_cutoff_mode == "rossby_lower_latadaptive_upper":
         small = f"{rossby_small_factor:g}".replace(".", "p")
         upper = f"{adaptive_min_km:g}_{adaptive_max_km:g}".replace(".", "p")
-        return f"rossby_lower_r1x{small}_upper_latadaptive_{upper}_diagnostic"
+        return f"rossby_lower_r1x{small}_upper_latadaptive_{upper}{suffix}_diagnostic"
     if filter_mode == "highpass":
-        return f"spatial_highpass_{large_cutoff_km:g}km_diagnostic".replace(".", "p")
+        return f"spatial_highpass_{large_cutoff_km:g}km{suffix}_diagnostic".replace(".", "p")
     if large_cutoff_mode == "latitude_adaptive":
-        return f"meso{temporal_window_days}d_{small_cutoff_km:g}_{adaptive_max_km:g}km_lat_adaptive_diagnostic".replace(".", "p")
-    return f"meso{temporal_window_days}d_{small_cutoff_km:g}_{large_cutoff_km:g}km_diagnostic".replace(".", "p")
+        return f"meso{temporal_window_days}d_{small_cutoff_km:g}_{adaptive_max_km:g}km_lat_adaptive{suffix}_diagnostic".replace(".", "p")
+    return f"meso{temporal_window_days}d_{small_cutoff_km:g}_{large_cutoff_km:g}km{suffix}_diagnostic".replace(".", "p")
 
 
 def spatial_band_label(
@@ -649,6 +715,7 @@ def write_daily_netcdf(
     small_cutoff_km: float,
     large_cutoff_km: float,
     filter_mode: str,
+    spatial_kernel: str,
     large_cutoff_mode: str,
     adaptive_large_cutoff_min_km: float,
     adaptive_large_cutoff_max_km: float,
@@ -696,6 +763,7 @@ def write_daily_netcdf(
         ds.temporal_filter = f"available-day running mean, nominal window {temporal_window_days} days"
         ds.temporal_filter_dates_used = ",".join(day.isoformat() for day in window_days)
         ds.horizontal_filter_mode = filter_mode
+        ds.horizontal_filter_kernel = spatial_kernel
         ds.zonal_scale_mode = zonal_scale_mode
         ds.meridional_scale_mode = meridional_scale_mode
         ds.min_valid_weight_fraction = float(min_valid_weight_fraction)
@@ -703,33 +771,33 @@ def write_daily_netcdf(
             if filter_mode == "highpass":
                 ds.horizontal_filter = (
                     f"field_minus_LP_{rossby_large_factor:g}xR1, "
-                    "Chelton 1998 first-baroclinic Rossby-radius profile, Gaussian FWHM approximation"
+                    f"Chelton 1998 first-baroclinic Rossby-radius profile, {spatial_kernel} Gaussian-equivalent scale"
                 )
             else:
                 if rossby_large_fixed_km > 0:
                     ds.horizontal_filter = (
                         f"LP_{rossby_small_factor:g}xR1_minus_LP_{rossby_large_fixed_km:g}km, "
-                        "Chelton 1998 first-baroclinic Rossby-radius lower cutoff, Gaussian FWHM approximation"
+                        f"Chelton 1998 first-baroclinic Rossby-radius lower cutoff, {spatial_kernel} Gaussian-equivalent scale"
                     )
                 else:
                     ds.horizontal_filter = (
                         f"LP_{rossby_small_factor:g}xR1_minus_LP_{rossby_large_factor:g}xR1, "
-                        "Chelton 1998 first-baroclinic Rossby-radius profile, Gaussian FWHM approximation"
+                        f"Chelton 1998 first-baroclinic Rossby-radius profile, {spatial_kernel} Gaussian-equivalent scale"
                     )
         elif large_cutoff_mode == "rossby_lower_latadaptive_upper":
             ds.horizontal_filter = (
                 f"LP_{rossby_small_factor:g}xR1_minus_LP_adaptive_{adaptive_large_cutoff_min_km:g}_{adaptive_large_cutoff_max_km:g}km, "
-                "Chelton 1998 lower cutoff with latitude-adaptive upper cutoff"
+                f"Chelton 1998 lower cutoff with latitude-adaptive upper cutoff, {spatial_kernel} Gaussian-equivalent scale"
             )
         elif filter_mode == "highpass":
-            ds.horizontal_filter = f"field_minus_LP_{large_cutoff_km:g}km, Gaussian FWHM approximation"
+            ds.horizontal_filter = f"field_minus_LP_{large_cutoff_km:g}km, {spatial_kernel} Gaussian-equivalent scale"
         elif large_cutoff_mode == "latitude_adaptive":
             ds.horizontal_filter = (
                 f"LP_{small_cutoff_km:g}km_minus_LP_adaptive_{adaptive_large_cutoff_min_km:g}_{adaptive_large_cutoff_max_km:g}km, "
-                "Gaussian FWHM approximation"
+                f"{spatial_kernel} Gaussian-equivalent scale"
             )
         else:
-            ds.horizontal_filter = f"LP_{small_cutoff_km:g}km_minus_LP_{large_cutoff_km:g}km, Gaussian FWHM approximation"
+            ds.horizontal_filter = f"LP_{small_cutoff_km:g}km_minus_LP_{large_cutoff_km:g}km, {spatial_kernel} Gaussian-equivalent scale"
         ds.large_cutoff_mode = large_cutoff_mode
         ds.rossby_radius_path = str(rossby_radius_path)
         ds.rossby_small_factor = float(rossby_small_factor)

@@ -125,6 +125,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--filter-max-depth-layers", type=int, default=1)
     parser.add_argument("--temporal-window-days", type=int, default=1)
+    parser.add_argument(
+        "--spatial-kernel",
+        choices=["gaussian", "lanczos", "bessel"],
+        default="gaussian",
+        help="Low-pass kernel for the two Rossby scale-separation terms.",
+    )
     parser.add_argument("--rossby-radius-path", type=Path, default=DEFAULT_ROSSBY_RADIUS_PATH)
     parser.add_argument("--adaptive-large-cutoff-min-km", type=float, default=180.0)
     parser.add_argument("--adaptive-large-cutoff-max-km", type=float, default=180.0)
@@ -202,6 +208,8 @@ def ensure_filter(args: argparse.Namespace, days: list[date]) -> None:
         str(args.temporal_window_days),
         "--filter-mode",
         "bandpass",
+        "--spatial-kernel",
+        str(args.spatial_kernel),
         "--large-cutoff-mode",
         "rossby_lower_latadaptive_upper",
         "--rossby-radius-path",

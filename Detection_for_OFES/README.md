@@ -69,6 +69,10 @@ monthly `eta` and `pair` fields on their native grid and constructs:
 H_cm = eta_cm - (pair_hPa - 1000)
 ```
 
+Its remote reader uses the dedicated `OFES_climatology_pydap` mamba environment
+and `pydap` DAP2 client. The existing `OFES_detection` environment and OFES
+production detection inputs are not modified.
+
 The default `1993-2012` run caches the monthly source fields and writes both
 monthly and seasonal climatologies under:
 
@@ -88,6 +92,40 @@ after both workers finish successfully:
 
 ```powershell
 & 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\tools\start_ofes2_monthly_climatology_parallel.ps1'
+```
+
+`tools.compare_ofes_longterm_climatology_copernicus` compares a daily OFES
+native-grid anomaly against this monthly climatology and Copernicus SLA with
+the shared 25-200 km Gaussian/Bessel diagnostics. It is read-only and does not
+alter the OFES detection chain.
+
+## Baseline x Kernel Sensitivity Experiment
+
+`tools.run_ofes_baseline_ab` runs a controlled Jan01-Jan05 surface-only
+experiment with two SSH references and three spatial low-pass kernels. Jan02-
+Jan05 supply the identical forward-persistence support for the Jan01 catalog;
+only final, non-transient Jan01 objects are compared.
+
+```text
+SSH reference: Jan01-Jan19 mean | January 1993-2012 climatology
+LP kernel:    Gaussian | Lanczos | order-3 Bessel
+Scale band:   LP_0.5R1(lat) - LP_180km
+```
+
+Lanczos and Bessel use the Gaussian half-power wavelength as their common
+physical scale convention. The experiment keeps seed generation, the four
+open-ocean recovery regions, contour/shape/overlap QC, and persistence fixed.
+It is a sensitivity comparison, not the production default.
+
+```powershell
+$env:PYTHONNOUSERSITE='1'
+& 'D:\Util\lever\02_miniforge\Library\bin\mamba.exe' run -n OFES_detection python -m Detection_for_OFES.tools.run_ofes_baseline_ab --workers 5
+```
+
+Outputs are written to:
+
+```text
+E:\DATA\01_Eddy_correspond\02_OFES\baseline_ab_longterm_january_climatology_filter6_19910101
 ```
 
 ## OFES W Diagnostics

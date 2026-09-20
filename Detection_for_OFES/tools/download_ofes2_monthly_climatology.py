@@ -11,11 +11,16 @@ import csv
 import json
 import os
 import time
-from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
-from netCDF4 import Dataset, num2date
+from netCDF4 import num2date
+
+try:
+    from pydap.client import open_url
+except ImportError:
+    open_url = None
 
 
 BASE_URL = "https://www.jamstec.go.jp/esc/fes/dods/OFES2/Monthly"
@@ -24,6 +29,7 @@ DEFAULT_OUTPUT_ROOT = Path(
 )
 FIELDS = ("eta", "pair")
 SHAPE = (1520, 3600)
+MAX_PHYSICAL_ABS_VALUE = 1.0e10
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +64,7 @@ def load_complete_array(path: Path) -> np.ndarray | None:
         values = np.load(path, allow_pickle=False, mmap_mode="r")
         if values.shape != SHAPE or values.dtype != np.dtype("f4"):
             return None
-        return np.asarray(values)
+        return mask_nonphysical(values, path.stem)
     except (OSError, ValueError):
         return None
 
@@ -69,19 +75,41 @@ def write_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
-def build_time_index(dataset: Dataset, start_year: int, end_year: int) -> tuple[dict[tuple[int, int], int], np.ndarray, np.ndarray, str]:
-    time_variable = dataset.variables["time"]
-    dates = num2date(time_variable[:], time_variable.units, only_use_cftime_datetimes=True)
+def mask_nonphysical(values: np.ndarray, field: str | None = None) -> np.ndarray:
+    """Mask JAMSTEC's undeclared large fill values without changing valid data."""
+    array = np.asarray(values)
+    invalid = ~np.isfinite(array) | (np.abs(array) > MAX_PHYSICAL_ABS_VALUE)
+    if field == "pair":
+        invalid |= (array <= 500.0) | (array >= 1500.0)
+    if invalid.any():
+        array = array.copy()
+        array[invalid] = np.nan
+    return array
+
+
+def remote_values(variable: object, selection: object) -> np.ndarray:
+    return np.asarray(variable[selection].data)  # type: ignore[index,union-attr]
+
+
+def build_time_index(dataset: object, start_year: int, end_year: int) -> tuple[dict[tuple[int, int], int], np.ndarray, np.ndarray, str]:
+    time_variable = dataset["time"]  # type: ignore[index]
+    time_units = str(time_variable.attributes["units"])  # type: ignore[union-attr]
+    dates = num2date(remote_values(time_variable, slice(None)), time_units, only_use_cftime_datetimes=True)
     index = {(item.year, item.month): position for position, item in enumerate(dates)}
     expected = {(year, month) for year in range(start_year, end_year + 1) for month in range(1, 13)}
     missing = sorted(expected - set(index))
     if missing:
         raise RuntimeError(f"Remote source is missing requested months: {missing}")
-    return index, np.asarray(dataset.variables["lon"][:], dtype="f8"), np.asarray(dataset.variables["lat"][:], dtype="f8"), str(time_variable.units)
+    return (
+        index,
+        np.asarray(remote_values(dataset["lon"], slice(None)), dtype="f8"),  # type: ignore[index]
+        np.asarray(remote_values(dataset["lat"], slice(None)), dtype="f8"),  # type: ignore[index]
+        time_units,
+    )
 
 
 def read_remote_month(
-    dataset: Dataset,
+    dataset: object,
     url: str,
     field: str,
     index: int,
@@ -95,11 +123,9 @@ def read_remote_month(
     for block_index, start in enumerate(range(0, SHAPE[0], lat_block_rows), start=1):
         stop = min(SHAPE[0], start + lat_block_rows)
         for attempt in range(block_retries + 1):
-            retry_dataset: Dataset | None = None
             try:
-                source = dataset if attempt == 0 else Dataset(url)
-                retry_dataset = source if attempt > 0 else None
-                block = np.ma.asarray(source.variables[field][index, 0, start:stop, :]).filled(np.nan)
+                source = dataset if attempt == 0 else open_url(url, protocol="dap2")
+                block = np.ma.asarray(remote_values(source[field], (slice(index, index + 1), slice(0, 1), slice(start, stop), slice(None)))).filled(np.nan)  # type: ignore[index]
                 values[start:stop] = np.asarray(block, dtype="f4")
                 break
             except Exception as exc:
@@ -111,12 +137,8 @@ def read_remote_month(
                     flush=True,
                 )
                 time.sleep(retry_seconds * (attempt + 1))
-            finally:
-                if retry_dataset is not None:
-                    retry_dataset.close()
         print(f"[climatology] {label} {field} block {block_index}/{block_count}", flush=True)
-    values[~np.isfinite(values)] = np.nan
-    return values
+    return mask_nonphysical(values, field)
 
 
 def write_status(path: Path, rows: list[dict[str, object]]) -> None:
@@ -142,11 +164,13 @@ def build_products(output_root: Path, lon: np.ndarray, lat: np.ndarray, rows: li
             if values is None:
                 raise RuntimeError(f"Cannot build climatology; missing cached field: {path}")
             monthly[field] = values.astype("f8")
-            valid = np.isfinite(monthly[field])
-            sums[field][month_index][valid] += monthly[field][valid]
-            counts[field][month_index][valid] += 1
         h = monthly["eta"] - (monthly["pair"] - 1000.0)
         valid_h = np.isfinite(h)
+        # Use exactly the same valid monthly samples for eta, pair, and H so
+        # the stored climatologies preserve the defining linear identity.
+        for field in FIELDS:
+            sums[field][month_index][valid_h] += monthly[field][valid_h]
+            counts[field][month_index][valid_h] += 1
         sums["h"][month_index][valid_h] += h[valid_h]
         counts["h"][month_index][valid_h] += 1
 
@@ -204,13 +228,44 @@ def main() -> None:
         raise ValueError("--block-retries and --retry-seconds must not be negative")
     output_root = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
+    if args.build_only:
+        product_path = output_root / "climatology" / f"ofes2_eta_pair_h_monthly_climatology_{args.start_year}_{args.end_year}.npz"
+        if not product_path.exists():
+            raise FileNotFoundError(f"--build-only requires a prior climatology file for native coordinates: {product_path}")
+        with np.load(product_path, allow_pickle=False) as previous:
+            lon = np.asarray(previous["longitude"], dtype="f8")
+            lat = np.asarray(previous["latitude"], dtype="f8")
+        rows = [{"year": year, "month": month} for year in range(args.start_year, args.end_year + 1) for month in range(1, 13)]
+        manifest = {
+            "status": "running",
+            "mode": "build_only",
+            "period": {"start_year": args.start_year, "end_year": args.end_year, "samples_per_calendar_month": args.end_year - args.start_year + 1},
+            "native_grid": {"shape": list(SHAPE), "longitude_count": int(lon.size), "latitude_count": int(lat.size)},
+            "formula": "H_cm = eta_cm - (pair_hPa - 1000); hPa and mb are numerically equivalent",
+            "missing_value_policy": f"mask non-finite values and abs(value) > {MAX_PHYSICAL_ABS_VALUE:g}; pair also requires 500 < pair_hPa < 1500",
+            "source": "existing raw_monthly cache; no remote access",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        manifest_path = output_root / "manifest.json"
+        write_json(manifest_path, manifest)
+        build_products(output_root, lon, lat, rows, args.start_year, args.end_year)
+        if args.preview:
+            write_preview(output_root, lon, lat, args.start_year, args.end_year)
+        manifest["status"] = "complete"
+        manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        manifest["outputs"] = {"monthly": f"climatology/ofes2_eta_pair_h_monthly_climatology_{args.start_year}_{args.end_year}.npz", "seasonal": f"climatology/ofes2_eta_pair_h_seasonal_climatology_{args.start_year}_{args.end_year}.npz"}
+        write_json(manifest_path, manifest)
+        print(f"[climatology] build-only complete: {output_root}", flush=True)
+        return
+    if open_url is None:
+        raise RuntimeError("pydap is required for remote download mode; install it in OFES_detection before resuming downloads")
     state_root = output_root if not args.download_only else output_root / "workers" / args.worker_name
     manifest_path = state_root / "manifest.json"
     status_path = state_root / "monthly_status.csv"
     state_root.mkdir(parents=True, exist_ok=True)
     eta_url = f"{args.base_url}/eta"
     pair_url = f"{args.base_url}/pair"
-    with Dataset(eta_url) as eta_dataset, Dataset(pair_url) as pair_dataset:
+    with nullcontext(open_url(eta_url, protocol="dap2")) as eta_dataset, nullcontext(open_url(pair_url, protocol="dap2")) as pair_dataset:
         index, lon, lat, time_units = build_time_index(eta_dataset, args.start_year, args.end_year)
         pair_index, pair_lon, pair_lat, pair_time_units = build_time_index(pair_dataset, args.start_year, args.end_year)
         if not (np.array_equal(lon, pair_lon) and np.array_equal(lat, pair_lat) and index == pair_index):
@@ -221,6 +276,7 @@ def main() -> None:
             "period": {"start_year": args.start_year, "end_year": args.end_year, "samples_per_calendar_month": args.end_year - args.start_year + 1},
             "native_grid": {"shape": list(SHAPE), "longitude_count": int(lon.size), "latitude_count": int(lat.size), "longitude_step_degree": float(np.median(np.diff(lon))), "latitude_step_degree": float(np.median(np.diff(lat)))},
             "formula": "H_cm = eta_cm - (pair_hPa - 1000); hPa and mb are numerically equivalent",
+            "missing_value_policy": f"mask non-finite values and abs(value) > {MAX_PHYSICAL_ABS_VALUE:g}; pair also requires 500 < pair_hPa < 1500",
             "cache_policy": "one native float32 eta.npy and pair.npy per month; valid caches are resumed",
             "mode": "build_only" if args.build_only else "download_only" if args.download_only else "download_and_build",
             "worker_name": args.worker_name,
