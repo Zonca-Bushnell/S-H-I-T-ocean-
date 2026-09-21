@@ -26,13 +26,15 @@ from Origin_eddy_detection.src.eddy_pipeline.detection_hybrid import (
 
 
 DEFAULT_SURFACE_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_recovery_surface_jan01_jan19"
+    r"E:\DATA\01_Eddy_correspond\02_OFES"
+    r"\origin_unified_eta_mss_ssh_primary_target_all_open_ocean_surface_jan01_jan19"
 )
 DEFAULT_FILTER_ROOT = Path(
     r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180_full105"
 )
 DEFAULT_OUTPUT_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_vertical_jan01_jan19"
+    r"E:\DATA\01_Eddy_correspond\02_OFES"
+    r"\origin_unified_eta_mss_ssh_primary_target_all_open_ocean_vertical_jan01_jan19"
 )
 
 

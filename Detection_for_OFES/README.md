@@ -7,6 +7,7 @@
 The only default OFES surface catalog is:
 
 ```text
+OFES eta annual-MSS reference (1993-2012)
 Rossby-adaptive SSH/u/v filter
 + multiscale SSH seeds (3, 5, 7, 11 cells)
 + SSH/effective-contour primary discovery
@@ -27,8 +28,23 @@ The default recovery regions are always enabled:
 Production root:
 
 ```text
-E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_recovery_surface_jan01_jan19
+E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_eta_mss_ssh_primary_target_all_open_ocean_surface_jan01_jan19
 ```
+
+The corrected E-path SSH definition is:
+
+```text
+SLA_E(day) = eta(day) - MSS_eta_1993_2012
+```
+
+`MSS_eta_1993_2012` is the native-grid mean of all 240 cached monthly `eta`
+fields, weighted by their actual calendar-day counts. OFES `eta` is the model
+free-surface height; atmospheric pressure is a separate forcing and is not
+subtracted algebraically a second time. The old
+`eta - (pair - 1000)` products are scientifically deprecated. The baseline is
+removed before the anomaly is remapped once to the velocity grid. No daily
+global-mean or seasonal-cycle removal is applied. Surface `u/v` are copied
+unchanged, so the SSH reference is the only scientific change.
 
 `final_catalog\daily_runs\YYYYMMDD` is the consumer-facing catalog. It only contains `hua_pass=True` objects after shape/overlap QC and excludes `persistence_class=transient`. Raw candidates remain under `raw_detection` for traceability.
 
@@ -37,6 +53,37 @@ Resume the default catalog:
 ```powershell
 & 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\run_default_surface_catalog.ps1'
 ```
+
+Run the corrected eta-MSS three-kernel surface chain, final figures, and Jan1
+vertical extensions as one background pipeline:
+
+```powershell
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_eta_mss_three_kernel_pipeline.ps1'
+```
+
+To run only the controlled spatial-kernel surface comparison:
+
+```powershell
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_e_path_three_kernel_catalogs.ps1'
+```
+
+This creates one common experiment root with `gaussian`, `lanczos`, and
+`bessel` branches. Each branch contains its own `filtered_inputs`, complete
+surface `catalog`, branch logs, and status JSON. Branches run sequentially;
+each branch uses 19 daily workers and differs only in the spatial low-pass
+kernel used by the shared Rossby scale separation.
+
+After those three surface branches finish, launch the kernel-consistent Jan1
+105-layer vertical extensions with:
+
+```powershell
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_three_kernel_vertical_jan1.ps1'
+```
+
+The launcher waits for the surface manifest, builds a separate full-depth
+Rossby-filtered velocity input for each kernel, and writes each result below
+`<kernel>\vertical_jan01`. It preserves the existing depth-major center search
+and Hua acceptance logic.
 
 Create the default Jan1 overview from the final catalog:
 
@@ -51,23 +98,29 @@ $env:PYTHONNOUSERSITE='1'
 - `validate_ofes2_sample.py`: OFES I/O smoke check.
 - `tools/extract_ofes_daily.py`: daily extraction and integrity validation.
 - `tools/export_origin_netcdf.py`: Origin-compatible NetCDF export.
+- `tools/build_ofes_eta_annual_mss.py`: day-weighted annual MSS from monthly native `eta`.
+- `tools/build_ofes_duacs_like_inputs.py`: corrected eta-MSS SSH inputs with unchanged `u/v`.
 - `tools/build_ofes_meso_filter.py`: Rossby-adaptive detection input filter.
 
 Retained base inputs:
 
 ```text
 E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter
-E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180
+E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_eta_mss_1993_2012
+E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_eta_mss_1993_2012_rossby_lower_upper180
 ```
+
+The old `origin_compatible_filter_rossby_lower_upper180` input and its catalog
+remain available only for historical Jan01-Jan19-baseline reproduction.
 
 ## OFES2 Monthly Climatology
 
 `tools.download_ofes2_monthly_climatology` reads JAMSTEC's official OFES2
-monthly `eta` and `pair` fields on their native grid and constructs:
-
-```text
-H_cm = eta_cm - (pair_hPa - 1000)
-```
+monthly `eta` and `pair` fields on their native grid. The downloaded monthly
+arrays remain the traceable source cache. Historical derived `H = eta -
+(pair-1000)` climatologies are diagnostic-only and are not valid production
+SSH baselines. Production uses `tools.build_ofes_eta_annual_mss` and monthly
+`eta` alone.
 
 Its remote reader uses the dedicated `OFES_climatology_pydap` mamba environment
 and `pydap` DAP2 client. The existing `OFES_detection` environment and OFES
@@ -144,7 +197,7 @@ $env:PYTHONNOUSERSITE='1'
 Outputs are written to:
 
 ```text
-E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_vertical_jan01_jan19
+E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_eta_mss_ssh_primary_target_all_open_ocean_vertical_jan01_jan19
 ```
 
 The resulting `catalog/` and `shape_classification_1991_1991_hua_b3_start2_life1/` tables are the future input for the latest coherent rebuild-W composite. Jan19 is retained but carries its existing no-future-day persistence status and is excluded from default coherent rebuild-W selection.

@@ -12,16 +12,21 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from netCDF4 import Dataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_FILTER_INPUT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter")
+DEFAULT_FILTER_INPUT_ROOT = Path(
+    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_eta_mss_1993_2012"
+)
 DEFAULT_FILTER_OUTPUT_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter_rossby_lower_upper180"
+    r"E:\DATA\01_Eddy_correspond\02_OFES"
+    r"\origin_compatible_filter_eta_mss_1993_2012_rossby_lower_upper180"
 )
 DEFAULT_OUTPUT_ROOT = Path(
-    r"E:\DATA\01_Eddy_correspond\02_OFES\origin_unified_ssh_primary_target_all_open_ocean_recovery_surface_jan01_jan19"
+    r"E:\DATA\01_Eddy_correspond\02_OFES"
+    r"\origin_unified_eta_mss_ssh_primary_target_all_open_ocean_surface_jan01_jan19"
 )
 DEFAULT_ROSSBY_RADIUS_PATH = Path(
     r"E:\DATA\01_Eddy_correspond\02_OFES\rossby_radius_chelton1998"
@@ -466,11 +471,19 @@ def write_final_catalog(days: list[date], args: argparse.Namespace) -> None:
         accepted = centers[centers["hua_pass"].fillna(False).astype(bool)].copy()
         if "persistence_class" in accepted.columns:
             accepted = accepted[~accepted["persistence_class"].astype(str).eq("transient")].copy()
+        filter_path = args.filter_output_root / f"global_phy_{ymd(day)}.nc"
+        with Dataset(filter_path) as dataset:
+            baseline_definition = str(getattr(dataset, "baseline_definition", "unspecified"))
+            baseline_formula = str(getattr(dataset, "baseline_formula", "unspecified"))
+        accepted["baseline_definition"] = baseline_definition
+        accepted["baseline_formula"] = baseline_formula
         destination.mkdir(parents=True, exist_ok=True)
         accepted.to_csv(destination / "centers_hua_style.csv", index=False)
 
         if not structures.empty and "hua_object_id" in accepted.columns and "hua_object_id" in structures.columns:
             structures = structures[structures["hua_object_id"].isin(accepted["hua_object_id"])].copy()
+        structures["baseline_definition"] = baseline_definition
+        structures["baseline_formula"] = baseline_formula
         structures.to_csv(destination / "structures_hua_style.csv", index=False)
 
 
@@ -478,8 +491,11 @@ def write_summary(days: list[date], args: argparse.Namespace) -> None:
     rows: list[dict[str, object]] = []
     for day in days:
         final = read_table(args.output_root / "daily_runs" / ymd(day) / "centers_hua_style")
+        filter_path = args.filter_output_root / f"global_phy_{ymd(day)}.nc"
+        with Dataset(filter_path) as dataset:
+            baseline_definition = str(getattr(dataset, "baseline_definition", "unspecified"))
         if final.empty:
-            rows.append({"day": day_str(day), "final_pass": 0, "raw_pass": 0})
+            rows.append({"day": day_str(day), "baseline_definition": baseline_definition, "final_pass": 0, "raw_pass": 0})
             continue
         surface = final[final["depth_index"].astype(int).eq(0)] if "depth_index" in final.columns else final
         final_pass = int(surface["hua_pass"].fillna(False).astype(bool).sum())
@@ -491,6 +507,7 @@ def write_summary(days: list[date], args: argparse.Namespace) -> None:
         )
         counts = {
             "day": day_str(day),
+            "baseline_definition": baseline_definition,
             "raw_discovery_pass": discovery_pass,
             "raw_streamline_pass": raw_pass,
             "final_pass": final_pass,

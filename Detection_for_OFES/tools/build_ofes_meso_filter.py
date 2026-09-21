@@ -364,6 +364,11 @@ def build_meso_filter(
             rossby_large_fixed_km,
         ),
         "science_tag": science_tag,
+        "baseline_definition": attrs.get("global_baseline_definition", "unspecified"),
+        "baseline_formula": attrs.get("global_baseline_formula", "unspecified"),
+        "annual_mss_path": attrs.get("global_annual_mss_path", ""),
+        "seasonal_cycle_policy": attrs.get("global_seasonal_cycle_policy", "unspecified"),
+        "daily_global_mean_removal": attrs.get("global_daily_global_mean_removal", "unspecified"),
         "max_depth_layers": max_depth_layers,
         "output_template": "global_phy_{yyyymmdd}.nc",
         "outputs": [str(path) for path in written],
@@ -392,6 +397,19 @@ def read_source_attrs(ds: Dataset) -> dict[str, str]:
         for attr in ["units", "calendar", "long_name"]:
             if hasattr(var, attr):
                 attrs[f"{name}_{attr}"] = str(getattr(var, attr))
+    for attr in [
+        "baseline_definition",
+        "baseline_formula",
+        "annual_mss_path",
+        "annual_mss_months",
+        "annual_mss_maximum_valid_day_weight",
+        "seasonal_cycle_policy",
+        "daily_global_mean_removal",
+        "velocity_policy",
+        "grid_note",
+    ]:
+        if hasattr(ds, attr):
+            attrs[f"global_{attr}"] = str(getattr(ds, attr))
     return attrs
 
 
@@ -760,6 +778,20 @@ def write_daily_netcdf(
 
         ds.source = "Detection_for_OFES.tools.build_ofes_meso_filter"
         ds.science_tag = science_tag
+        for attr in [
+            "baseline_definition",
+            "baseline_formula",
+            "annual_mss_path",
+            "annual_mss_months",
+            "annual_mss_maximum_valid_day_weight",
+            "seasonal_cycle_policy",
+            "daily_global_mean_removal",
+            "velocity_policy",
+            "grid_note",
+        ]:
+            value = attrs.get(f"global_{attr}")
+            if value is not None:
+                ds.setncattr(attr, value)
         ds.temporal_filter = f"available-day running mean, nominal window {temporal_window_days} days"
         ds.temporal_filter_dates_used = ",".join(day.isoformat() for day in window_days)
         ds.horizontal_filter_mode = filter_mode
