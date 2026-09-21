@@ -11,17 +11,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
+import os
+import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.io import savemat
 
 from ..ofes_io import ctl_path, expected_dta_bytes, open_dta_memmap, parse_ctl, require_daily_file
 from ..run_ofes_rebuild_w import (
@@ -59,6 +58,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--cressman-radius-r", type=float, default=1.0)
     parser.add_argument("--cressman-min-objects", type=int, default=8)
+    parser.add_argument("--max-geometry-depth-m", type=float, default=2000.0,
+                        help="Maximum depth retained in QC geometry figures and scientific summaries.")
+    parser.add_argument("--background-ring-min-r", type=float, default=2.0,
+                        help="Inner radius of the normalized outer-ring density reference.")
+    parser.add_argument("--background-ring-max-r", type=float, default=4.0,
+                        help="Outer radius of the normalized outer-ring density reference.")
+    parser.add_argument("--min-bracket-stratification", type=float, default=1.0e-4,
+                        help="Minimum absolute density slope |delta rho/delta D| (kg m-4) for a valid inversion bracket.")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-objects-per-group", type=int, default=0, help="Positive values are smoke-only limits.")
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
@@ -145,11 +152,20 @@ def update_accumulator(acc: dict[str, object], sampled: dict[str, object], kerne
     acc["object_count"] += 1
 
 
-def direct_isopycnal_depth(prho: np.ndarray, depth: np.ndarray, center_profile: np.ndarray, support: np.ndarray, min_objects: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def direct_isopycnal_depth(
+    prho: np.ndarray,
+    depth: np.ndarray,
+    center_profile: np.ndarray,
+    support: np.ndarray,
+    min_objects: int,
+    min_bracket_stratification: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Invert composite density columns; choose the bracket nearest each reference depth."""
     nz, ny, nx = prho.shape
     out = np.full((nz, ny, nx), np.nan, dtype="f4")
     out_support = np.zeros((nz, ny, nx), dtype="u2")
+    crossing_count = np.zeros((nz, ny, nx), dtype="u2")
+    bracket_stratification = np.full((nz, ny, nx), np.nan, dtype="f4")
     levels = np.asarray(center_profile, dtype="f8")
     lower = np.asarray(prho[:-1], dtype="f8")
     upper = np.asarray(prho[1:], dtype="f8")
@@ -160,6 +176,7 @@ def direct_isopycnal_depth(prho: np.ndarray, depth: np.ndarray, center_profile: 
             continue
         crosses = np.isfinite(lower) & np.isfinite(upper) & (np.abs(upper - lower) > 1.0e-10)
         crosses &= ((lower <= level) & (level <= upper)) | ((upper <= level) & (level <= lower))
+        crossing_count[zz] = np.minimum(np.sum(crosses, axis=0), np.iinfo(np.uint16).max).astype("u2")
         costs = np.where(crosses, np.abs(mid_depth - float(depth[zz])), np.inf)
         index = np.argmin(costs, axis=0)
         any_cross = np.isfinite(np.take_along_axis(costs, index[None, :, :], axis=0)[0])
@@ -168,7 +185,8 @@ def direct_isopycnal_depth(prho: np.ndarray, depth: np.ndarray, center_profile: 
         s0 = np.take_along_axis(pair_support, index[None, :, :], axis=0)[0]
         d0 = np.asarray(depth, dtype="f8")[index]
         d1 = np.asarray(depth, dtype="f8")[index + 1]
-        good = any_cross & (s0 >= int(min_objects))
+        local_stratification = np.abs((p1 - p0) / (d1 - d0))
+        good = any_cross & (s0 >= int(min_objects)) & (local_stratification >= float(min_bracket_stratification))
         fraction = np.divide(
             float(level) - p0,
             p1 - p0,
@@ -178,8 +196,9 @@ def direct_isopycnal_depth(prho: np.ndarray, depth: np.ndarray, center_profile: 
         values = d0 + fraction * (d1 - d0)
         out[zz, good] = values[good].astype("f4")
         out_support[zz, good] = s0[good]
+        bracket_stratification[zz, good] = local_stratification[good].astype("f4")
     anomaly = out - np.asarray(depth, dtype="f4")[:, None, None]
-    return out, anomaly, out_support
+    return out, anomaly, out_support, crossing_count, bracket_stratification
 
 
 def geometry_gradients(d_rho: np.ndarray, x: np.ndarray, y: np.ndarray, radius_m: float) -> tuple[np.ndarray, np.ndarray]:
@@ -189,39 +208,37 @@ def geometry_gradients(d_rho: np.ndarray, x: np.ndarray, y: np.ndarray, radius_m
     return d_dx.astype("f4"), d_dy.astype("f4")
 
 
-def finite_limit(values: np.ndarray, fallback: float = 1.0) -> float:
-    finite = np.abs(values[np.isfinite(values)])
-    return max(float(np.nanpercentile(finite, 95)), fallback) if finite.size else fallback
-
-
-def plot_section(path: Path, data: np.ndarray, x: np.ndarray, depth: np.ndarray, title: str, label: str, scale: float = 1.0) -> None:
-    lim = finite_limit(data * scale)
-    fig, ax = plt.subplots(figsize=(9, 6), constrained_layout=True)
-    image = ax.imshow(data * scale, origin="upper", aspect="auto", extent=[x[0], x[-1], depth[-1], depth[0]], cmap="RdBu_r", vmin=-lim, vmax=lim, interpolation="nearest")
-    ax.set(title=title, xlabel="x/R (east-west)", ylabel="Depth (m)")
-    ax.axvline(0, color="black", linewidth=0.7)
-    fig.colorbar(image, ax=ax, label=label)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-
-
-def plot_slices(path: Path, data: np.ndarray, x: np.ndarray, y: np.ndarray, depth: np.ndarray, targets: list[float], title: str, label: str, scale: float = 1.0) -> None:
-    lim = finite_limit(data * scale)
-    fig, axes = plt.subplots(2, 2, figsize=(10, 9), constrained_layout=True)
-    image = None
-    for ax, target in zip(axes.flat, targets):
-        index = int(np.nanargmin(np.abs(depth - target)))
-        image = ax.imshow(data[index] * scale, origin="lower", extent=[x[0], x[-1], y[0], y[-1]], cmap="RdBu_r", vmin=-lim, vmax=lim, interpolation="nearest")
-        ax.set(title=f"D0={depth[index]:.0f} m", xlabel="x/R (east-west)", ylabel="y/R (north-south)")
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.axvline(0, color="black", linewidth=0.5)
-    fig.suptitle(title)
-    if image is not None:
-        fig.colorbar(image, ax=axes.ravel().tolist(), label=label, shrink=0.85)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
+def render_qc_section_matlab(
+    group_root: Path,
+    stem: str,
+    x: np.ndarray,
+    depth: np.ndarray,
+    section: np.ndarray,
+    title: str,
+    colorbar_label: str,
+) -> Path | None:
+    """Use MATLAB for contours because this host's matplotlib renderer is unstable."""
+    input_mat = group_root / f"{stem}.mat"
+    output_png = group_root / "figures" / f"{stem}.png"
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    savemat(input_mat, {"x_over_r": x, "depth_m": depth, "section_m": section})
+    matlab = os.environ.get("MATLAB_EXE") or shutil.which("matlab") or r"D:\Util\Ma\01_Matlab\bin\matlab.exe"
+    if not Path(matlab).exists():
+        return None
+    helper_dir = Path(__file__).resolve().parent
+    escaped = lambda value: str(value).replace("'", "''")
+    command = (
+        f"addpath('{escaped(helper_dir)}'); "
+        f"plot_isopycnal_qc_section('{escaped(input_mat)}','{escaped(output_png)}','{escaped(title)}','{escaped(colorbar_label)}');"
+    )
+    completed = subprocess.run([matlab, "-batch", command], capture_output=True, text=True, timeout=180, check=False)
+    if completed.returncode != 0 or not output_png.exists():
+        (group_root / "MATLAB_RENDER_WARNING.txt").write_text(
+            "MATLAB QC section rendering failed.\n" + completed.stdout + "\n" + completed.stderr,
+            encoding="utf-8",
+        )
+        return None
+    return output_png
 
 
 def write_group_outputs(root: Path, kernel: str, group: str, payload: dict[str, object]) -> dict[str, object]:
@@ -234,19 +251,45 @@ def write_group_outputs(root: Path, kernel: str, group: str, payload: dict[str, 
     (group_root / "isopycnal_composite.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     x, y, depth = (np.asarray(payload[key]) for key in ("x_over_r", "y_over_r", "depth_m"))
     center_y = y.size // 2
-    iso_anom = np.asarray(payload["d_rho_anom_m"])
+    iso_anom = np.asarray(payload["d_rho_anom_qc_m"])
     native_w = np.asarray(payload["native_w_m_s"])
-    plot_section(figures / "isopycnal_section_x.png", iso_anom[:, center_y, :], x, depth, f"{kernel} {group}: direct-isopycnal displacement", "D_rho - D0 (m)")
-    plot_slices(figures / "isopycnal_slices.png", iso_anom, x, y, depth, [100, 500, 1000, 1500], f"{kernel} {group}: direct-isopycnal displacement", "D_rho - D0 (m)")
-    plot_section(figures / "native_w_section_x.png", native_w[:, center_y, :], x, depth, f"{kernel} {group}: OFES native W", "W (10^-6 m s^-1)", 1.0e6)
-    plot_slices(figures / "native_w_slices.png", native_w, x, y, depth, [100, 500, 1000, 1500], f"{kernel} {group}: OFES native W", "W (10^-6 m s^-1)", 1.0e6)
+    max_depth = float(payload["max_geometry_depth_m"])
+    keep = depth <= max_depth
+    support = np.asarray(payload["support_d_rho_objects"])
+    crossings = np.asarray(payload["bracket_crossing_count"])
+    stratification = np.asarray(payload["bracket_stratification_kg_m4"])
+    layer_rows: list[dict[str, float]] = []
+    for index, nominal_depth in enumerate(depth):
+        layer = iso_anom[index]
+        valid = np.isfinite(layer)
+        layer_rows.append({
+            "nominal_depth_m": float(nominal_depth),
+            "within_display_depth": bool(nominal_depth <= max_depth),
+            "valid_cells": int(np.sum(valid)),
+            "valid_fraction": float(np.mean(valid)),
+            "median_object_support": float(np.nanmedian(np.where(valid, support[index], np.nan))) if np.any(valid) else np.nan,
+            "median_crossing_count": float(np.nanmedian(np.where(valid, crossings[index], np.nan))) if np.any(valid) else np.nan,
+            "median_bracket_stratification_kg_m4": float(np.nanmedian(np.where(valid, stratification[index], np.nan))) if np.any(valid) else np.nan,
+        })
+    pd.DataFrame(layer_rows).to_csv(group_root / "isopycnal_qc_by_depth.csv", index=False, encoding="utf-8-sig")
+    section_path = render_qc_section_matlab(
+        group_root, "isopycnal_section_x_qc", x, depth[keep], iso_anom[keep, center_y, :],
+        f"{kernel} {group}: QC direct-isopycnal displacement (0-{max_depth:.0f} m)", "D_{rho} - D0 (m)",
+    )
+    rho_anom = np.asarray(payload["rho_anom_ring_qc_kg_m3"])
+    density_section_path = render_qc_section_matlab(
+        group_root, "density_anomaly_section_x_qc", x, depth[keep], rho_anom[keep, center_y, :],
+        f"{kernel} {group}: QC fixed-depth density anomaly (0-{max_depth:.0f} m)", "rho prime (kg m^{-3})",
+    )
     return {
         "kernel": kernel, "group": group, "object_count": payload["object_count"],
         "mean_radius_km": payload["mean_radius_m"] / 1000.0,
         "valid_isopycnal_fraction": float(np.isfinite(iso_anom).sum() / iso_anom.size),
         "valid_native_w_fraction": float(np.isfinite(native_w).sum() / native_w.size),
         "npz": str(group_root / "isopycnal_composite.npz"),
-        "isopycnal_section": str(figures / "isopycnal_section_x.png"),
+        "isopycnal_section": str(section_path) if section_path else None,
+        "density_anomaly_section": str(density_section_path) if density_section_path else None,
+        "isopycnal_qc_by_depth": str(group_root / "isopycnal_qc_by_depth.csv"),
         "native_w_section": str(figures / "native_w_section_x.png"),
     }
 
@@ -279,7 +322,23 @@ def run_group(raw: dict[str, np.memmap], metas: dict[str, object], objects: list
     depth = np.asarray(acc["depth_m"], dtype="f4")
     x, y = np.asarray(acc["x_over_r"], dtype="f4"), np.asarray(acc["y_over_r"], dtype="f4")
     center_profile = prho[:, y.size // 2, x.size // 2]
-    d_rho, d_anom, d_support = direct_isopycnal_depth(prho, depth, center_profile, acc["count"]["prho"], int(args.cressman_min_objects))
+    d_rho, d_anom, d_support, crossing_count, bracket_stratification = direct_isopycnal_depth(
+        prho, depth, center_profile, acc["count"]["prho"], int(args.cressman_min_objects),
+        float(args.min_bracket_stratification),
+    )
+    shallow = depth <= float(args.max_geometry_depth_m)
+    d_rho_qc = d_rho.copy()
+    d_anom_qc = d_anom.copy()
+    d_rho_qc[~shallow, :, :] = np.nan
+    d_anom_qc[~shallow, :, :] = np.nan
+    xx, yy = np.meshgrid(x, y, indexing="xy")
+    radius = np.hypot(xx, yy)
+    ring = (radius >= float(args.background_ring_min_r)) & (radius <= float(args.background_ring_max_r))
+    ring_profile = np.nanmedian(np.where(ring[None, :, :], prho, np.nan), axis=(1, 2)).astype("f4")
+    rho_anom_ring = prho - ring_profile[:, None, None]
+    rho_anom_ring_qc = rho_anom_ring.copy()
+    rho_anom_ring_qc[~shallow, :, :] = np.nan
+    rho_anom_ring_qc[np.asarray(acc["count"]["prho"]) < int(args.cressman_min_objects)] = np.nan
     radius_m = float(np.nanmedian(acc["radii_m"]))
     d_dx, d_dy = geometry_gradients(d_rho, x, y, radius_m)
     d_dx[~np.isfinite(d_rho)] = np.nan
@@ -289,12 +348,20 @@ def run_group(raw: dict[str, np.memmap], metas: dict[str, object], objects: list
         "native_w_m_s": native_w, "support_prho_objects": acc["count"]["prho"],
         "support_native_w_objects": acc["count"]["native_w"], "rho0_center_profile": center_profile,
         "d_rho_m": d_rho, "d_rho_anom_m": d_anom, "support_d_rho_objects": d_support,
+        "d_rho_qc_m": d_rho_qc, "d_rho_anom_qc_m": d_anom_qc,
+        "bracket_crossing_count": crossing_count, "bracket_stratification_kg_m4": bracket_stratification,
+        "rho_reference_ring_profile": ring_profile,
+        "rho_anom_ring_kg_m3": rho_anom_ring.astype("f4"), "rho_anom_ring_qc_kg_m3": rho_anom_ring_qc.astype("f4"),
         "dDdx_m_per_m": d_dx, "dDdy_m_per_m": d_dy,
         "object_count": int(acc["object_count"]), "failed_object_count": int(failures),
         "mean_radius_m": radius_m, "source_object_ids": ",".join(acc["object_ids"]),
         "day": str(args.day), "geometry_method": "composite_prho_then_direct_bracket_isopycnal_inversion",
         "rho0_policy": "group_composite_center_profile_at_each_nominal_depth",
         "multiple_crossing_policy": "valid_bracket_nearest_nominal_depth",
+        "max_geometry_depth_m": float(args.max_geometry_depth_m),
+        "min_bracket_stratification_kg_m4": float(args.min_bracket_stratification),
+        "density_anomaly_reference": "group_composite_prho_outer_ring_median_at_fixed_depth",
+        "background_ring_r": f"{float(args.background_ring_min_r):g}-{float(args.background_ring_max_r):g}",
         "density_derivative_used_for_geometry": False,
         "native_w_policy": "OFES_native_w_cressman_composite_only_not_rebuild_w",
         "cressman_radius_r": float(args.cressman_radius_r), "cressman_min_objects": int(args.cressman_min_objects),
