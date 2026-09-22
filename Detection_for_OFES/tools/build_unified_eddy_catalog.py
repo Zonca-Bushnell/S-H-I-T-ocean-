@@ -49,6 +49,20 @@ def main() -> None:
 
     if not args.skip_detection:
         run_days(days, args, log_root)
+    if args.candidate_only:
+        print(
+            json.dumps(
+                {
+                    "output_root": str(args.output_root),
+                    "days": len(days),
+                    "filter_output_root": str(args.filter_output_root),
+                    "stage": "raw_detection_only",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
     run_qc_days(days, args)
     write_final_catalog(days, args)
     write_summary(days, args)
@@ -91,6 +105,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-filter", action="store_true")
     parser.add_argument("--skip-detection", action="store_true")
+    parser.add_argument(
+        "--candidate-only",
+        action="store_true",
+        help="Stop after raw daily seed/contour detection; do not run QC, persistence, or write a final catalog.",
+    )
     parser.add_argument("--resume", dest="resume", action="store_true", default=True, help="Skip days whose raw centers and structures tables already exist (default).")
     parser.add_argument("--rerun-existing", dest="resume", action="store_false", help="Re-run daily detection even when raw tables exist.")
     parser.add_argument("--force-filter", action="store_true")

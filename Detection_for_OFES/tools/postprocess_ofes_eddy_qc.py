@@ -66,6 +66,8 @@ def main() -> None:
             "persistence_open_ocean_drift_fraction_min": float(args.persistence_open_ocean_drift_fraction_min),
             "persistence_open_ocean_drift_fraction_max": float(args.persistence_open_ocean_drift_fraction_max),
             "persistence_open_ocean_max_gap_days": int(args.persistence_open_ocean_max_gap_days),
+            "persistence_applied": not bool(args.skip_persistence),
+            "accept_ssh_primary_without_streamline": bool(args.accept_ssh_primary_without_streamline),
         },
         "counts": summary_rows,
     }
@@ -110,6 +112,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--persistence-open-ocean-drift-fraction-min", type=float, default=0.10)
     parser.add_argument("--persistence-open-ocean-drift-fraction-max", type=float, default=0.35)
     parser.add_argument("--persistence-open-ocean-max-gap-days", type=int, default=1)
+    parser.add_argument(
+        "--skip-persistence",
+        action="store_true",
+        help="Apply contour geometry and overlap QC only; retain accepted rows without temporal persistence screening.",
+    )
+    parser.add_argument(
+        "--accept-ssh-primary-without-streamline",
+        action="store_true",
+        help="Promote closed, single-extremum SSH-primary contours rejected only for no_closed_streamline_effective into geometry QC.",
+    )
     return parser.parse_args()
 
 
@@ -158,10 +170,22 @@ def apply_qc(
         surface_idx = out.index[out["depth_index"].astype(int).eq(0)]
     else:
         surface_idx = out.index
-    raw_pass = out.get("hua_pass", pd.Series(False, index=out.index)).fillna(False).astype(bool)
-    out["raw_hua_pass"] = raw_pass
-    out["original_hua_pass"] = raw_pass
+    original_hua_pass = out.get("hua_pass", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    raw_pass = original_hua_pass.copy()
+    out["original_hua_pass"] = original_hua_pass
     out["raw_boundary_source"] = out.get("boundary_source", pd.Series("", index=out.index)).astype(str)
+    out["streamline_gate_removed"] = False
+    out["streamline_gate_original_reason"] = ""
+    if bool(args.accept_ssh_primary_without_streamline):
+        promoted = promotable_ssh_primary_without_streamline(out)
+        raw_pass = raw_pass | promoted
+        out.loc[promoted, "streamline_gate_removed"] = True
+        out.loc[promoted, "streamline_gate_original_reason"] = out.loc[promoted, "catalog_acceptance_reason"].astype(str)
+        out.loc[promoted, "raw_boundary_source"] = "ssh_effective_contour_streamline_gate_removed"
+        out.loc[promoted, "boundary_source"] = "ssh_effective_contour_streamline_gate_removed"
+        out.loc[promoted, "catalog_acceptance_reason"] = "ssh_effective_contour_streamline_gate_removed"
+        out.loc[promoted, "dynamical_core_class"] = "weak_or_no_streamline_core"
+    out["raw_hua_pass"] = raw_pass
     out["qc_pass"] = False
     out["qc_class"] = "not_surface_or_not_source_pass"
     out["qc_reject_reason"] = ""
@@ -250,18 +274,21 @@ def apply_qc(
             out.at[idx, "qc_class"] = "isolated_eddy_candidate"
             out.at[idx, "jet_meander_class"] = "jet_flag_recorded_not_split" if is_jet else "isolated"
 
-    apply_persistence_diagnostic(out, args)
-
-    transient_idx = out.index[
-        out["qc_pass"].astype(bool)
-        & out["persistence_class"].astype(str).eq("transient")
-    ]
-    for idx in transient_idx:
-        prior = str(out.at[idx, "qc_reject_reason"] or "")
-        reason = "transient" if not prior else f"{prior}|transient"
-        out.at[idx, "qc_pass"] = False
-        out.at[idx, "qc_class"] = "transient"
-        out.at[idx, "qc_reject_reason"] = reason
+    if bool(args.skip_persistence):
+        accepted_idx = out.index[out["qc_pass"].astype(bool)]
+        out.loc[accepted_idx, "persistence_class"] = "not_run_geometry_qc_only"
+    else:
+        apply_persistence_diagnostic(out, args)
+        transient_idx = out.index[
+            out["qc_pass"].astype(bool)
+            & out["persistence_class"].astype(str).eq("transient")
+        ]
+        for idx in transient_idx:
+            prior = str(out.at[idx, "qc_reject_reason"] or "")
+            reason = "transient" if not prior else f"{prior}|transient"
+            out.at[idx, "qc_pass"] = False
+            out.at[idx, "qc_class"] = "transient"
+            out.at[idx, "qc_reject_reason"] = reason
 
     out["hua_pass"] = out["qc_pass"].astype(bool)
     out["boundary_source"] = out.get("boundary_source", pd.Series("", index=out.index)).astype(str)
@@ -277,7 +304,10 @@ def apply_qc(
             "qc_pass",
             "qc_reject_reason",
             "raw_hua_pass",
+            "original_hua_pass",
             "raw_boundary_source",
+            "streamline_gate_removed",
+            "streamline_gate_original_reason",
             "ssh_primary_discovery_pass",
             "ssh_primary_discovery_reason",
             "shape_error_percent",
@@ -299,12 +329,30 @@ def apply_qc(
     return out, out_struct, summary_rows
 
 
+def promotable_ssh_primary_without_streamline(out: pd.DataFrame) -> pd.Series:
+    """Select SSH-primary successes rejected solely by the streamline hard gate."""
+    reason = out.get("catalog_acceptance_reason", pd.Series("", index=out.index)).fillna("").astype(str)
+    discovery = out.get("ssh_primary_discovery_pass", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    closed = out.get("ssh_contour_closed", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    extrema = pd.to_numeric(out.get("ssh_contour_same_extrema_count", pd.Series(np.nan, index=out.index)), errors="coerce")
+    valid_boundary = out.apply(
+        lambda row: min(
+            parse_index_list(row.get("ssh_contour_boundary_i", "")).size,
+            parse_index_list(row.get("ssh_contour_boundary_j", "")).size,
+        ) >= 3,
+        axis=1,
+    )
+    return reason.eq("no_closed_streamline_effective") & discovery & closed & extrema.le(1.0) & valid_boundary
+
+
 def contour_metrics(row: pd.Series, lon: np.ndarray, lat: np.ndarray) -> dict[str, float | int]:
-    ii = parse_index_list(row.get("streamline_boundary_i", ""))
-    jj = parse_index_list(row.get("streamline_boundary_j", ""))
+    # The geometry catalog is defined by the saved SSH effective contour.  A
+    # streamline boundary is only a legacy fallback when that contour is absent.
+    ii = parse_index_list(row.get("ssh_contour_boundary_i", ""))
+    jj = parse_index_list(row.get("ssh_contour_boundary_j", ""))
     if ii.size < 3 or jj.size < 3:
-        ii = parse_index_list(row.get("ssh_contour_boundary_i", ""))
-        jj = parse_index_list(row.get("ssh_contour_boundary_j", ""))
+        ii = parse_index_list(row.get("streamline_boundary_i", ""))
+        jj = parse_index_list(row.get("streamline_boundary_j", ""))
     n = min(ii.size, jj.size)
     if n < 3:
         return {"shape_error_percent": np.nan, "compactness": np.nan, "boundary_point_count": int(n), "pixel_area_cells": np.nan, "radius_km": radius_km(row)}
@@ -714,6 +762,7 @@ def summarize(out: pd.DataFrame, candidate_idx: list[int]) -> list[dict[str, obj
     for region, bbox in regions.items():
         part = surface_in_bbox(surface, bbox)
         rows.append({"region": region, "metric": "raw_ssh_primary", "count": int(len(part))})
+        rows.append({"region": region, "metric": "streamline_gate_removed_promoted", "count": int(part.get("streamline_gate_removed", pd.Series(False, index=part.index)).fillna(False).astype(bool).sum())})
         for label in ["shape_rejected", "overlap_duplicate", "jet_meander_candidate", "isolated_eddy_candidate"]:
             rows.append({"region": region, "metric": label, "count": int(part["qc_class"].eq(label).sum())})
         rows.append({"region": region, "metric": "qc_pass_total", "count": int(part["qc_pass"].astype(bool).sum())})
