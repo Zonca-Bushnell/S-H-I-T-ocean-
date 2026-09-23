@@ -25,6 +25,8 @@ SECTION_DISPLAY_QUANTILE = 0.75
 
 
 def _emphasize_contours(contours) -> None:
+    if contours is None:
+        return
     collections = getattr(contours, "collections", None)
     if collections is None:
         collections = [contours]
@@ -34,6 +36,14 @@ def _emphasize_contours(contours) -> None:
         collection.set_path_effects(
             [path_effects.withStroke(linewidth=base_width + 1.2, foreground="white", alpha=0.75)]
         )
+
+
+def _safe_contour(ax, *args, **kwargs):
+    """Draw optional contour overlays when the local contourpy backend is available."""
+    try:
+        return ax.contour(*args, **kwargs)
+    except ImportError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -83,9 +93,23 @@ def _read_time_index(path: Path, date: str) -> int:
         raise ValueError(f"{date} not found in {path}") from exc
 
 
+def _read_catalog_table(path: Path) -> pd.DataFrame:
+    """Read the portable CSV catalog when native Parquet libraries are blocked."""
+    csv_path = path.with_suffix(".csv")
+    if path.exists():
+        try:
+            return pd.read_parquet(path)
+        except (ImportError, OSError):
+            if not csv_path.exists():
+                raise
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    raise FileNotFoundError(path)
+
+
 def _load_catalog(results_root: Path, shape_dir_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    centers = pd.read_parquet(results_root / "catalog" / "layer_centers_completed.parquet")
-    shape = pd.read_parquet(results_root / shape_dir_name / "shape_tracks.parquet")
+    centers = _read_catalog_table(results_root / "catalog" / "layer_centers_completed.parquet")
+    shape = _read_catalog_table(results_root / shape_dir_name / "shape_tracks.parquet")
     return centers, shape
 
 
@@ -718,7 +742,7 @@ def _plot_field(
             hi = float(np.nanquantile(finite, 0.90))
             if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
                 levels = np.linspace(lo, hi, 7)
-                ax.contour(xx, yy, field, levels=levels, colors=contour_color, linewidths=0.55, alpha=0.7)
+                _safe_contour(ax, xx, yy, field, levels=levels, colors=contour_color, linewidths=0.55, alpha=0.7)
     if quiver is not None:
         u, v = quiver
         step = max(1, int(max(u.shape) / 18))
@@ -933,7 +957,8 @@ def _plot_normal_horizontal_velocity_section(
         contour_levels = contour_levels[np.isfinite(contour_levels)]
         contour_levels = contour_levels[np.abs(contour_levels) > max(abs(float(vmax) - float(vmin)) * 0.01, 1e-12)]
         if contour_levels.size >= 2:
-            ax.contour(
+            _safe_contour(
+                ax,
                 s,
                 depth,
                 u_perp,
@@ -945,7 +970,7 @@ def _plot_normal_horizontal_velocity_section(
                 alpha=0.72,
             )
     if finite.size and float(np.nanmin(finite)) < 0.0 < float(np.nanmax(finite)):
-        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
+        _safe_contour(ax, s, depth, u_perp, levels=[0.0], colors="0.05", linewidths=1.8, alpha=0.95)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     center_s = section.get("center_section_coord_km")
@@ -989,7 +1014,8 @@ def _plot_horizontal_speed_section(
         levels = np.linspace(float(vmin), float(vmax), 9)
         levels = levels[np.isfinite(levels)]
         if np.unique(levels).size >= 3:
-            contours = ax.contour(
+            contours = _safe_contour(
+                ax,
                 s,
                 depth,
                 speed,
@@ -1046,7 +1072,8 @@ def _plot_signed_horizontal_speed_section(
         span = max(abs(float(vmin)), abs(float(vmax)))
         levels = levels[np.abs(levels) > max(span * 0.10, 1e-12)]
         if levels.size >= 2:
-            contours = ax.contour(
+            contours = _safe_contour(
+                ax,
                 s,
                 depth,
                 signed_speed,
@@ -1061,7 +1088,7 @@ def _plot_signed_horizontal_speed_section(
     u_perp_local = u_perp[np.ix_(zmask, xmask)] if np.any(xmask) and np.any(zmask) else u_perp
     u_perp_finite = u_perp_local[np.isfinite(u_perp_local)]
     if u_perp_finite.size and float(np.nanmin(u_perp_finite)) < 0.0 < float(np.nanmax(u_perp_finite)):
-        ax.contour(s, depth, u_perp, levels=[0.0], colors="0.02", linewidths=2.8, alpha=0.98)
+        _safe_contour(ax, s, depth, u_perp, levels=[0.0], colors="0.02", linewidths=2.8, alpha=0.98)
     ax.invert_yaxis()
     ax.axvline(0, color="0.75", lw=0.8)
     center_s = section.get("center_section_coord_km")
@@ -1377,6 +1404,7 @@ def _plot_9panel(
     right_panel_mode: str = "omega_w",
     horizontal_smooth_sigma_cells: float = 0.8,
     show_grid_centers: bool = False,
+    figure_dpi: int = 220,
 ) -> None:
     offsets = _object_offsets_km(object_layers)
     surface = offsets.iloc[0]
@@ -1704,8 +1732,8 @@ def _plot_9panel(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_dir / f"{output_name_stem}.png", dpi=220)
-    fig.savefig(output_dir / f"{output_name_stem}.pdf")
+    fig.savefig(output_dir / f"{output_name_stem}.png", dpi=int(figure_dpi))
+    fig.savefig(output_dir / f"{output_name_stem}.pdf", dpi=int(figure_dpi))
     _write_omega_diagnostics(fields, output_dir)
     plt.close(fig)
 
@@ -2477,6 +2505,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="omega_w",
     )
     parser.add_argument("--horizontal-smooth-sigma-cells", type=float, default=0.8)
+    parser.add_argument("--figure-dpi", type=int, default=220)
     parser.add_argument("--no-horizontal-smoothing", action="store_true")
     parser.add_argument("--show-grid-centers", action="store_true", help="Overlay original 1/4 degree grid-cell centers when audit columns exist.")
     parser.add_argument("--selected-metadata", type=Path, default=None, help="Reuse a selected_objects_metadata.csv object list instead of re-ranking candidates.")
@@ -2526,6 +2555,7 @@ def main() -> None:
             args.right_panel_mode,
             horizontal_smooth_sigma_cells,
             args.show_grid_centers,
+            args.figure_dpi,
         )
         print(json.dumps({"selected_object": selected.__dict__, "output_dir": str(args.output_dir)}, ensure_ascii=False))
         return
@@ -2579,6 +2609,7 @@ def main() -> None:
             args.right_panel_mode,
             horizontal_smooth_sigma_cells,
             args.show_grid_centers,
+            args.figure_dpi,
         )
         rows.append(
             _metadata_payload(

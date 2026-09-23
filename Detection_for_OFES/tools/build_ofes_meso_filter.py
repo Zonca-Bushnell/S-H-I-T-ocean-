@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import ExitStack
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 from netCDF4 import Dataset
 from scipy.ndimage import convolve1d, gaussian_filter1d
-from scipy.signal import bessel, sosfreqz
+from scipy.signal import bessel, fftconvolve, sosfreqz
 
 
 DEFAULT_INPUT_ROOT = Path(r"E:\DATA\01_Eddy_correspond\02_OFES\origin_compatible_filter")
@@ -47,6 +49,9 @@ def main() -> None:
         meridional_scale_mode=str(args.meridional_scale_mode),
         min_valid_weight_fraction=float(args.min_valid_weight_fraction),
         max_depth_layers=int(args.max_depth_layers),
+        workers=int(args.workers),
+        convolution_engine=str(args.convolution_engine),
+        compression_level=int(args.compression_level),
         overwrite=bool(args.overwrite),
     )
     print(json.dumps({"written": [str(path) for path in written]}, ensure_ascii=False, indent=2), flush=True)
@@ -127,6 +132,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of velocity depth layers to export. Use 1 for surface-only detection smoke.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Independent dates to process concurrently. Full-depth global runs normally use 2-3.",
+    )
+    parser.add_argument(
+        "--convolution-engine",
+        choices=["direct", "fft"],
+        default="fft",
+        help="FFT uses the same discrete kernels and boundary modes as direct convolution.",
+    )
+    parser.add_argument(
+        "--compression-level",
+        type=int,
+        default=1,
+        help="Lossless NetCDF4 zlib compression level; 1 avoids compression dominating runtime.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -158,11 +181,52 @@ def build_meso_filter(
     meridional_scale_mode: str,
     min_valid_weight_fraction: float,
     max_depth_layers: int,
+    workers: int = 1,
+    convolution_engine: str = "fft",
+    compression_level: int = 1,
     overwrite: bool,
+    _manifest_name: str = "build_ofes_meso_filter_manifest.json",
 ) -> list[Path]:
+    selected_days = date_range(start, end)
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    if not 0 <= compression_level <= 9:
+        raise ValueError("compression_level must be in [0, 9]")
+    if workers > 1 and len(selected_days) > 1:
+        return build_meso_filter_parallel(
+            input_root=input_root,
+            output_root=output_root,
+            selected_days=selected_days,
+            available_start=available_start,
+            available_end=available_end,
+            temporal_window_days=temporal_window_days,
+            small_cutoff_km=small_cutoff_km,
+            large_cutoff_km=large_cutoff_km,
+            filter_mode=filter_mode,
+            spatial_kernel=spatial_kernel,
+            science_tag=science_tag,
+            large_cutoff_mode=large_cutoff_mode,
+            adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
+            adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
+            rossby_radius_path=rossby_radius_path,
+            rossby_small_factor=rossby_small_factor,
+            rossby_large_factor=rossby_large_factor,
+            rossby_min_km=rossby_min_km,
+            rossby_max_km=rossby_max_km,
+            rossby_large_fixed_km=rossby_large_fixed_km,
+            zonal_scale_mode=zonal_scale_mode,
+            meridional_scale_mode=meridional_scale_mode,
+            min_valid_weight_fraction=min_valid_weight_fraction,
+            max_depth_layers=max_depth_layers,
+            workers=workers,
+            convolution_engine=convolution_engine,
+            compression_level=compression_level,
+            overwrite=overwrite,
+            manifest_name=_manifest_name,
+        )
     output_root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for target_day in date_range(start, end):
+    for target_day in selected_days:
         window_days = available_running_window(target_day, temporal_window_days, available_start, available_end)
         first_path = input_daily_path(input_root, window_days[0])
         with Dataset(first_path) as sample:
@@ -246,12 +310,8 @@ def build_meso_filter(
         out_path = output_root / f"global_phy_{target_day:%Y%m%d}.nc"
         if out_path.exists() and not overwrite:
             raise FileExistsError(f"{out_path} exists. Use --overwrite to replace it.")
-        if out_path.exists():
-            out_path.unlink()
 
-        slow_ssh = temporal_mean_surface(input_root, window_days, "zos_glor")
-        meso_ssh = horizontal_scale_filter(
-            slow_ssh,
+        filter_plans = build_filter_plans(
             lon,
             lat,
             small_cutoff_for_filter,
@@ -259,70 +319,94 @@ def build_meso_filter(
             filter_mode,
             zonal_scale_mode,
             meridional_scale_mode,
-            min_valid_weight_fraction,
             spatial_kernel,
+            convolution_engine,
         )
-        # Keep full-depth exports disk-backed.  A 105-layer global u/v pair is
-        # roughly 4.6 GiB, so ndarray allocation is needless pressure before
-        # the NetCDF writer can consume it layer by layer.
-        scratch_u = output_root / f".{target_day:%Y%m%d}.uo_glor.f4.tmp"
-        scratch_v = output_root / f".{target_day:%Y%m%d}.vo_glor.f4.tmp"
-        meso_u = np.memmap(scratch_u, dtype="f4", mode="w+", shape=(depth_count, len(lat), len(lon)))
-        meso_v = np.memmap(scratch_v, dtype="f4", mode="w+", shape=(depth_count, len(lat), len(lon)))
+        part_path = Path(f"{out_path}.part")
+        part_path.unlink(missing_ok=True)
         try:
-            for k in range(depth_count):
-                slow_u = temporal_mean_velocity_layer(input_root, window_days, "uo_glor", k)
-                slow_v = temporal_mean_velocity_layer(input_root, window_days, "vo_glor", k)
-                meso_u[k] = horizontal_scale_filter(
-                    slow_u, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
-                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+            with ExitStack() as stack:
+                datasets = [stack.enter_context(Dataset(input_daily_path(input_root, day))) for day in window_days]
+                slow_ssh = temporal_mean_surface_from_datasets(datasets, "zos_glor")
+                meso_ssh = horizontal_scale_filter(
+                    slow_ssh,
+                    lon,
+                    lat,
+                    small_cutoff_for_filter,
+                    large_cutoff_by_lat,
+                    filter_mode,
+                    zonal_scale_mode,
+                    meridional_scale_mode,
+                    min_valid_weight_fraction,
+                    spatial_kernel,
+                    convolution_engine,
+                    filter_plans,
                 )
-                meso_v[k] = horizontal_scale_filter(
-                    slow_v, lon, lat, small_cutoff_for_filter, large_cutoff_by_lat, filter_mode,
-                    zonal_scale_mode, meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
-                )
-                if (k + 1) % 8 == 0 or k + 1 == depth_count:
-                    print(f"[ofes-meso-filter] {target_day.isoformat()} depth {k + 1}/{depth_count}", flush=True)
 
-            meso_u.flush()
-            meso_v.flush()
-            write_daily_netcdf(
-                out_path,
-                target_day=target_day,
-                lon=lon,
-                lat=lat,
-                depth=depth,
-                ssh=meso_ssh,
-                u=meso_u,
-                v=meso_v,
-                attrs=attrs,
-                window_days=window_days,
-                temporal_window_days=temporal_window_days,
-                small_cutoff_km=small_cutoff_km,
-                large_cutoff_km=large_cutoff_km,
-                filter_mode=filter_mode,
-                spatial_kernel=spatial_kernel,
-                large_cutoff_mode=large_cutoff_mode,
-                adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
-                adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
-                rossby_radius_path=rossby_radius_path,
-                rossby_small_factor=rossby_small_factor,
-                rossby_large_factor=rossby_large_factor,
-                rossby_min_km=rossby_min_km,
-                rossby_max_km=rossby_max_km,
-                rossby_large_fixed_km=rossby_large_fixed_km,
-                large_cutoff_by_lat=large_cutoff_by_lat,
-                small_cutoff_by_lat=small_cutoff_for_filter,
-                zonal_scale_mode=zonal_scale_mode,
-                meridional_scale_mode=meridional_scale_mode,
-                min_valid_weight_fraction=min_valid_weight_fraction,
-                science_tag=science_tag,
-            )
-        finally:
-            del meso_u
-            del meso_v
-            scratch_u.unlink(missing_ok=True)
-            scratch_v.unlink(missing_ok=True)
+                def filtered_velocity_layers():
+                    for k in range(depth_count):
+                        slow_u, slow_v = temporal_mean_velocity_pair_from_datasets(datasets, k)
+                        meso_u, meso_v = horizontal_scale_filter_pair(
+                            slow_u,
+                            slow_v,
+                            lon,
+                            lat,
+                            small_cutoff_for_filter,
+                            large_cutoff_by_lat,
+                            filter_mode,
+                            zonal_scale_mode,
+                            meridional_scale_mode,
+                            min_valid_weight_fraction,
+                            spatial_kernel,
+                            convolution_engine,
+                            filter_plans,
+                        )
+                        if (k + 1) % 8 == 0 or k + 1 == depth_count:
+                            print(
+                                f"[ofes-meso-filter] {target_day.isoformat()} depth {k + 1}/{depth_count}",
+                                flush=True,
+                            )
+                        yield meso_u, meso_v
+
+                write_daily_netcdf(
+                    part_path,
+                    target_day=target_day,
+                    lon=lon,
+                    lat=lat,
+                    depth=depth,
+                    ssh=meso_ssh,
+                    u=None,
+                    v=None,
+                    velocity_layers=filtered_velocity_layers(),
+                    compression_level=compression_level,
+                    attrs=attrs,
+                    window_days=window_days,
+                    temporal_window_days=temporal_window_days,
+                    small_cutoff_km=small_cutoff_km,
+                    large_cutoff_km=large_cutoff_km,
+                    filter_mode=filter_mode,
+                    spatial_kernel=spatial_kernel,
+                    large_cutoff_mode=large_cutoff_mode,
+                    adaptive_large_cutoff_min_km=adaptive_large_cutoff_min_km,
+                    adaptive_large_cutoff_max_km=adaptive_large_cutoff_max_km,
+                    rossby_radius_path=rossby_radius_path,
+                    rossby_small_factor=rossby_small_factor,
+                    rossby_large_factor=rossby_large_factor,
+                    rossby_min_km=rossby_min_km,
+                    rossby_max_km=rossby_max_km,
+                    rossby_large_fixed_km=rossby_large_fixed_km,
+                    large_cutoff_by_lat=large_cutoff_by_lat,
+                    small_cutoff_by_lat=small_cutoff_for_filter,
+                    zonal_scale_mode=zonal_scale_mode,
+                    meridional_scale_mode=meridional_scale_mode,
+                    min_valid_weight_fraction=min_valid_weight_fraction,
+                    science_tag=science_tag,
+                    convolution_engine=convolution_engine,
+                )
+            part_path.replace(out_path)
+        except BaseException:
+            part_path.unlink(missing_ok=True)
+            raise
         written.append(out_path)
         print(f"[ofes-meso-filter] wrote {target_day.isoformat()} -> {out_path}", flush=True)
 
@@ -351,6 +435,10 @@ def build_meso_filter(
         "zonal_scale_mode": zonal_scale_mode,
         "meridional_scale_mode": meridional_scale_mode,
         "min_valid_weight_fraction": min_valid_weight_fraction,
+        "convolution_engine": convolution_engine,
+        "date_workers": workers,
+        "netcdf_compression_level": compression_level,
+        "io_policy": "input datasets opened once per date; output written layer-by-layer without velocity memmaps",
         "large_cutoff_actual_min_km": float(np.nanmin(large_cutoff_by_lat)),
         "large_cutoff_actual_max_km": float(np.nanmax(large_cutoff_by_lat)),
         "spatial_band": spatial_band_label(
@@ -374,11 +462,62 @@ def build_meso_filter(
         "outputs": [str(path) for path in written],
         "note": "Diagnostic mesoscale filter: optional available-day running mean plus spatial scale separation. High-pass/band-pass suppresses large-scale barotropic/background signals but is not harmonic detiding and not a 30-180 day bandpass.",
     }
-    (output_root / "build_ofes_meso_filter_manifest.json").write_text(
+    (output_root / _manifest_name).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return written
+
+
+def build_meso_filter_parallel(
+    *,
+    selected_days: list[date],
+    workers: int,
+    manifest_name: str,
+    **kwargs,
+) -> list[Path]:
+    """Run independent dates in isolated processes and merge their manifests."""
+    output_root = Path(kwargs["output_root"])
+    output_root.mkdir(parents=True, exist_ok=True)
+    day_manifests: dict[date, Path] = {}
+    written: list[Path] = []
+    with ProcessPoolExecutor(max_workers=min(workers, len(selected_days))) as pool:
+        futures = {}
+        for target_day in selected_days:
+            day_manifest = output_root / f".build_ofes_meso_filter_{target_day:%Y%m%d}.json"
+            day_manifests[target_day] = day_manifest
+            future = pool.submit(
+                build_meso_filter,
+                **kwargs,
+                start=target_day,
+                end=target_day,
+                workers=1,
+                _manifest_name=day_manifest.name,
+            )
+            futures[future] = target_day
+        for future in as_completed(futures):
+            target_day = futures[future]
+            paths = future.result()
+            written.extend(paths)
+            print(f"[ofes-meso-filter] completed date worker {target_day.isoformat()}", flush=True)
+
+    first_manifest = day_manifests[selected_days[0]]
+    manifest = json.loads(first_manifest.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "start": selected_days[0].isoformat(),
+            "end": selected_days[-1].isoformat(),
+            "date_workers": min(workers, len(selected_days)),
+            "outputs": [str(path) for path in sorted(written)],
+            "parallel_schedule": "one isolated process per date; bounded process pool",
+        }
+    )
+    (output_root / manifest_name).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    for day_manifest in day_manifests.values():
+        day_manifest.unlink(missing_ok=True)
+    return sorted(written)
 
 
 def input_daily_path(root: Path, day: date) -> Path:
@@ -398,6 +537,7 @@ def read_source_attrs(ds: Dataset) -> dict[str, str]:
             if hasattr(var, attr):
                 attrs[f"{name}_{attr}"] = str(getattr(var, attr))
     for attr in [
+        "ssh_definition",
         "baseline_definition",
         "baseline_formula",
         "annual_mss_path",
@@ -423,6 +563,15 @@ def temporal_mean_surface(root: Path, days: list[date], variable: str) -> np.nda
     return divide_mean(total, count)
 
 
+def temporal_mean_surface_from_datasets(datasets: list[Dataset], variable: str) -> np.ndarray:
+    total: np.ndarray | None = None
+    count: np.ndarray | None = None
+    for ds in datasets:
+        layer = np.asarray(ds.variables[variable][0, :, :], dtype="f4")
+        total, count = accumulate(total, count, layer)
+    return divide_mean(total, count)
+
+
 def temporal_mean_velocity_layer(root: Path, days: list[date], variable: str, depth_index: int) -> np.ndarray:
     total: np.ndarray | None = None
     count: np.ndarray | None = None
@@ -431,6 +580,21 @@ def temporal_mean_velocity_layer(root: Path, days: list[date], variable: str, de
             layer = np.asarray(ds.variables[variable][0, depth_index, :, :], dtype="f4")
         total, count = accumulate(total, count, layer)
     return divide_mean(total, count)
+
+
+def temporal_mean_velocity_pair_from_datasets(
+    datasets: list[Dataset], depth_index: int
+) -> tuple[np.ndarray, np.ndarray]:
+    total_u: np.ndarray | None = None
+    count_u: np.ndarray | None = None
+    total_v: np.ndarray | None = None
+    count_v: np.ndarray | None = None
+    for ds in datasets:
+        u = np.asarray(ds.variables["uo_glor"][0, depth_index, :, :], dtype="f4")
+        v = np.asarray(ds.variables["vo_glor"][0, depth_index, :, :], dtype="f4")
+        total_u, count_u = accumulate(total_u, count_u, u)
+        total_v, count_v = accumulate(total_v, count_v, v)
+    return divide_mean(total_u, count_u), divide_mean(total_v, count_v)
 
 
 def accumulate(total: np.ndarray | None, count: np.ndarray | None, layer: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -451,6 +615,85 @@ def divide_mean(total: np.ndarray | None, count: np.ndarray | None) -> np.ndarra
     return np.divide(total, count, out=np.full_like(total, np.nan, dtype="f8"), where=count > 0).astype("f4")
 
 
+class SeparableFFTLowpassPlan:
+    """Cached FFT representation of the existing discrete separable kernel."""
+
+    def __init__(
+        self,
+        lon: np.ndarray,
+        lat: np.ndarray,
+        fwhm_km: float | np.ndarray,
+        zonal_scale_mode: str,
+        meridional_scale_mode: str,
+        spatial_kernel: str,
+    ) -> None:
+        if meridional_scale_mode != "median":
+            raise ValueError("FFT convolution currently requires meridional_scale_mode='median'")
+        dlat = float(np.nanmedian(np.diff(lat)))
+        dlon = float(np.nanmedian(np.diff(lon)))
+        fwhm_by_lat = np.asarray(fwhm_km, dtype="f8")
+        if fwhm_by_lat.ndim == 0:
+            fwhm_by_lat = np.full(len(lat), float(fwhm_by_lat), dtype="f8")
+        if fwhm_by_lat.shape != (len(lat),):
+            raise ValueError(f"fwhm_km must be scalar or len(lat), got shape {fwhm_by_lat.shape}")
+        sigma_km = fwhm_by_lat / 2.354820045
+        sigma_y = float(np.nanmedian(np.maximum(0.01, sigma_km / (111.32 * abs(dlat)))))
+        self.y_kernel = lowpass_kernel(spatial_kernel, sigma_y)
+
+        nx = len(lon)
+        circular_kernels = np.zeros((len(lat), nx), dtype="f8")
+        for j, latitude in enumerate(lat):
+            if zonal_scale_mode == "degree":
+                sigma_x = max(0.01, float(sigma_km[j]) / (111.32 * abs(dlon)))
+            elif zonal_scale_mode == "km":
+                coslat = max(0.12, abs(float(np.cos(np.deg2rad(latitude)))))
+                sigma_x = max(0.01, float(sigma_km[j]) / (111.32 * coslat * abs(dlon)))
+            else:
+                raise ValueError(f"Unsupported zonal_scale_mode {zonal_scale_mode!r}")
+            kernel = lowpass_kernel(spatial_kernel, sigma_x)
+            offsets = np.arange(-(kernel.size // 2), kernel.size // 2 + 1)
+            np.add.at(circular_kernels[j], offsets % nx, kernel)
+        self.zonal_spectrum = np.fft.rfft(circular_kernels, axis=1)
+        self.nx = nx
+
+    def convolve(self, values: np.ndarray) -> np.ndarray:
+        radius = self.y_kernel.size // 2
+        padded = np.pad(np.asarray(values, dtype="f8"), ((radius, radius), (0, 0)), mode="edge")
+        meridional = fftconvolve(
+            padded,
+            self.y_kernel[:, np.newaxis],
+            mode="valid",
+            axes=0,
+        )
+        spectrum = np.fft.rfft(meridional, axis=1)
+        return np.fft.irfft(spectrum * self.zonal_spectrum, n=self.nx, axis=1)
+
+
+def build_filter_plans(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    small_km: float | np.ndarray,
+    large_km: float | np.ndarray,
+    filter_mode: str,
+    zonal_scale_mode: str,
+    meridional_scale_mode: str,
+    spatial_kernel: str,
+    convolution_engine: str,
+) -> dict[str, SeparableFFTLowpassPlan]:
+    if convolution_engine != "fft" or meridional_scale_mode != "median":
+        return {}
+    plans = {
+        "large": SeparableFFTLowpassPlan(
+            lon, lat, large_km, zonal_scale_mode, meridional_scale_mode, spatial_kernel
+        )
+    }
+    if filter_mode == "bandpass":
+        plans["small"] = SeparableFFTLowpassPlan(
+            lon, lat, small_km, zonal_scale_mode, meridional_scale_mode, spatial_kernel
+        )
+    return plans
+
+
 def horizontal_scale_filter(
     field: np.ndarray,
     lon: np.ndarray,
@@ -462,11 +705,15 @@ def horizontal_scale_filter(
     meridional_scale_mode: str = "median",
     min_valid_weight_fraction: float = 0.0,
     spatial_kernel: str = "gaussian",
+    convolution_engine: str = "fft",
+    filter_plans: dict[str, SeparableFFTLowpassPlan] | None = None,
 ) -> np.ndarray:
     if filter_mode == "highpass":
         large = nan_gaussian_lowpass(
             field, lon, lat, large_km, zonal_scale_mode,
             meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+            convolution_engine=convolution_engine,
+            plan=(filter_plans or {}).get("large"),
         )
         out = np.asarray(field, dtype="f4") - large
         out[~np.isfinite(field) | ~np.isfinite(large)] = np.nan
@@ -476,10 +723,14 @@ def horizontal_scale_filter(
     small = nan_gaussian_lowpass(
         field, lon, lat, small_km, zonal_scale_mode,
         meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+        convolution_engine=convolution_engine,
+        plan=(filter_plans or {}).get("small"),
     )
     large = nan_gaussian_lowpass(
         field, lon, lat, large_km, zonal_scale_mode,
         meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+        convolution_engine=convolution_engine,
+        plan=(filter_plans or {}).get("large"),
     )
     out = small - large
     out[~np.isfinite(small) | ~np.isfinite(large)] = np.nan
@@ -495,6 +746,11 @@ def nan_gaussian_lowpass(
     meridional_scale_mode: str = "median",
     min_valid_weight_fraction: float = 0.0,
     spatial_kernel: str = "gaussian",
+    *,
+    convolution_engine: str = "fft",
+    plan: SeparableFFTLowpassPlan | None = None,
+    denominator: np.ndarray | None = None,
+    return_denominator: bool = False,
 ) -> np.ndarray:
     if not 0.0 <= min_valid_weight_fraction < 1.0:
         raise ValueError("min_valid_weight_fraction must be in [0, 1)")
@@ -502,6 +758,20 @@ def nan_gaussian_lowpass(
     finite = np.isfinite(arr)
     values = np.where(finite, arr, 0.0)
     weights = finite.astype("f8")
+
+    if convolution_engine == "fft" and meridional_scale_mode == "median":
+        fft_plan = plan or SeparableFFTLowpassPlan(
+            lon, lat, fwhm_km, zonal_scale_mode, meridional_scale_mode, spatial_kernel
+        )
+        out_num = fft_plan.convolve(values)
+        out_den = denominator if denominator is not None else fft_plan.convolve(weights)
+        valid = out_den > max(1.0e-6, min_valid_weight_fraction)
+        result = np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=valid)
+        if return_denominator:
+            return result, out_den
+        return result
+    if convolution_engine not in {"direct", "fft"}:
+        raise ValueError(f"Unsupported convolution_engine {convolution_engine!r}")
 
     dlat = float(np.nanmedian(np.diff(lat)))
     dlon = float(np.nanmedian(np.diff(lon)))
@@ -538,7 +808,62 @@ def nan_gaussian_lowpass(
         out_den[j, :] = convolve_axis(weights[j, :], kernel, axis=0, mode="wrap")
 
     valid = out_den > max(1.0e-6, min_valid_weight_fraction)
-    return np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=valid)
+    result = np.divide(out_num, out_den, out=np.full_like(out_num, np.nan), where=valid)
+    if return_denominator:
+        return result, out_den
+    return result
+
+
+def horizontal_scale_filter_pair(
+    u: np.ndarray,
+    v: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    small_km: float | np.ndarray,
+    large_km: float | np.ndarray,
+    filter_mode: str,
+    zonal_scale_mode: str,
+    meridional_scale_mode: str,
+    min_valid_weight_fraction: float,
+    spatial_kernel: str,
+    convolution_engine: str,
+    filter_plans: dict[str, SeparableFFTLowpassPlan] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Filter a velocity pair while sharing the land-mask denominator."""
+    if filter_mode != "highpass" or convolution_engine != "fft" or meridional_scale_mode != "median":
+        return (
+            horizontal_scale_filter(
+                u, lon, lat, small_km, large_km, filter_mode, zonal_scale_mode,
+                meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+                convolution_engine, filter_plans,
+            ),
+            horizontal_scale_filter(
+                v, lon, lat, small_km, large_km, filter_mode, zonal_scale_mode,
+                meridional_scale_mode, min_valid_weight_fraction, spatial_kernel,
+                convolution_engine, filter_plans,
+            ),
+        )
+    plan = (filter_plans or {}).get("large")
+    if plan is None:
+        plan = SeparableFFTLowpassPlan(
+            lon, lat, large_km, zonal_scale_mode, meridional_scale_mode, spatial_kernel
+        )
+    low_u, denominator_u = nan_gaussian_lowpass(
+        u, lon, lat, large_km, zonal_scale_mode, meridional_scale_mode,
+        min_valid_weight_fraction, spatial_kernel, convolution_engine="fft",
+        plan=plan, return_denominator=True,
+    )
+    shared = denominator_u if np.array_equal(np.isfinite(u), np.isfinite(v)) else None
+    low_v = nan_gaussian_lowpass(
+        v, lon, lat, large_km, zonal_scale_mode, meridional_scale_mode,
+        min_valid_weight_fraction, spatial_kernel, convolution_engine="fft",
+        plan=plan, denominator=shared,
+    )
+    out_u = np.asarray(u, dtype="f4") - low_u
+    out_v = np.asarray(v, dtype="f4") - low_v
+    out_u[~np.isfinite(u) | ~np.isfinite(low_u)] = np.nan
+    out_v[~np.isfinite(v) | ~np.isfinite(low_v)] = np.nan
+    return out_u.astype("f4"), out_v.astype("f4")
 
 
 def convolve_axis(values: np.ndarray, kernel: np.ndarray, *, axis: int, mode: str) -> np.ndarray:
@@ -725,8 +1050,8 @@ def write_daily_netcdf(
     lat: np.ndarray,
     depth: np.ndarray,
     ssh: np.ndarray,
-    u: np.ndarray,
-    v: np.ndarray,
+    u: np.ndarray | None,
+    v: np.ndarray | None,
     attrs: dict[str, str],
     window_days: list[date],
     temporal_window_days: int,
@@ -749,6 +1074,9 @@ def write_daily_netcdf(
     meridional_scale_mode: str,
     min_valid_weight_fraction: float,
     science_tag: str,
+    velocity_layers=None,
+    compression_level: int = 1,
+    convolution_engine: str = "direct",
 ) -> None:
     with Dataset(path, "w", format="NETCDF4") as ds:
         ds.createDimension("time", 1)
@@ -760,9 +1088,20 @@ def write_daily_netcdf(
         depth_var = ds.createVariable("depth", "f4", ("depth",))
         lat_var = ds.createVariable("latitude", "f4", ("latitude",))
         lon_var = ds.createVariable("longitude", "f4", ("longitude",))
-        zos = ds.createVariable("zos_glor", "f4", ("time", "latitude", "longitude"), zlib=True, complevel=3)
-        uo = ds.createVariable("uo_glor", "f4", ("time", "depth", "latitude", "longitude"), zlib=True, complevel=3)
-        vo = ds.createVariable("vo_glor", "f4", ("time", "depth", "latitude", "longitude"), zlib=True, complevel=3)
+        surface_chunks = (1, min(190, len(lat)), min(450, len(lon)))
+        velocity_chunks = (1, 1, min(190, len(lat)), min(450, len(lon)))
+        zos = ds.createVariable(
+            "zos_glor", "f4", ("time", "latitude", "longitude"), zlib=True,
+            complevel=compression_level, shuffle=True, chunksizes=surface_chunks,
+        )
+        uo = ds.createVariable(
+            "uo_glor", "f4", ("time", "depth", "latitude", "longitude"), zlib=True,
+            complevel=compression_level, shuffle=True, chunksizes=velocity_chunks,
+        )
+        vo = ds.createVariable(
+            "vo_glor", "f4", ("time", "depth", "latitude", "longitude"), zlib=True,
+            complevel=compression_level, shuffle=True, chunksizes=velocity_chunks,
+        )
 
         time_var.units = attrs.get("time_units", f"days since {target_day.year:04d}-01-01 00:00:00")
         time_var.calendar = attrs.get("time_calendar", "standard")
@@ -779,6 +1118,7 @@ def write_daily_netcdf(
         ds.source = "Detection_for_OFES.tools.build_ofes_meso_filter"
         ds.science_tag = science_tag
         for attr in [
+            "ssh_definition",
             "baseline_definition",
             "baseline_formula",
             "annual_mss_path",
@@ -799,6 +1139,9 @@ def write_daily_netcdf(
         ds.zonal_scale_mode = zonal_scale_mode
         ds.meridional_scale_mode = meridional_scale_mode
         ds.min_valid_weight_fraction = float(min_valid_weight_fraction)
+        ds.convolution_engine = convolution_engine
+        ds.convolution_equivalence = "same discrete kernel weights and boundary modes; FFT changes operation order only"
+        ds.netcdf_compression_level = int(compression_level)
         if large_cutoff_mode == "rossby_radius":
             if filter_mode == "highpass":
                 ds.horizontal_filter = (
@@ -870,11 +1213,22 @@ def write_daily_netcdf(
         lat_var[:] = lat
         lon_var[:] = lon
         zos[0, :, :] = ssh
-        # `u`/`v` can be disk-backed memmaps for full-depth exports.  Write
-        # one layer at a time so NetCDF never requests a materialized 3-D copy.
-        for depth_index in range(len(depth)):
-            uo[0, depth_index, :, :] = u[depth_index]
-            vo[0, depth_index, :, :] = v[depth_index]
+        if velocity_layers is not None:
+            written_layers = 0
+            for depth_index, (u_layer, v_layer) in enumerate(velocity_layers):
+                if depth_index >= len(depth):
+                    raise ValueError("velocity layer iterator produced too many layers")
+                uo[0, depth_index, :, :] = u_layer
+                vo[0, depth_index, :, :] = v_layer
+                written_layers += 1
+            if written_layers != len(depth):
+                raise ValueError("velocity layer iterator produced too few layers")
+        else:
+            if u is None or v is None:
+                raise ValueError("u/v arrays or velocity_layers are required")
+            for depth_index in range(len(depth)):
+                uo[0, depth_index, :, :] = u[depth_index]
+                vo[0, depth_index, :, :] = v[depth_index]
 
 
 def available_running_window(target: date, window_days: int, available_start: date, available_end: date) -> list[date]:

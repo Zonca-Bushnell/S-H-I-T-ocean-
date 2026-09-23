@@ -14,9 +14,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from netCDF4 import Dataset
+from scipy.ndimage import map_coordinates
 
 from Origin_eddy_detection.src.eddy_pipeline.detection_hybrid import (
     DetectionParams,
+    EARTH_RADIUS_M,
     _grid_spacing_km,
     _hua_verify_radius,
     _object_voxels_for_layer,
@@ -48,8 +50,13 @@ def day_path(root: Path, day: date) -> Path:
 
 def write_table(frame: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(path.with_suffix(".parquet"), index=False)
     frame.to_csv(path.with_suffix(".csv"), index=False)
+    # CSV is the portable primary artifact.  Some Windows hosts block native
+    # Parquet DLLs even though the numerical NetCDF stack is available.
+    try:
+        frame.to_parquet(path.with_suffix(".parquet"), index=False)
+    except (ImportError, OSError):
+        pass
 
 
 def params_from_args(args: argparse.Namespace) -> DetectionParams:
@@ -62,25 +69,147 @@ def params_from_args(args: argparse.Namespace) -> DetectionParams:
         deep_search_cells=int(args.deep_search_cells),
         start_radius_cells=int(args.start_radius_cells),
         max_radius_cells=int(args.max_radius_cells),
-        speed_ratio_max=3.0,
-        angle_jump_max_deg=150.0,
-        tangent_tolerance_deg=24.0,
+        speed_ratio_max=float(args.deep_speed_ratio_max),
+        angle_jump_max_deg=float(args.deep_angle_jump_max_deg),
+        tangent_tolerance_deg=float(args.deep_tangent_tolerance_deg),
         symmetry_tolerance_deg=120.0,
-        min_tangent_fraction=0.70,
-        min_reversal_fraction=0.70,
+        min_tangent_fraction=float(args.deep_min_tangent_fraction),
+        min_reversal_fraction=float(args.deep_min_reversal_fraction),
         min_finite_fraction=0.95,
         direction_exception_extra=0,
+        enforce_velocity_ratio_hard_gate=bool(args.enforce_velocity_ratio_hard_gate),
+        enforce_tangent_alignment_hard_gate=bool(args.enforce_tangent_alignment_hard_gate),
+        enforce_angle_jump_hard_gate=not bool(args.disable_angle_jump_hard_gate),
+        direction_exception_multiplier=float(args.direction_exception_multiplier),
+        enforce_direction_exception_hard_gate=not bool(args.disable_direction_exception_hard_gate),
+        enforce_opposite_reversal_hard_gate=not bool(args.disable_opposite_reversal_hard_gate),
+        deep_hua_mode=str(getattr(args, "deep_hua_mode", "minimal_finite_only")),
         boundary_mode="ssh_primary_open_ocean_no_streamline_gate",
     )
 
 
-def surface_rows(root: Path, day: date) -> pd.DataFrame:
-    path = day_path(root, day)
+def select_deep_center(
+    speed: np.ndarray,
+    anchor_i: int,
+    anchor_j: int,
+    args: argparse.Namespace,
+    *,
+    u: np.ndarray | None = None,
+    v: np.ndarray | None = None,
+    previous_i: int | None = None,
+    previous_j: int | None = None,
+    radius_cells: float = np.nan,
+    dx_km: float = np.nan,
+    dy_km: float = np.nan,
+    lat: np.ndarray | None = None,
+    lon_step_deg: float = np.nan,
+) -> tuple[int, int, float, int, int, float, int]:
+    """Choose a deep speed minimum without silently changing the Hua test.
+
+    ``global_disk_min`` preserves the historical search: the lowest speed in
+    the complete deep-search disk wins.  ``local_step_min`` instead follows a
+    local minimum branch from the previous accepted center.  It is intended
+    for a layer-to-layer continuation test, where a weak, nearly equal speed
+    minimum at the far edge of the six-cell disk must not cause a one-layer
+    branch hop.
+    """
+    if args.deep_center_selection == "global_disk_min":
+        radius = int(args.deep_search_cells)
+    else:
+        radius = min(int(args.deep_search_cells), int(args.deep_center_step_cells))
+    center_i, center_j, center_speed, steps = _seeded_speed_min(speed, anchor_i, anchor_j, radius)
+    if args.deep_center_selection != "local_step_section_bipolar":
+        return center_i, center_j, center_speed, steps, radius, np.nan, 0
+
+    # The trajectory-axis section can only break a tie after the path has a
+    # resolved direction.  It never expands the local speed-minimum search.
+    if (
+        u is None or v is None or previous_i is None or previous_j is None
+        or not np.isfinite(radius_cells) or radius_cells <= 0.0
+        or not np.isfinite(dx_km) or not np.isfinite(dy_km)
+    ):
+        return center_i, center_j, center_speed, steps, radius, np.nan, 0
+    local_dx_km = float(dx_km)
+    if lat is not None and np.isfinite(lon_step_deg):
+        local_cosine = max(abs(float(np.cos(np.deg2rad(lat[anchor_j])))), 0.05)
+        local_dx_km = abs(float(np.deg2rad(lon_step_deg)) * EARTH_RADIUS_M * local_cosine / 1000.0)
+    tx = (anchor_i - previous_i) * local_dx_km
+    ty = (anchor_j - previous_j) * dy_km
+    axis_norm = float(np.hypot(tx, ty))
+    if axis_norm < float(args.deep_center_min_axis_km):
+        return center_i, center_j, center_speed, steps, radius, np.nan, 0
+    tx /= axis_norm
+    ty /= axis_norm
+    nx, ny = -ty, tx
+
+    i0 = max(1, anchor_i - radius)
+    i1 = min(speed.shape[1] - 2, anchor_i + radius)
+    j0 = max(1, anchor_j - radius)
+    j1 = min(speed.shape[0] - 2, anchor_j + radius)
+    candidates: list[tuple[int, int, float]] = []
+    speed_limit = float(center_speed) * (1.0 + float(args.deep_center_speed_tolerance))
+    for candidate_j in range(j0, j1 + 1):
+        for candidate_i in range(i0, i1 + 1):
+            if (candidate_i - anchor_i) ** 2 + (candidate_j - anchor_j) ** 2 > radius ** 2:
+                continue
+            candidate_speed = float(speed[candidate_j, candidate_i])
+            if not np.isfinite(candidate_speed) or candidate_speed > speed_limit:
+                continue
+            neighborhood = speed[candidate_j - 1:candidate_j + 2, candidate_i - 1:candidate_i + 2]
+            if candidate_speed <= float(np.nanmin(neighborhood)):
+                candidates.append((candidate_i, candidate_j, candidate_speed))
+    if not candidates:
+        return center_i, center_j, center_speed, steps, radius, np.nan, 0
+
+    def bipolar_score(candidate_i: int, candidate_j: int) -> int:
+        score = 0
+        for factor in (0.6, 1.0):
+            distance_km = max(2.0, factor * float(radius_cells) * 0.5 * (local_dx_km + dy_km))
+            plus_i = candidate_i + nx * distance_km / local_dx_km
+            plus_j = candidate_j + ny * distance_km / dy_km
+            minus_i = candidate_i - nx * distance_km / dx_km
+            minus_j = candidate_j - ny * distance_km / dy_km
+            up = float(map_coordinates(u, [[plus_j], [plus_i]], order=1, mode="nearest", prefilter=False)[0])
+            vp = float(map_coordinates(v, [[plus_j], [plus_i]], order=1, mode="nearest", prefilter=False)[0])
+            um = float(map_coordinates(u, [[minus_j], [minus_i]], order=1, mode="nearest", prefilter=False)[0])
+            vm = float(map_coordinates(v, [[minus_j], [minus_i]], order=1, mode="nearest", prefilter=False)[0])
+            plus_axis = up * tx + vp * ty
+            minus_axis = um * tx + vm * ty
+            if np.isfinite(plus_axis) and np.isfinite(minus_axis) and plus_axis * minus_axis < 0.0:
+                score += 1
+        return score
+
+    ranked = [
+        (bipolar_score(candidate_i, candidate_j), candidate_speed,
+         float(np.hypot(candidate_i - anchor_i, candidate_j - anchor_j)), candidate_i, candidate_j)
+        for candidate_i, candidate_j, candidate_speed in candidates
+    ]
+    # Highest physically coherent section score wins; speed and displacement
+    # resolve only ties between locally valid speed minima.
+    score, chosen_speed, _, center_i, center_j = min(ranked, key=lambda item: (-item[0], item[1], item[2]))
+    return center_i, center_j, chosen_speed, steps, radius, float(score), len(candidates)
+
+
+def _as_bool(series: pd.Series) -> pd.Series:
+    """Read boolean CSV fields without treating the string 'False' as true."""
+    if series.dtype == bool:
+        return series.fillna(False)
+    return series.fillna(False).astype(str).str.strip().str.lower().isin(("1", "true", "yes"))
+
+
+def surface_rows(root: Path, day: date, surface_table: Path | None = None) -> pd.DataFrame:
+    """Return source surface objects from a final catalog or an explicit QC table."""
+    path = surface_table if surface_table is not None else day_path(root, day)
     if not path.exists():
         raise FileNotFoundError(path)
     rows = pd.read_csv(path)
-    rows = rows[rows.get("hua_pass", pd.Series(False, index=rows.index)).fillna(False).astype(bool)].copy()
-    if "persistence_class" in rows:
+    if surface_table is not None:
+        if "qc_pass" not in rows:
+            raise ValueError(f"Explicit surface table has no qc_pass column: {path}")
+        rows = rows[_as_bool(rows["qc_pass"])].copy()
+    else:
+        rows = rows[_as_bool(rows.get("hua_pass", pd.Series(False, index=rows.index)))].copy()
+    if surface_table is None and "persistence_class" in rows:
         rows = rows[~rows["persistence_class"].astype(str).eq("transient")].copy()
     return rows.reset_index(drop=True)
 
@@ -101,14 +230,14 @@ def row_center_j(row: pd.Series) -> int:
     raise ValueError(f"Missing center j for {row.get('hua_object_id')}")
 
 
-def make_surface_record(row: pd.Series, *, day: date) -> dict[str, object]:
+def make_surface_record(row: pd.Series, *, day: date, source_label: str) -> dict[str, object]:
     out = row.to_dict()
     out.update(
         {
             "date": day.isoformat(),
             "depth_index": 0,
             "depth_m": float(row.get("depth_m", 2.5)),
-            "vertical_extension_source": "final_surface_catalog",
+            "vertical_extension_source": source_label,
             "vertical_extension_algorithm": "existing_hua_depth_continuation",
             "vertical_extension_stop_reason": "",
             "hua_pass": True,
@@ -118,7 +247,9 @@ def make_surface_record(row: pd.Series, *, day: date) -> dict[str, object]:
 
 
 def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
-    source = surface_rows(args.surface_root, day)
+    source_table = getattr(args, "surface_table", None)
+    source = surface_rows(args.surface_root, day, source_table)
+    source_label = "qc_surface_table" if source_table is not None else "final_surface_catalog"
     if int(args.max_surface_objects) > 0:
         source = source.sort_values(["hua_object_id"]).head(int(args.max_surface_objects)).copy()
     out_dir = args.output_root / "raw_detection" / "daily_runs" / f"{day:%Y%m%d}"
@@ -129,7 +260,9 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
         raise FileNotFoundError(input_path)
 
     params = params_from_args(args)
-    centers: list[dict[str, object]] = [make_surface_record(row, day=day) for _, row in source.iterrows()]
+    centers: list[dict[str, object]] = [
+        make_surface_record(row, day=day, source_label=source_label) for _, row in source.iterrows()
+    ]
     structures: list[dict[str, object]] = []
     voxels: list[dict[str, object]] = []
     states: list[dict[str, object]] = []
@@ -166,7 +299,10 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                         polarity=str(row.get("polarity", "")),
                     )
                 )
-            states.append({"row": row, "object_id": object_id, "prev_i": ci, "prev_j": cj})
+            states.append({
+                "row": row, "object_id": object_id, "prev_i": ci, "prev_j": cj,
+                "prev_prev_i": None, "prev_prev_j": None, "prev_radius_cells": radius,
+            })
 
         active = states
         for depth_index in range(1, max_layers):
@@ -178,8 +314,12 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
             next_active: list[dict[str, object]] = []
             for state in active:
                 source_row = state["row"]
-                center_i, center_j, center_speed, min_steps = _seeded_speed_min(
-                    speed, int(state["prev_i"]), int(state["prev_j"]), params.deep_search_cells
+                anchor_i, anchor_j = int(state["prev_i"]), int(state["prev_j"])
+                center_i, center_j, center_speed, min_steps, search_radius, section_score, section_candidates = select_deep_center(
+                    speed, anchor_i, anchor_j, args,
+                    u=u, v=v, previous_i=state["prev_prev_i"], previous_j=state["prev_prev_j"],
+                    radius_cells=float(state["prev_radius_cells"]), dx_km=float(dx_km), dy_km=float(dy_km),
+                    lat=lat, lon_step_deg=float(np.nanmedian(np.abs(np.diff(lon)))),
                 )
                 refined = _refine_speed_min_subgrid(
                     speed, u, v, lon, lat, center_i, center_j,
@@ -207,7 +347,17 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                         "center_speed_grid_ms": float(center_speed), "refined_ok": bool(refined["refined_ok"]),
                         "refined_offset_km": float(refined["refined_offset_km"]),
                         "subgrid_fit_quality": str(refined["subgrid_fit_quality"]), "local_min_steps": int(min_steps),
-                        "vertical_extension_source": "final_surface_catalog",
+                        "deep_center_selection": str(args.deep_center_selection),
+                        "deep_center_search_radius_cells": int(search_radius),
+                        "deep_center_anchor_i": int(anchor_i), "deep_center_anchor_j": int(anchor_j),
+                        "deep_center_section_bipolar_score": float(section_score),
+                        "deep_center_section_candidate_count": int(section_candidates),
+                        "deep_center_grid_step_cells": float(np.hypot(center_i - anchor_i, center_j - anchor_j)),
+                        "deep_center_refined_step_cells": float(np.hypot(
+                            float(refined["center_i_refined"]) - anchor_i,
+                            float(refined["center_j_refined"]) - anchor_j,
+                        )),
+                        "vertical_extension_source": source_label,
                         "vertical_extension_algorithm": "existing_hua_depth_continuation",
                         "vertical_extension_stop_reason": "" if passed else str(check.get("first_hard_failure", "hua_failed")),
                     }
@@ -229,8 +379,10 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                     depth_index=int(depth_index), center_i=center_i, center_j=center_j, radius_cells=radius,
                     polarity=str(source_row.get("polarity", "")),
                 ))
+                state["prev_prev_i"], state["prev_prev_j"] = anchor_i, anchor_j
                 state["prev_i"] = int(np.clip(round(float(refined["center_i_refined"])), 0, len(lon) - 1))
                 state["prev_j"] = int(np.clip(round(float(refined["center_j_refined"])), 0, len(lat) - 1))
+                state["prev_radius_cells"] = radius
                 next_active.append(state)
             active = next_active
             print(f"[vertical] {day.isoformat()} depth={depth_index}/{max_layers - 1} active={len(active)}", flush=True)
@@ -242,26 +394,96 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
     write_table(structures_df, out_dir / "structures_hua_style")
     voxel_path = args.output_root / "raw_detection" / "object_voxels_parts" / f"year={day.year}" / f"date={day:%Y%m%d}.parquet"
     voxel_path.parent.mkdir(parents=True, exist_ok=True)
-    voxels_df.to_parquet(voxel_path, index=False)
+    try:
+        voxels_df.to_parquet(voxel_path, index=False)
+    except (ImportError, OSError):
+        voxels_df.to_csv(voxel_path.with_suffix(".csv.gz"), index=False, compression="gzip")
     summary = {
         "day": day.isoformat(), "surface_objects": int(len(source)), "center_rows": int(len(centers_df)),
         "passed_rows": int(centers_df["hua_pass"].fillna(False).astype(bool).sum()), "voxels": int(len(voxels_df)),
         "algorithm": "depth_major_existing_hua", "max_depth_layers": int(args.max_depth_layers),
+        "enforce_velocity_ratio_hard_gate": bool(args.enforce_velocity_ratio_hard_gate),
+        "enforce_tangent_alignment_hard_gate": bool(args.enforce_tangent_alignment_hard_gate),
+        "enforce_angle_jump_hard_gate": not bool(args.disable_angle_jump_hard_gate),
+        "direction_exception_multiplier": float(args.direction_exception_multiplier),
+        "enforce_direction_exception_hard_gate": not bool(args.disable_direction_exception_hard_gate),
+        "enforce_opposite_reversal_hard_gate": not bool(args.disable_opposite_reversal_hard_gate),
+        "deep_hua_mode": str(getattr(args, "deep_hua_mode", "minimal_finite_only")),
+        "deep_center_selection": str(args.deep_center_selection),
+        "deep_center_step_cells": int(args.deep_center_step_cells),
+        "deep_center_speed_tolerance": float(args.deep_center_speed_tolerance),
+        "deep_center_min_axis_km": float(args.deep_center_min_axis_km),
+        "deep_search_cells": int(args.deep_search_cells),
+        "surface_input": str(source_table) if source_table is not None else str(day_path(args.surface_root, day)),
+        "surface_selection": "qc_pass=True" if source_table is not None else "hua_pass=True and non-transient",
     }
     (out_dir / "vertical_extension_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Depth-major Hua continuation from the final OFES surface catalog.")
+    parser = argparse.ArgumentParser(description="Depth-major Hua continuation from a final catalog or explicit QC surface table.")
     parser.add_argument("--surface-root", type=Path, default=DEFAULT_SURFACE_ROOT)
+    parser.add_argument(
+        "--surface-table", type=Path,
+        help="Explicit centers_hua_style.csv source. Selects qc_pass=True and does not apply persistence filtering.",
+    )
     parser.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--day", required=True)
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--deep-search-cells", type=int, default=6)
+    parser.add_argument(
+        "--deep-center-selection", choices=["global_disk_min", "local_step_min", "local_step_section_bipolar"], default="local_step_min",
+        help="Deep center path: bounded local continuation step (default), local section-bipolar tie-break, or historical full-disk minimum.",
+    )
+    parser.add_argument(
+        "--deep-center-step-cells", type=int, default=2,
+        help="Maximum per-layer local minimum search radius for --deep-center-selection local_step_min.",
+    )
+    parser.add_argument(
+        "--deep-center-speed-tolerance", type=float, default=0.20,
+        help="For local_step_section_bipolar, compare only local minima within this relative speed of the local minimum.",
+    )
+    parser.add_argument(
+        "--deep-center-min-axis-km", type=float, default=1.0,
+        help="For local_step_section_bipolar, minimum previous-layer displacement required to define a section axis.",
+    )
     parser.add_argument("--start-radius-cells", type=int, default=2)
     parser.add_argument("--max-radius-cells", type=int, default=12)
+    parser.add_argument("--deep-speed-ratio-max", type=float, default=3.0)
+    parser.add_argument("--deep-angle-jump-max-deg", type=float, default=150.0)
+    parser.add_argument("--deep-tangent-tolerance-deg", type=float, default=24.0)
+    parser.add_argument("--deep-min-tangent-fraction", type=float, default=0.70)
+    parser.add_argument("--deep-min-reversal-fraction", type=float, default=0.70)
+    parser.add_argument(
+        "--enforce-velocity-ratio-hard-gate", action="store_true",
+        help="Keep the velocity-ratio threshold as a hard deep Hua rejection. Disabled by default.",
+    )
+    parser.add_argument(
+        "--enforce-tangent-alignment-hard-gate", action="store_true",
+        help="Keep the tangent-alignment threshold as a hard deep Hua rejection. Disabled by default.",
+    )
+    parser.add_argument(
+        "--direction-exception-multiplier", type=float, default=1.0,
+        help="Multiplier applied to floor(radius_cells/5)+1 before the direction-exception hard gate.",
+    )
+    parser.add_argument(
+        "--disable-angle-jump-hard-gate", action="store_true",
+        help="Retain angle-jump diagnostics but never reject a deep layer for them.",
+    )
+    parser.add_argument(
+        "--disable-direction-exception-hard-gate", action="store_true",
+        help="Retain direction-exception diagnostics but never reject a deep layer for them.",
+    )
+    parser.add_argument(
+        "--disable-opposite-reversal-hard-gate", action="store_true",
+        help="Retain opposite-reversal diagnostics but never reject a deep layer for them.",
+    )
+    parser.add_argument(
+        "--deep-hua-mode", choices=["full", "minimal_reversal_only", "minimal_finite_only"], default="minimal_finite_only",
+        help="Deep-only Hua validation kernel; the default retains only finite-velocity coverage.",
+    )
     parser.add_argument("--max-surface-objects", type=int, default=0, help="Smoke-only cap; <=0 keeps every final surface object.")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()

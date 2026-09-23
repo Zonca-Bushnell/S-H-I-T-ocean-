@@ -438,18 +438,24 @@ def read_variable_latlon_daily_only(
 
 
 def read_ssh(root: str | Path, day: date | str, cache_root: str | Path | None = None) -> np.ndarray:
-    eta = read_variable(root, "eta", day, cache_root=cache_root)
-    pressur = read_variable(root, "pressur", day, cache_root=cache_root)
-    return eta - (pressur - 1000.0)
+    """Return OFES model free-surface height from ``eta``.
+
+    ``eta`` already represents the model free surface.  It must not receive a
+    second atmospheric-pressure subtraction in production processing.
+    """
+    return read_variable(root, "eta", day, cache_root=cache_root)
 
 
 def read_ssh_latlon(root: str | Path, day: date | str, cache_root: str | Path | None = None) -> np.ndarray:
-    eta = read_variable_latlon(root, "eta", day, cache_root=cache_root)
-    pressur = read_variable_latlon(root, "pressur", day, cache_root=cache_root)
-    return eta - (pressur - 1000.0)
+    return read_variable_latlon(root, "eta", day, cache_root=cache_root)
 
 
 def read_ssh_latlon_daily_only(root: str | Path, day: date | str) -> np.ndarray:
+    return read_variable_latlon_daily_only(root, "eta", day)
+
+
+def read_historical_pressure_adjusted_ssh_latlon_daily_only(root: str | Path, day: date | str) -> np.ndarray:
+    """Return the deprecated eta-pressure diagnostic field for old figures only."""
     eta = read_variable_latlon_daily_only(root, "eta", day)
     pressur = read_variable_latlon_daily_only(root, "pressur", day)
     return eta - (pressur - 1000.0)

@@ -208,6 +208,7 @@ HARD_FAILURE_ORDER = (
     (0, "invalid_velocity"),
     (1, "velocity_ratio"),
     (2, "angle_jump"),
+    (4, "too_many_direction_exceptions"),
     (9, "boundary_monotonic_rotation"),
     (7, "tangent_alignment"),
     (8, "opposite_reversal"),
@@ -238,6 +239,13 @@ class DetectionParams:
     direction_exception_extra: int
     surface_search_cells: int
     deep_search_cells: int
+    enforce_velocity_ratio_hard_gate: bool = True
+    enforce_tangent_alignment_hard_gate: bool = True
+    enforce_angle_jump_hard_gate: bool = True
+    direction_exception_multiplier: float = 1.0
+    enforce_direction_exception_hard_gate: bool = True
+    enforce_opposite_reversal_hard_gate: bool = True
+    deep_hua_mode: str = "full"
     require_boundary_monotonic_rotation: bool = False
     boundary_monotonic_exception_limit: int = 0
     boundary_mode: str = "ssh_primary_velocity_streamline_effective"
@@ -966,7 +974,17 @@ def _angle_diff(a: np.ndarray | float, b: np.ndarray | float) -> np.ndarray | fl
     return (np.asarray(a) - np.asarray(b) + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def _iterative_speed_min(speed: np.ndarray, start_i: int, start_j: int, *, max_steps: int = 40) -> tuple[int, int, float, int]:
+def _iterative_speed_min(
+    speed: np.ndarray,
+    start_i: int,
+    start_j: int,
+    *,
+    max_steps: int = 40,
+    anchor_i: int | None = None,
+    anchor_j: int | None = None,
+    max_radius_cells: int | None = None,
+) -> tuple[int, int, float, int]:
+    """Descend to a local speed minimum without leaving an optional seed disk."""
     ii = int(np.clip(start_i, 0, speed.shape[1] - 1))
     jj = int(np.clip(start_j, 0, speed.shape[0] - 1))
     last = (-1, -1)
@@ -975,10 +993,14 @@ def _iterative_speed_min(speed: np.ndarray, start_i: int, start_j: int, *, max_s
         last = (ii, jj)
         x0, x1 = max(0, ii - 2), min(speed.shape[1], ii + 3)
         y0, y1 = max(0, jj - 2), min(speed.shape[0], jj + 3)
-        window = speed[y0:y1, x0:x1]
-        if not np.isfinite(window).any():
+        window = np.asarray(speed[y0:y1, x0:x1], dtype="float64")
+        valid = np.isfinite(window)
+        if anchor_i is not None and anchor_j is not None and max_radius_cells is not None:
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            valid &= (xx - int(anchor_i)) ** 2 + (yy - int(anchor_j)) ** 2 <= int(max_radius_cells) ** 2
+        if not np.any(valid):
             break
-        local = int(np.nanargmin(window))
+        local = int(np.nanargmin(np.where(valid, window, np.nan)))
         wy, wx = np.unravel_index(local, window.shape)
         ii = x0 + wx
         jj = y0 + wy
@@ -994,19 +1016,28 @@ def _seeded_speed_min(speed: np.ndarray, seed_i: int, seed_j: int, radius_cells:
     y0 = max(0, int(seed_j) - radius)
     y1 = min(speed.shape[0] - 1, int(seed_j) + radius)
     if x1 < x0 or y1 < y0:
-        return _iterative_speed_min(speed, seed_i, seed_j)
+        value = float(speed[seed_j, seed_i]) if np.isfinite(speed[seed_j, seed_i]) else np.nan
+        return int(seed_i), int(seed_j), value, 0
     window = speed[y0 : y1 + 1, x0 : x1 + 1]
     yy, xx = np.ogrid[y0 : y1 + 1, x0 : x1 + 1]
     mask = (xx - int(seed_i)) ** 2 + (yy - int(seed_j)) ** 2 <= radius**2
     mask &= np.isfinite(window)
     if not np.any(mask):
-        return _iterative_speed_min(speed, seed_i, seed_j)
+        value = float(speed[seed_j, seed_i]) if np.isfinite(speed[seed_j, seed_i]) else np.nan
+        return int(seed_i), int(seed_j), value, 0
     flat = np.where(mask.ravel())[0]
     pick = int(flat[np.nanargmin(window.ravel()[flat])])
     local_j, local_i = np.unravel_index(pick, window.shape)
     ii = x0 + int(local_i)
     jj = y0 + int(local_j)
-    return _iterative_speed_min(speed, int(ii), int(jj))
+    return _iterative_speed_min(
+        speed,
+        int(ii),
+        int(jj),
+        anchor_i=int(seed_i),
+        anchor_j=int(seed_j),
+        max_radius_cells=radius,
+    )
 
 
 def _fill_nearest_finite(field: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1227,38 +1258,47 @@ def _circle_check(
     sp = np.hypot(uu, vv)
     finite = np.isfinite(sp) & (sp > 1e-10)
     failure_counts = {k: 0 for k in FAILURE_LABELS}
-    if finite.mean() < params.min_finite_fraction:
+    minimal_reversal_only = params.deep_hua_mode == "minimal_reversal_only"
+    minimal_finite_only = params.deep_hua_mode == "minimal_finite_only"
+    minimal_speed_kernel = minimal_reversal_only or minimal_finite_only
+    finite_failed = finite.mean() < params.min_finite_fraction
+    if finite_failed:
         failure_counts[0] += int((~finite).sum())
 
-    angles = np.arctan2(vv, uu)
+    angles = None if minimal_speed_kernel else np.arctan2(vv, uu)
     angle_diffs: list[float] = []
     max_ratio = 0.0
     max_angle = 0.0
     positive_diffs = 0
     negative_diffs = 0
-    rotation_failed = False
+    rotation_failed = finite_failed
     for n in range(len(offsets)):
         m = (n + 1) % len(offsets)
         if not (finite[n] and finite[m]):
-            rotation_failed = True
+            if not minimal_speed_kernel:
+                rotation_failed = True
             failure_counts[0] += 1
             continue
-        ratio = float(sp[m] / sp[n])
-        max_ratio = max(max_ratio, ratio, 1.0 / ratio if ratio > 0 else np.inf)
-        if ratio > params.speed_ratio_max or ratio < 1.0 / params.speed_ratio_max:
-            rotation_failed = True
-            failure_counts[1] += 1
-        dtheta = float(_angle_diff(angles[n], angles[m]))
-        angle_diffs.append(dtheta)
-        max_angle = max(max_angle, abs(math.degrees(dtheta)))
-        if abs(math.degrees(dtheta)) > params.angle_jump_max_deg:
-            rotation_failed = True
-            failure_counts[2] += 1
-        if dtheta > 0:
-            positive_diffs += 1
-        elif dtheta < 0:
-            negative_diffs += 1
-    max_exceptions = int(math.floor(radius_cells / 5.0) + 1 + params.direction_exception_extra)
+        if not minimal_speed_kernel:
+            ratio = float(sp[m] / sp[n])
+            max_ratio = max(max_ratio, ratio, 1.0 / ratio if ratio > 0 else np.inf)
+            if ratio > params.speed_ratio_max or ratio < 1.0 / params.speed_ratio_max:
+                if params.enforce_velocity_ratio_hard_gate:
+                    rotation_failed = True
+                failure_counts[1] += 1
+            dtheta = float(_angle_diff(angles[n], angles[m]))
+            angle_diffs.append(dtheta)
+            max_angle = max(max_angle, abs(math.degrees(dtheta)))
+            if abs(math.degrees(dtheta)) > params.angle_jump_max_deg:
+                if params.enforce_angle_jump_hard_gate:
+                    rotation_failed = True
+                failure_counts[2] += 1
+            if dtheta > 0:
+                positive_diffs += 1
+            elif dtheta < 0:
+                negative_diffs += 1
+    base_exceptions = int(math.floor(radius_cells / 5.0) + 1)
+    max_exceptions = int(math.floor(base_exceptions * max(0.0, params.direction_exception_multiplier))) + params.direction_exception_extra
     direction_exceptions = min(positive_diffs, negative_diffs)
     monotonic_exception_limit = (
         int(params.boundary_monotonic_exception_limit)
@@ -1266,60 +1306,70 @@ def _circle_check(
         else max_exceptions
     )
     boundary_monotonic_passed = direction_exceptions <= monotonic_exception_limit
-    if direction_exceptions > max_exceptions:
-        rotation_failed = True
+    if not minimal_speed_kernel and direction_exceptions > max_exceptions:
+        if params.enforce_direction_exception_hard_gate:
+            rotation_failed = True
         failure_counts[4] += int(direction_exceptions - max_exceptions)
-    if params.require_boundary_monotonic_rotation and not boundary_monotonic_passed:
+    if not minimal_speed_kernel and params.require_boundary_monotonic_rotation and not boundary_monotonic_passed:
         rotation_failed = True
         failure_counts[9] += int(direction_exceptions - monotonic_exception_limit)
 
-    dx = np.asarray([p[0] for p in offsets], dtype="float64")
-    dy = np.asarray([p[1] for p in offsets], dtype="float64")
-    th = np.arctan2(dy, dx)
-    tx = -np.sin(th)
-    ty = np.cos(th)
-    tangent_cos = np.abs((uu * tx + vv * ty) / np.maximum(sp, 1e-12))
-    tangent_ok = finite & (tangent_cos >= math.cos(math.radians(params.tangent_tolerance_deg)))
-    tangent_fraction = float(tangent_ok.sum() / finite.sum()) if finite.any() else 0.0
-    if tangent_fraction < params.min_tangent_fraction:
-        rotation_failed = True
-        failure_counts[7] += int(max(1, round((params.min_tangent_fraction - tangent_fraction) * len(offsets))))
+    tangent_fraction = np.nan
+    if not minimal_speed_kernel:
+        dx = np.asarray([p[0] for p in offsets], dtype="float64")
+        dy = np.asarray([p[1] for p in offsets], dtype="float64")
+        th = np.arctan2(dy, dx)
+        tx = -np.sin(th)
+        ty = np.cos(th)
+        tangent_cos = np.abs((uu * tx + vv * ty) / np.maximum(sp, 1e-12))
+        tangent_ok = finite & (tangent_cos >= math.cos(math.radians(params.tangent_tolerance_deg)))
+        tangent_fraction = float(tangent_ok.sum() / finite.sum()) if finite.any() else 0.0
+        if tangent_fraction < params.min_tangent_fraction:
+            if params.enforce_tangent_alignment_hard_gate:
+                rotation_failed = True
+            failure_counts[7] += int(max(1, round((params.min_tangent_fraction - tangent_fraction) * len(offsets))))
 
-    half = len(offsets) // 2
     symmetry_ok = 0
     symmetry_total = 0
     reversal_ok = 0
     reversal_total = 0
-    for n in range(half):
-        m = (n + half) % len(offsets)
-        if not (finite[n] and finite[m]):
-            continue
-        diff = abs(float(_angle_diff(angles[n], angles[m])))
-        symmetry_total += 1
-        if abs(diff - math.pi) <= math.radians(params.symmetry_tolerance_deg):
-            symmetry_ok += 1
-        reversal_total += 1
-        if uu[n] * uu[m] + vv[n] * vv[m] < 0:
-            reversal_ok += 1
-    symmetry_fraction = float(symmetry_ok / symmetry_total) if symmetry_total else 0.0
-    reversal_fraction = float(reversal_ok / reversal_total) if reversal_total else 0.0
-    if symmetry_total and symmetry_ok < symmetry_total:
+    if not minimal_finite_only:
+        half = len(offsets) // 2
+        for n in range(half):
+            m = (n + half) % len(offsets)
+            if not (finite[n] and finite[m]):
+                continue
+            symmetry_total += 1
+            if not minimal_speed_kernel:
+                diff = abs(float(_angle_diff(angles[n], angles[m])))
+                if abs(diff - math.pi) <= math.radians(params.symmetry_tolerance_deg):
+                    symmetry_ok += 1
+            reversal_total += 1
+            if uu[n] * uu[m] + vv[n] * vv[m] < 0:
+                reversal_ok += 1
+    symmetry_fraction = np.nan if minimal_speed_kernel else (float(symmetry_ok / symmetry_total) if symmetry_total else 0.0)
+    reversal_fraction = np.nan if minimal_finite_only else (float(reversal_ok / reversal_total) if reversal_total else 0.0)
+    if not minimal_speed_kernel and symmetry_total and symmetry_ok < symmetry_total:
         failure_counts[6] += int(symmetry_total - symmetry_ok)
-    if reversal_fraction < params.min_reversal_fraction:
-        rotation_failed = True
+    if not minimal_finite_only and reversal_fraction < params.min_reversal_fraction:
+        if params.enforce_opposite_reversal_hard_gate:
+            rotation_failed = True
         failure_counts[8] += int(max(1, round((params.min_reversal_fraction - reversal_fraction) * max(reversal_total, 1))))
 
-    tangential = uu * tx + vv * ty
-    circulation_sign = float(np.sign(np.nanmedian(tangential[finite]))) if finite.any() else np.nan
+    circulation_sign = np.nan
+    if not minimal_speed_kernel:
+        tangential = uu * tx + vv * ty
+        circulation_sign = float(np.sign(np.nanmedian(tangential[finite]))) if finite.any() else np.nan
     dominant = max(failure_counts.items(), key=lambda kv: kv[1])[0] if sum(failure_counts.values()) else -1
     first_hard_code = -1
     hard_failures = {
-        0: finite.mean() < params.min_finite_fraction,
-        1: failure_counts[1] > 0,
-        2: failure_counts[2] > 0,
-        9: params.require_boundary_monotonic_rotation and not boundary_monotonic_passed,
-        7: tangent_fraction < params.min_tangent_fraction,
-        8: reversal_fraction < params.min_reversal_fraction,
+        0: finite_failed,
+        1: bool(not minimal_speed_kernel and params.enforce_velocity_ratio_hard_gate and failure_counts[1] > 0),
+        2: bool(not minimal_speed_kernel and params.enforce_angle_jump_hard_gate and failure_counts[2] > 0),
+        4: bool(not minimal_speed_kernel and params.enforce_direction_exception_hard_gate and direction_exceptions > max_exceptions),
+        9: bool(not minimal_speed_kernel and params.require_boundary_monotonic_rotation and not boundary_monotonic_passed),
+        7: bool(not minimal_speed_kernel and params.enforce_tangent_alignment_hard_gate and tangent_fraction < params.min_tangent_fraction),
+        8: bool(not minimal_finite_only and params.enforce_opposite_reversal_hard_gate and reversal_fraction < params.min_reversal_fraction),
     }
     for code, _label in HARD_FAILURE_ORDER:
         if hard_failures.get(code, False):
@@ -1330,16 +1380,20 @@ def _circle_check(
         "radius_cells": float(radius_cells),
         "finite_fraction": float(finite.mean()),
         "mean_circle_speed_ms": float(np.nanmean(sp[finite])) if finite.any() else np.nan,
-        "max_velocity_ratio": float(max_ratio),
-        "max_angle_jump_deg": float(max_angle),
-        "direction_exception_count": float(direction_exceptions),
-        "positive_angle_diff_count": float(positive_diffs),
-        "negative_angle_diff_count": float(negative_diffs),
-        "direction_exception_limit": float(max_exceptions),
+        "max_velocity_ratio": np.nan if minimal_speed_kernel else float(max_ratio),
+        "velocity_ratio_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(failure_counts[1] > 0),
+        "max_angle_jump_deg": np.nan if minimal_speed_kernel else float(max_angle),
+        "angle_jump_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(failure_counts[2] > 0),
+        "direction_exception_count": np.nan if minimal_speed_kernel else float(direction_exceptions),
+        "direction_exception_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(direction_exceptions > max_exceptions),
+        "positive_angle_diff_count": np.nan if minimal_speed_kernel else float(positive_diffs),
+        "negative_angle_diff_count": np.nan if minimal_speed_kernel else float(negative_diffs),
+        "direction_exception_limit": np.nan if minimal_speed_kernel else float(max_exceptions),
         "boundary_monotonic_required": bool(params.require_boundary_monotonic_rotation),
         "boundary_monotonic_passed": bool(boundary_monotonic_passed),
         "boundary_monotonic_exception_limit": float(monotonic_exception_limit),
         "tangent_pass_fraction": tangent_fraction,
+        "tangent_alignment_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(tangent_fraction < params.min_tangent_fraction),
         "symmetry_pass_fraction": symmetry_fraction,
         "opposite_reversal_fraction": reversal_fraction,
         "circulation_sign": circulation_sign,
@@ -1347,7 +1401,7 @@ def _circle_check(
         "dominant_failure": FAILURE_LABELS.get(int(dominant), "none") if dominant >= 0 else "none",
         "first_hard_failure_code": float(first_hard_code),
         "first_hard_failure": FAILURE_LABELS.get(int(first_hard_code), "none") if first_hard_code >= 0 else "none",
-        "hard_failure_order": "finite->velocity_ratio->angle_jump->boundary_monotonic->tangent->opposite_reversal",
+        "hard_failure_order": "finite" if minimal_finite_only else ("finite->opposite_reversal" if minimal_reversal_only else "finite->velocity_ratio->angle_jump->direction_exceptions->boundary_monotonic->tangent->opposite_reversal"),
         **{f"failure_{k}_{label}_count": float(failure_counts[k]) for k, label in FAILURE_LABELS.items()},
     }
 
@@ -1854,12 +1908,24 @@ def _component_shape_metrics(comp: np.ndarray) -> tuple[float, float, int]:
     # Solve the linearized circle fit from py_eddy_tracker:
     #   a*x_i + b*y_i + c = x_i^2 + y_i^2
     # with x0 = a/2, y0 = b/2, r^2 = c + x0^2 + y0^2.
-    design = np.column_stack((x, y, np.ones_like(x)))
     rhs = x * x + y * y
-    try:
-        a, b, c = np.linalg.lstsq(design, rhs, rcond=None)[0]
-    except np.linalg.LinAlgError:
+    # Centering reduces cancellation in the normal equations.  This is the
+    # same linear least-squares circle fit as above, evaluated explicitly to
+    # avoid the platform LAPACK call that is unstable on this Windows host.
+    mean_x = float(np.mean(x))
+    mean_y = float(np.mean(y))
+    dx = x - mean_x
+    dy = y - mean_y
+    sxx = float(np.dot(dx, dx))
+    syy = float(np.dot(dy, dy))
+    sxy = float(np.dot(dx, dy))
+    determinant = sxx * syy - sxy * sxy
+    scale = max(sxx * syy, 1.0)
+    if not np.isfinite(determinant) or determinant <= np.finfo("f8").eps * scale:
         return np.nan, np.nan, int(xx.size)
+    a = (syy * float(np.dot(dx, rhs)) - sxy * float(np.dot(dy, rhs))) / determinant
+    b = (sxx * float(np.dot(dy, rhs)) - sxy * float(np.dot(dx, rhs))) / determinant
+    c = float(np.mean(rhs)) - a * mean_x - b * mean_y
     center_x = float(a) * 0.5
     center_y = float(b) * 0.5
     radius_sq = float(c) + center_x * center_x + center_y * center_y
@@ -1877,8 +1943,6 @@ def _component_shape_metrics(comp: np.ndarray) -> tuple[float, float, int]:
     intersection_area = float((comp & circle_mask).sum())
     shape_error = float((polygon_area + circle_area - 2.0 * intersection_area) / circle_area * 100.0)
 
-    mean_x = float(np.mean(x))
-    mean_y = float(np.mean(y))
     order = np.argsort(np.arctan2(y - mean_y, x - mean_x))
     x = xx[order].astype("float64")
     y = yy[order].astype("float64")

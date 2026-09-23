@@ -1,4 +1,7 @@
-"""Orchestrate full-depth filtering, depth-major extension, tracking, and shape cataloging."""
+"""Legacy Rossby/catalog vertical workflow retained for historical reproduction.
+
+The active OFES research default is ``run_default_geometry_vertical``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -54,6 +57,18 @@ def run_days(args: argparse.Namespace, days: list[date]) -> None:
             "--surface-root", str(args.surface_root), "--filter-root", str(args.filter_root),
             "--output-root", str(args.output_root), "--day", day.isoformat(),
             "--max-depth-layers", str(args.max_depth_layers), "--resume",
+            # Calibrated Jan1 continuation: retain a physical tangential
+            # coherence check while avoiding weak-flow direction diagnostics as
+            # layer-stopping gates.  The center remains a local speed minimum.
+            "--deep-hua-mode", "full",
+            "--deep-center-selection", "local_step_min",
+            "--deep-center-step-cells", "2",
+            "--deep-tangent-tolerance-deg", "45",
+            "--deep-min-tangent-fraction", "0.35",
+            "--enforce-tangent-alignment-hard-gate",
+            "--disable-angle-jump-hard-gate",
+            "--disable-direction-exception-hard-gate",
+            "--disable-opposite-reversal-hard-gate",
         ]
         env = os.environ.copy()
         env["HDF5_USE_FILE_LOCKING"] = "FALSE"
@@ -94,12 +109,17 @@ def finalize(args: argparse.Namespace, days: list[date]) -> None:
         "--start", args.start, "--end", args.end, "--lifetime-min-days", "1", "--radius-min-m", "25000",
         "--min-valid-layers", "6", "--shape-output-name", "shape_classification_1991_1991_hua_b3_start2_life1",
     ], cwd=REPO_ROOT, check=True)
-    payload = {"days": len(days), "center_rows": int(len(centers)), "passed_rows": int(len(passed)), "vertical_objects": int(len(summary))}
+    payload = {
+        "days": len(days), "center_rows": int(len(centers)), "passed_rows": int(len(passed)), "vertical_objects": int(len(summary)),
+        "vertical_profile": "continuous_local_min_2cells_tangent45_fraction35",
+        "diagnostic_only_gates": ["velocity_ratio", "angle_jump", "direction_exception", "opposite_reversal"],
+    }
     (args.output_root / "vertical_extension_run_summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the default OFES final-catalog vertical extension.")
+    parser.add_argument("--legacy-rossby-workflow", action="store_true", help="Required acknowledgement for this historical workflow.")
     parser.add_argument("--surface-root", type=Path, default=DEFAULT_SURFACE_ROOT)
     parser.add_argument("--source-filter-root", type=Path, default=SOURCE_FILTER_ROOT)
     parser.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
@@ -111,6 +131,12 @@ def main() -> None:
     parser.add_argument("--skip-filter", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if not args.legacy_rossby_workflow:
+        raise SystemExit(
+            "This is a legacy Rossby/catalog workflow. Use "
+            "Detection_for_OFES.tools.run_default_geometry_vertical, or pass "
+            "--legacy-rossby-workflow for historical reproduction."
+        )
     selected = dates(date.fromisoformat(args.start), date.fromisoformat(args.end))
     args.output_root.mkdir(parents=True, exist_ok=True)
     if not args.skip_filter:

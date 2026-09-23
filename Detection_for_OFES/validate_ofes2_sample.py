@@ -15,7 +15,7 @@ DEFAULT_OUTPUT = Path(__file__).resolve().parent / "outputs" / "ofes2_sample_val
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate one OFES2 eta/pressur/SSH sample.")
+    parser = argparse.ArgumentParser(description="Validate one OFES2 eta free-surface-height sample.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--date", default="1991-01-01")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -44,7 +44,7 @@ def main() -> None:
         "pressur_file": str(pressur_path),
         "eta_grid": eta_meta.grid_signature,
         "pressur_grid": pressur_meta.grid_signature,
-        "ssh_formula": "SSH = eta - (pressur - 1000), units cm",
+        "ssh_formula": "SSH = eta, OFES free-surface height, units cm",
         "arrays": [
             summarize_array("eta", eta),
             summarize_array("pressur", pressur),

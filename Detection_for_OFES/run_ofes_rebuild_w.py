@@ -892,7 +892,7 @@ def classify_native_w_multipole(grid: dict[str, object], args: argparse.Namespac
         sector_valid_fraction[i] = valid_count / float(radial_count)
         if sector_valid_fraction[i] >= min_sector_valid_fraction:
             if valid_count >= 2:
-                integral = float(np.trapz(samples[finite_ray], radial_r[finite_ray]))
+                integral = float(np.trapezoid(samples[finite_ray], radial_r[finite_ray]))
                 values[i] = integral / radial_length
             elif valid_count == 1:
                 values[i] = float(samples[finite_ray][0])
@@ -2892,7 +2892,8 @@ def draw_field_pillow(canvas: Image.Image, box: tuple[int, int, int, int], x: np
     img = array_to_rgb(data, vmin, vmax).resize((plot[2] - plot[0], plot[3] - plot[1]), Image.Resampling.BILINEAR)
     canvas.paste(img, plot[:2])
     th = np.linspace(0, 2 * np.pi, 361)
-    for rr in [1.0, 4.0]:
+    visible_radius = min(abs(float(x[0])), abs(float(x[-1])), abs(float(y[0])), abs(float(y[-1])))
+    for rr in [radius for radius in (1.0, 4.0) if radius <= visible_radius + 1.0e-6]:
         pts = [map_xy(plot, rr * math.cos(t), rr * math.sin(t), float(x[0]), float(x[-1]), float(y[0]), float(y[-1])) for t in th]
         draw.line(pts, fill=(0, 0, 0), width=2)
     cx, cy = map_xy(plot, 0.0, 0.0, float(x[0]), float(x[-1]), float(y[0]), float(y[-1]))

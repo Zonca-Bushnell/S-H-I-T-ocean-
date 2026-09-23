@@ -83,7 +83,7 @@ def main() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build the default OFES surface catalog: Rossby-adaptive filtering, "
+            "Build a configurable OFES surface catalog: Rossby-adaptive filtering, "
             "multiscale SSH seeds, four open-ocean recovery regions, SSH-primary "
             "open-ocean acceptance, shape/overlap QC, and persistence."
         )
@@ -115,6 +115,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-filter", action="store_true")
 
     parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="tile_topn")
+    parser.add_argument(
+        "--max-candidates-per-day", type=int, default=0,
+        help="Optional global cap after candidate selection; zero keeps every selected seed.",
+    )
     parser.add_argument("--tile-top-n", type=int, default=10)
     parser.add_argument("--open-ocean-tile-top-n", type=int, default=30)
     parser.add_argument("--open-ocean-low-lat-tile-top-n", type=int, default=15)
@@ -282,6 +286,8 @@ def run_days(days: list[date], args: argparse.Namespace, log_root: Path) -> None
                 proc = subprocess.run(cmd, cwd=REPO_ROOT, stdout=stdout, stderr=stderr, env=run_env)
             if proc.returncode == 0:
                 return day, True, str(stderr_path)
+            with stderr_path.open("a", encoding="utf-8") as stderr:
+                stderr.write(f"[exit-code] day={day_str(day)} returncode={proc.returncode}\n")
             if attempt < attempts:
                 time.sleep(float(attempt))
         return day, False, str(stderr_path)
@@ -331,6 +337,8 @@ def detection_command(args: argparse.Namespace, day: date, out_dir: Path) -> lis
         boundary_mode,
         "--candidate-selection",
         str(args.candidate_selection),
+        "--max-candidates-per-day",
+        str(args.max_candidates_per_day),
         "--tile-top-n",
         str(args.tile_top_n),
         "--open-ocean-tile-top-n",
