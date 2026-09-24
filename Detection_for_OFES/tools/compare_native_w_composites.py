@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-root", type=Path, required=True)
     parser.add_argument("--candidate-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--polarity", choices=("cyclonic", "anticyclonic"), default="cyclonic")
     return parser.parse_args()
 
 
@@ -30,9 +31,10 @@ def font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def payload(root: Path) -> dict[str, np.ndarray]:
-    path = root / "paper_pointwise_no_rotation" / "NH_cyclone_strict_core_19d" / "isopycnal_composite.npz"
-    if not path.exists():
-        raise FileNotFoundError(path)
+    matches = list(root.glob("paper_pointwise_no_rotation/*/isopycnal_composite.npz"))
+    if len(matches) != 1:
+        raise FileNotFoundError(f"Expected exactly one composite below {root}, found {len(matches)}")
+    path = matches[0]
     with np.load(path, allow_pickle=False) as archive:
         return {key: archive[key] for key in archive.files}
 
@@ -87,7 +89,7 @@ def save(image: Image.Image, output: Path) -> None:
     image.save(output.with_suffix(".pdf"), "PDF", resolution=180.0)
 
 
-def draw_plan_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray], output: Path) -> None:
+def draw_plan_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray], output: Path, polarity: str) -> None:
     labels = (("0-100 m", 0.0, 100.0), ("300-500 m", 300.0, 500.0), ("450 m", 425.0, 475.0))
     fields = [(band_mean(old, low, high), band_mean(new, low, high)) for _, low, high in labels]
     common = shared_limit(*(field for pair in fields for field in pair))
@@ -95,7 +97,7 @@ def draw_plan_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray],
     image = Image.new("RGB", (1800, 1680), "white")
     draw = ImageDraw.Draw(image)
     title, label = font(30), font(18)
-    draw.text((55, 30), "NH cyclonic strict-core native W: full versus tangent-then-near-closed", fill="black", font=title)
+    draw.text((55, 30), f"NH {polarity} strict-core native W: full versus tangent-then-near-closed", fill="black", font=title)
     titles = ("old full", "new hybrid", "new - old")
     for row, ((name, _, _), (old_field, new_field)) in enumerate(zip(labels, fields)):
         y0 = 110 + row * 510
@@ -110,14 +112,14 @@ def draw_plan_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray],
     save(image, output)
 
 
-def draw_section_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray], output: Path) -> None:
+def draw_section_comparison(old: dict[str, np.ndarray], new: dict[str, np.ndarray], output: Path, polarity: str) -> None:
     old_section = np.nanmean(old["native_w_m_s"], axis=1) * 1.0e6
     new_section = np.nanmean(new["native_w_m_s"], axis=1) * 1.0e6
     common, diff_limit = shared_limit(old_section, new_section), shared_limit(new_section - old_section)
     image = Image.new("RGB", (1800, 820), "white")
     draw = ImageDraw.Draw(image)
     title, label = font(30), font(18)
-    draw.text((55, 30), "Native W x/R-depth section: full versus tangent-then-near-closed", fill="black", font=title)
+    draw.text((55, 30), f"NH {polarity} native W x/R-depth: full versus tangent-then-near-closed", fill="black", font=title)
     for column, (name, field, limit) in enumerate((("old full", old_section, common), ("new hybrid", new_section, common), ("new - old", new_section - old_section, diff_limit))):
         x0 = 80 + column * 580
         draw.text((x0, 95), name, fill="black", font=label)
@@ -139,6 +141,26 @@ def metrics(root: Path) -> pd.DataFrame:
     return table
 
 
+def field_difference_metrics(old: dict[str, np.ndarray], new: dict[str, np.ndarray]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for name, unit, scale in (
+        ("composite_prho", "kg m-3", 1.0),
+        ("rho_anom_ring_kg_m3", "kg m-3", 1.0),
+        ("native_w_m_s", "m s-1", 1.0e6),
+    ):
+        old_values = np.asarray(old[name], dtype="f8") * scale
+        new_values = np.asarray(new[name], dtype="f8") * scale
+        difference = new_values - old_values
+        valid = difference[np.isfinite(difference)]
+        rows.append({
+            "field": name, "unit": unit if scale == 1.0 else "10^-6 " + unit,
+            "old_q95_abs": float(np.nanpercentile(np.abs(old_values), 95)),
+            "new_q95_abs": float(np.nanpercentile(np.abs(new_values), 95)),
+            "new_minus_old_q95_abs": float(np.nanpercentile(np.abs(valid), 95)) if valid.size else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     args = parse_args()
     old, new = payload(args.baseline_root), payload(args.candidate_root)
@@ -146,12 +168,14 @@ def main() -> None:
         if not np.array_equal(old[key], new[key]):
             raise ValueError(f"Composite grids differ for {key}; a direct comparison would be invalid")
     args.output_root.mkdir(parents=True, exist_ok=True)
-    draw_plan_comparison(old, new, args.output_root / "native_w_plan_comparison")
-    draw_section_comparison(old, new, args.output_root / "native_w_cross_section_comparison")
+    draw_plan_comparison(old, new, args.output_root / "native_w_plan_comparison", args.polarity)
+    draw_section_comparison(old, new, args.output_root / "native_w_cross_section_comparison", args.polarity)
     old_metrics, new_metrics = metrics(args.baseline_root), metrics(args.candidate_root)
     compare = old_metrics.merge(new_metrics, on="depth_band", suffixes=("_old_full", "_new_hybrid"))
     compare.to_csv(args.output_root / "native_w_comparison_metrics.csv", index=False, encoding="utf-8-sig")
-    summary = {"baseline_root": str(args.baseline_root), "candidate_root": str(args.candidate_root), "color_map": "coolwarm", "grid": "[-2R,2R], delta=0.04R, pointwise direct mean", "metrics": compare.to_dict(orient="records")}
+    field_metrics = field_difference_metrics(old, new)
+    field_metrics.to_csv(args.output_root / "native_fields_difference_metrics.csv", index=False, encoding="utf-8-sig")
+    summary = {"baseline_root": str(args.baseline_root), "candidate_root": str(args.candidate_root), "polarity": args.polarity, "color_map": "coolwarm", "grid": "[-2R,2R], delta=0.04R, pointwise direct mean", "metrics": compare.to_dict(orient="records"), "field_difference_metrics": field_metrics.to_dict(orient="records")}
     (args.output_root / "native_w_comparison_manifest.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

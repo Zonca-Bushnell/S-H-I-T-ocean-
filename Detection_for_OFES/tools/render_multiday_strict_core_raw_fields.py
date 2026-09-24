@@ -13,7 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import contourpy
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
@@ -40,8 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--vertical-root", type=Path, default=VERTICAL_ROOT)
+    parser.add_argument(
+        "--vertical-run-root", type=Path,
+        help="Explicit vertical continuation directory containing raw_detection/daily_runs. Preferred for new profile diagnostics.",
+    )
     parser.add_argument("--selection-file", type=Path, default=DEFAULT_SELECTION)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--polarity", choices=("cyclonic", "anticyclonic"), default="cyclonic")
     parser.add_argument("--mode", choices=("raw", "outer-ring-reference", "with-anomaly"), default="raw")
     parser.add_argument("--climatology-file", type=Path, default=DEFAULT_CLIMATOLOGY)
     parser.add_argument("--grid-n", type=int, default=81)
@@ -177,25 +181,6 @@ def draw_colorbar(draw: ImageDraw.ImageDraw, image: Image.Image, box: tuple[int,
     draw.text((box[2] + 5, box[3] - 12), f"{lo:.3g}", fill=(45, 50, 60), font=font(11))
 
 
-def draw_contours(draw: ImageDraw.ImageDraw, field: np.ndarray, x_values: np.ndarray, y_values: np.ndarray, box: tuple[int, int, int, int], signed: bool, depth_down: bool = False) -> None:
-    try:
-        generator = contourpy.contour_generator(x=x_values, y=y_values, z=np.ma.masked_invalid(field), name="serial")
-        x0, y0, x1, y1 = box
-        for level in contour_levels(field, signed):
-            for segment in generator.lines(float(level)):
-                if len(segment) < 2:
-                    continue
-                pixels = []
-                for point in segment:
-                    pixel_x = x0 + (point[0] - x_values[0]) / (x_values[-1] - x_values[0]) * (x1 - x0)
-                    fraction_y = (point[1] - y_values[0]) / (y_values[-1] - y_values[0])
-                    pixel_y = y0 + fraction_y * (y1 - y0) if depth_down else y1 - fraction_y * (y1 - y0)
-                    pixels.append((pixel_x, pixel_y))
-                draw.line(pixels, fill=(20, 20, 25), width=1)
-    except (ValueError, RuntimeError):
-        return
-
-
 def draw_reference_rings(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], axis: np.ndarray, radius_km: float) -> None:
     x0, y0, x1, y1 = box
     center_x, center_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -210,9 +195,42 @@ def draw_reference_rings(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, in
                 draw.arc(bounds, start=start, end=start + 9, fill=(25, 25, 25), width=width)
 
 
+def draw_map_axes(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], axis: np.ndarray) -> None:
+    x0, y0, x1, y1 = box
+    label = font(10)
+    for value in (float(axis[0]), 0.0, float(axis[-1])):
+        fraction = (value - axis[0]) / (axis[-1] - axis[0])
+        px = x0 + fraction * (x1 - x0)
+        draw.line((px, y1, px, y1 + 4), fill=(25, 30, 40), width=1)
+        draw.text((px - 15, y1 + 5), f"{value:.0f}", fill=(60, 65, 75), font=label)
+    for value in (float(axis[-1]), 0.0, float(axis[0])):
+        fraction = (axis[-1] - value) / (axis[-1] - axis[0])
+        py = y0 + fraction * (y1 - y0)
+        draw.line((x0 - 4, py, x0, py), fill=(25, 30, 40), width=1)
+        draw.text((x0 - 37, py - 6), f"{value:.0f}", fill=(60, 65, 75), font=label)
+    draw.text(((x0 + x1) // 2 - 36, y1 + 20), "east (km)", fill=(60, 65, 75), font=label)
+    draw.text((x0 - 57, (y0 + y1) // 2 - 5), "north", fill=(60, 65, 75), font=label)
+
+
+def draw_section_axes(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], axis: np.ndarray, depth: np.ndarray) -> None:
+    x0, y0, x1, y1 = box
+    label = font(10)
+    for value in (float(axis[0]), 0.0, float(axis[-1])):
+        fraction = (value - axis[0]) / (axis[-1] - axis[0])
+        px = x0 + fraction * (x1 - x0)
+        draw.line((px, y1, px, y1 + 4), fill=(25, 30, 40), width=1)
+        draw.text((px - 15, y1 + 5), f"{value:.0f}", fill=(60, 65, 75), font=label)
+    for value in (0.0, float(depth[-1]) / 2.0, float(depth[-1])):
+        fraction = value / float(depth[-1])
+        py = y0 + fraction * (y1 - y0)
+        draw.line((x0 - 4, py, x0, py), fill=(25, 30, 40), width=1)
+        draw.text((x0 - 38, py - 6), f"{value:.0f}", fill=(60, 65, 75), font=label)
+    draw.text(((x0 + x1) // 2 - 45, y1 + 20), "east (km)", fill=(60, 65, 75), font=label)
+    draw.text((x0 - 55, (y0 + y1) // 2 - 5), "depth", fill=(60, 65, 75), font=label)
+
+
 def draw_map(draw: ImageDraw.ImageDraw, image: Image.Image, field: np.ndarray, axis: np.ndarray, radius_km: float, x_track: np.ndarray, y_track: np.ndarray, rows: pd.DataFrame, depth_index: int, box: tuple[int, int, int, int], label: str, signed: bool, low: float, high: float, scale: str) -> str:
     paste_raster(image, field, box, coolwarm_rgb(field, low, high))
-    draw_contours(draw, field, axis, axis, box, signed)
     draw_reference_rings(draw, box, axis, radius_km)
     draw.rectangle(box, outline=(25, 30, 40), width=2)
     visible = rows.loc[rows.depth_index.le(depth_index)]
@@ -227,15 +245,14 @@ def draw_map(draw: ImageDraw.ImageDraw, image: Image.Image, field: np.ndarray, a
     draw.line((point[0] - 5, point[1] - 5, point[0] + 5, point[1] + 5), fill=(255, 215, 0), width=2)
     draw.line((point[0] - 5, point[1] + 5, point[0] + 5, point[1] - 5), fill=(255, 215, 0), width=2)
     draw.text((x0, y0 - 25), label, fill=(20, 30, 45), font=font(14, True))
-    draw.text((x0, y1 + 4), "east/north from surface center (km); equal distance", fill=(75, 78, 85), font=font(11))
     draw.text((x0 + 3, y0 + 3), scale, fill=(15, 18, 24), font=font(11, True))
+    draw_map_axes(draw, box, axis)
     return scale
 
 
 def draw_section(draw: ImageDraw.ImageDraw, image: Image.Image, field: np.ndarray, depth: np.ndarray, axis: np.ndarray, rows: pd.DataFrame, x_track: np.ndarray, box: tuple[int, int, int, int], label: str, signed: bool, low: float, high: float, scale: str) -> str:
     section = field[:, field.shape[1] // 2, :]
     paste_raster(image, section, box, coolwarm_rgb(section, low, high))
-    draw_contours(draw, section, axis, depth, box, signed, depth_down=True)
     draw.rectangle(box, outline=(25, 30, 40), width=2)
     x0, y0, x1, y1 = box
     track = rows.sort_values("depth_index")
@@ -245,8 +262,8 @@ def draw_section(draw: ImageDraw.ImageDraw, image: Image.Image, field: np.ndarra
     for point in points:
         draw.ellipse((point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2), fill=(5, 5, 5))
     draw.text((x0, y0 - 25), label, fill=(20, 30, 45), font=font(14, True))
-    draw.text((x0, y1 + 4), "surface-center east offset (km); depth increases downward", fill=(75, 78, 85), font=font(11))
     draw.text((x0 + 3, y0 + 3), scale, fill=(15, 18, 24), font=font(11, True))
+    draw_section_axes(draw, box, axis, depth)
     return scale
 
 
@@ -258,30 +275,33 @@ def outer_ring_anomaly(prho: np.ndarray, axis: np.ndarray, radius_km: float) -> 
 
 
 def render_panel(path: Path, obj: pd.Series, rows: pd.DataFrame, axis: np.ndarray, radius_km: float, prho: np.ndarray, native_w: np.ndarray, depth: np.ndarray, climatology_anomaly: np.ndarray | None, include_outer_ring: bool) -> dict[str, object]:
-    fields: list[tuple[str, np.ndarray, bool, str]] = [("Raw OFES prho", prho, False, "prho (kg m-3)")]
+    fields: list[tuple[str, str, np.ndarray, bool, str]] = [("rho", "Raw OFES prho", prho, False, "prho (kg m-3)")]
     if include_outer_ring:
-        fields.append(("prho minus 1.5-2R outer-ring median", outer_ring_anomaly(prho, axis, radius_km), True, "rho prime (kg m-3)"))
+        fields.append(("rho_rel", "Outer-ring-relative density", outer_ring_anomaly(prho, axis, radius_km), True, "delta prho (kg m-3)"))
     if climatology_anomaly is not None:
-        fields.append(("Density anomaly: raw prho - annual MSS", climatology_anomaly, True, "rho prime (kg m-3)"))
-    fields.append(("Raw native OFES w", native_w, True, "w (m s-1)"))
+        fields.append(("rho_prime", "Density anomaly: raw prho - annual MSS", climatology_anomaly, True, "rho prime (kg m-3)"))
+    fields.append(("w", "Raw native OFES w", native_w, True, "w (m s-1)"))
     selected = select_depth_indices(rows)
     x_track, y_track = track_xy(rows)
     width, row_height = 2320, 410
     height = 135 + len(fields) * row_height + 55
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    draw.text((42, 24), f"{obj.composite_date} | {obj.hua_object_id} | NH cyclonic strict core", fill=(15, 25, 42), font=font(27, True))
-    draw.text((44, 64), "Native OFES prho and W. coolwarm and colour bars follow the composite convention. Dashed rings: 1.5R/2R local density reference; black path: accepted vertical centers; gold x: current center.", fill=(65, 70, 82), font=font(15))
+    region = str(obj.get("region", "latest strict core")).replace("_", " ")
+    polarity = str(obj.polarity).replace("_", " ")
+    draw.text((42, 24), f"{obj.composite_date} | {obj.hua_object_id} | {region} | {polarity} strict core", fill=(15, 25, 42), font=font(27, True))
+    draw.text((44, 64), "Native OFES prho and W. Field contours disabled. Dashed rings: 1.5R/2R local density reference; black path: accepted vertical centers; gold x: current center.", fill=(65, 70, 82), font=font(15))
     left, section_width, map_size, gap = 65, 400, 330, 45
-    for row_number, (label, field, signed, unit_label) in enumerate(fields):
+    for row_number, (short_label, full_label, field, signed, unit_label) in enumerate(fields):
         top = 125 + row_number * row_height
         low, high, scale = value_scale(field, signed)
         section_box = (left, top, left + section_width, top + map_size)
-        draw_section(draw, image, field, depth, axis, rows, x_track, section_box, f"{label}: east-depth section", signed, low, high, scale)
+        draw_section(draw, image, field, depth, axis, rows, x_track, section_box, f"{short_label} | east-depth", signed, low, high, scale)
+        draw.text((section_box[0] + 155, section_box[1] - 25), full_label, fill=(75, 78, 85), font=font(10))
         for col, depth_index in enumerate(selected):
             x0 = left + section_width + gap + col * (map_size + gap)
             map_box = (x0, top, x0 + map_size, top + map_size)
-            draw_map(draw, image, field[depth_index], axis, radius_km, x_track, y_track, rows, depth_index, map_box, f"{label}: layer {depth_index}, {depth[depth_index]:.1f} m", signed, low, high, scale)
+            draw_map(draw, image, field[depth_index], axis, radius_km, x_track, y_track, rows, depth_index, map_box, f"{short_label} | {depth[depth_index]:.1f} m", signed, low, high, scale)
         draw_colorbar(draw, image, (2215, top, 2245, top + map_size), low, high, unit_label)
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path)
@@ -289,8 +309,9 @@ def render_panel(path: Path, obj: pd.Series, rows: pd.DataFrame, axis: np.ndarra
     return {"figure_png": str(path), "figure_pdf": str(path.with_suffix('.pdf')), "display_depth_indices": selected}
 
 
-def load_track(vertical_root: Path, token: str, object_id: str) -> pd.DataFrame:
-    path = vertical_root / "vertical_continuation_local_step_2cells_section_bipolar" / "raw_detection" / "daily_runs" / token / "structures_hua_style.csv"
+def load_track(vertical_root: Path, vertical_run_root: Path | None, token: str, object_id: str) -> pd.DataFrame:
+    run = vertical_run_root or (vertical_root / "vertical_continuation_local_step_2cells_section_bipolar")
+    path = run / "raw_detection" / "daily_runs" / token / "structures_hua_style.csv"
     table = pd.read_csv(path)
     rows = table.loc[table.hua_object_id.astype(str).eq(object_id)].copy()
     if rows.empty:
@@ -304,14 +325,12 @@ def prepare_selection(args: argparse.Namespace) -> pd.DataFrame:
     missing = required - set(selected.columns)
     if missing:
         raise RuntimeError(f"Selection file missing columns: {sorted(missing)}")
-    selected = selected.loc[selected.polarity.astype(str).eq("cyclonic")].copy()
+    selected = selected.loc[selected.polarity.astype(str).str.lower().eq(args.polarity)].copy()
     selected["strict_core_min_fraction"] = selected[["bipolar_fraction_0p6r", "bipolar_fraction_1p0r"]].min(axis=1)
     selected["strict_core_pass"] = selected.strict_core_min_fraction.ge(0.70)
     if not bool(selected.strict_core_pass.all()):
         bad = selected.loc[~selected.strict_core_pass, ["composite_date", "hua_object_id", "strict_core_min_fraction"]]
         raise RuntimeError(f"Selection contains non-strict-core rows: {bad.to_dict('records')[:5]}")
-    if len(selected) != 435:
-        raise RuntimeError(f"Expected 435 strict-core NH cyclonic object-days, found {len(selected)}")
     return selected.sort_values(["composite_date", "hua_object_id"]).reset_index(drop=True)
 
 
@@ -328,8 +347,9 @@ def main() -> None:
     write_csv(args.output_root / "selected_object_days_validation.csv", selected.to_dict("records"))
     write_json(args.output_root / "selection_manifest.json", {
         "selection_source": str(args.selection_file), "selected_object_days": int(len(selected)),
+        "polarity": args.polarity,
         "strict_core_definition": "min(bipolar_fraction_0p6r, bipolar_fraction_1p0r) >= 0.70",
-        "north_hemisphere_cyclonic_only": True,
+        "selection_regions": sorted(selected["region"].dropna().astype(str).unique().tolist()) if "region" in selected else [],
     })
     climatology = None
     if args.mode == "with-anomaly":
@@ -362,7 +382,7 @@ def main() -> None:
                 results.append({"composite_date": str(date_value), "hua_object_id": object_id, "status": "skipped_existing", "figure_png": str(figure)})
                 continue
             try:
-                rows = load_track(args.vertical_root, token, object_id)
+                rows = load_track(args.vertical_root, args.vertical_run_root, token, object_id)
                 surface = rows.iloc[0]
                 radius_km = float(obj.radius_km if np.isfinite(obj.radius_km) else surface.radius_km)
                 axis, xx_km, yy_km, _ = local_coordinates(radius_km, args.extent_r, args.grid_n)
@@ -394,11 +414,11 @@ def main() -> None:
         "density_definition": "native OFES prho; no spatial or temporal filter", "native_w_definition": "native OFES w / 100, interpolated to prho layer centers; no high-pass or rebuild-W",
         "density_anomaly_definition": (
             "raw prho - day-weighted 1993-2012 annual prho MSS" if climatology is not None
-            else "raw prho - same-depth median in 1.5R<=r<=2R" if args.mode == "outer-ring-reference"
+            else "outer-ring-relative density: raw prho - same-depth median in 1.5R<=r<=2R; not a climatological density anomaly" if args.mode == "outer-ring-reference"
             else "not generated in raw phase"
         ),
         "climatology_file": str(args.climatology_file) if climatology is not None else None, "grid_n": args.grid_n, "extent_r": args.extent_r,
-        "map_projection": "local equidistant approximation with equal x/y kilometre axes", "contours": "each displayed field's own contour levels",
+        "map_projection": "local equidistant approximation with equal x/y kilometre axes", "axes": "kilometres horizontally and vertically; depth in metres", "contours": "disabled (linestyle=NaN equivalent)",
     }
     write_json(phase_root / "manifest.json", manifest)
     print(json.dumps({"phase": output_phase, "rendered_or_existing": len(results), "failed": len(failures), "output": str(phase_root)}))

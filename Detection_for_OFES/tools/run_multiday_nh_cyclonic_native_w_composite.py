@@ -1,4 +1,4 @@
-"""Composite all Northern Hemisphere open-ocean cyclonic object-days."""
+"""Composite Northern Hemisphere object-days from a chosen strict-core profile."""
 from __future__ import annotations
 
 import argparse
@@ -48,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--start", default="1991-01-01")
     parser.add_argument("--end", default="1991-01-19")
+    parser.add_argument("--hemisphere", choices=("NH", "SH"), default="NH")
+    parser.add_argument("--polarity", choices=("cyclonic", "anticyclonic"), default="cyclonic")
+    parser.add_argument("--profile-label", default="")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--min-objects", type=int, default=8)
@@ -123,6 +126,8 @@ def day_objects(
     *,
     selection_mode: str,
     strict_scores: pd.DataFrame | None = None,
+    hemisphere: str = "NH",
+    polarity: str = "cyclonic",
 ) -> tuple[list[SelectedObject], pd.DataFrame]:
     rows = pd.read_csv(table, low_memory=False)
     if "depth_index" in rows.columns:
@@ -141,7 +146,8 @@ def day_objects(
         lon = float(row[lon_col])
         lat = float(row[lat_col])
         radius = float(row["radius_km"])
-        if str(row["polarity"]).strip().lower() != "cyclonic" or lat < 0.0:
+        in_hemisphere = lat >= 0.0 if hemisphere == "NH" else lat < 0.0
+        if str(row["polarity"]).strip().lower() != polarity or not in_hemisphere:
             continue
         if not (np.isfinite(lon) and np.isfinite(lat) and np.isfinite(radius) and radius > 0.0):
             continue
@@ -155,7 +161,7 @@ def day_objects(
                 continue
         elif object_id not in strict_ids:
             continue
-        objects.append(SelectedObject(object_id, current.isoformat(), "cyclonic", 1, 0.0, 0.0, radius, lon, lat))
+        objects.append(SelectedObject(object_id, current.isoformat(), polarity, 1, 0.0, 0.0, radius, lon, lat))
         selected_rows.append(row)
     selected = pd.DataFrame(selected_rows)
     if not selected.empty:
@@ -281,6 +287,8 @@ def main() -> None:
             current,
             selection_mode=args.selection_mode,
             strict_scores=strict_scores,
+            hemisphere=args.hemisphere,
+            polarity=args.polarity,
         )
         selected_tables.append(selected)
         if args.stage_raw:
@@ -318,25 +326,25 @@ def main() -> None:
             next(iter(raw_paths.values())).parent.rmdir()
 
     if acc is None:
-        raise RuntimeError("No Northern Hemisphere open-ocean cyclonic objects were sampled")
+        raise RuntimeError(f"No {args.hemisphere} {args.polarity} objects were sampled")
     payload = finalize_accumulator(acc, failures, cargs)
     strict_mode = args.selection_mode == "strict_core_nh"
     payload.update({
         "region_definition": (
-            "Northern Hemisphere; no boundary-current exclusion"
+            f"{args.hemisphere}; no boundary-current exclusion"
             if strict_mode else
             "Northern Hemisphere open ocean using the current boundary-current/ACC exclusion mask"
         ),
         "orientation": "unrotated_geographic_east_west",
         "sample_definition": (
-            f"strict_core_min_bilateral_fraction_{args.strict_core_min_fraction:.2f}_cyclonic_object_days"
+            f"strict_core_min_bilateral_fraction_{args.strict_core_min_fraction:.2f}_{args.polarity}_object_days"
             if strict_mode else
-            "all_qc_pass_cyclonic_object_days_no_persistence_no_dipole_prescreen"
+            f"all_qc_pass_{args.polarity}_object_days_no_persistence_no_dipole_prescreen"
         ),
         "pointwise_grid_definition": "[-2R,2R], delta=0.04R, direct finite-cell mean",
         "date_range": f"{args.start}/{args.end}",
     })
-    group_name = "NH_cyclone_strict_core_19d" if strict_mode else "NH_cyclone_19d"
+    group_name = f"{args.hemisphere}_{args.polarity}_{'strict_core' if strict_mode else 'all'}_{args.start.replace('-', '')}_{args.end.replace('-', '')}"
     record = write_group_outputs(
         args.output_root, "paper_pointwise_no_rotation", group_name,
         payload, render_geometry_sections=False,
@@ -357,13 +365,16 @@ def main() -> None:
         "source_vertical_run_root": str(vertical_run_root),
         "source": "OFES native raw w aligned to density layer centers; not rebuild-W",
         "selection": (
-            "daily qc_pass Northern Hemisphere cyclonic objects with both 0.6R and 1.0R section-bipolar fractions >= strict-core threshold"
+            f"daily qc_pass {args.hemisphere} {args.polarity} objects with both 0.6R and 1.0R section-bipolar fractions >= strict-core threshold"
             if strict_mode else
-            "all daily qc_pass Northern Hemisphere open-ocean cyclonic surface objects"
+            f"all daily qc_pass {args.hemisphere} open-ocean {args.polarity} surface objects"
         ),
         "persistence": "not_used", "dipole_prescreen": "not_used", "strict_core": "not_used",
         "composite": "unrotated direct pointwise object-day mean on [-2R,2R] at 0.04R",
         "raw_read_mode": "staged_copy" if args.stage_raw else "direct_readonly_memmap",
+        "profile_label": args.profile_label or None,
+        "hemisphere": args.hemisphere,
+        "polarity": args.polarity,
         "object_day_count": int(payload["object_count"]),
         "failed_object_day_count": int(payload["failed_object_count"]),
         "days": day_counts, "native_w_metrics": metrics, "output": record,
