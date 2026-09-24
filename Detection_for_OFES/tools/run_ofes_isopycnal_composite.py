@@ -386,6 +386,11 @@ def run_group(raw: dict[str, np.memmap], metas: dict[str, object], objects: list
             update_accumulator(acc, sampled, kernel2d)
     if acc is None:
         return None
+    return finalize_accumulator(acc, failures, args)
+
+
+def finalize_accumulator(acc: dict[str, object], failures: int, args: argparse.Namespace) -> dict[str, object]:
+    """Finalize a shared object accumulator without changing composite physics."""
     prho = finalize_sum_count(acc["sum"]["prho"], acc["count"]["prho"], int(args.cressman_min_objects))
     native_w = finalize_sum_count(acc["sum"]["native_w"], acc["count"]["native_w"], int(args.cressman_min_objects))
     depth = np.asarray(acc["depth_m"], dtype="f4")

@@ -7,7 +7,7 @@ import json
 import math
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -1469,9 +1469,16 @@ def _trace_streamline_candidate(
     winding = 0.0
     closed = False
     failed_finite = False
+    left_domain = False
     step = max(float(params.streamline_step_cells), 0.05)
     for _ in range(max(8, int(params.streamline_max_steps))):
         x, y = points[-1]
+        # Bilinear sampling has no valid stencil on the outermost grid edge.
+        # Reaching it is an open-path/domain exit, not a missing-velocity
+        # failure in the interior flow field.
+        if x <= 0.0 or y <= 0.0 or x >= u.shape[1] - 1 or y >= u.shape[0] - 1:
+            left_domain = True
+            break
         uu, vv = _sample_uv_at(u, v, x, y)
         sp = math.hypot(uu, vv) if np.isfinite(uu) and np.isfinite(vv) else np.nan
         if not np.isfinite(sp) or sp <= 1.0e-10:
@@ -1489,7 +1496,7 @@ def _trace_streamline_candidate(
         new_x = x + step * ux
         new_y = y + step * uy
         if new_x < 0.0 or new_y < 0.0 or new_x > u.shape[1] - 1 or new_y > u.shape[0] - 1:
-            failed_finite = True
+            left_domain = True
             break
         new_angle = math.atan2(new_y - float(center_j), new_x - float(center_i))
         winding += float(_angle_diff(new_angle, prev_angle))
@@ -1516,6 +1523,8 @@ def _trace_streamline_candidate(
     return {
         "points": arr,
         "closed": bool(closed),
+        "failed_finite": bool(failed_finite),
+        "left_domain": bool(left_domain),
         "closure_error_cells": closure_error,
         "winding_turns": winding_turns,
         "radial_cv": radial_cv,
@@ -1541,6 +1550,290 @@ def _best_streamline_contour(
     if best is None or not bool(best["closed"]):
         return None
     return best
+
+
+def _sample_uv_many(
+    u: np.ndarray, v: np.ndarray, x: np.ndarray, y: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized counterpart of ``_sample_uv_at`` for independent traces."""
+    uu = np.full(x.shape, np.nan, dtype="float64")
+    vv = np.full(x.shape, np.nan, dtype="float64")
+    valid = (x >= 0.0) & (y >= 0.0) & (x < u.shape[1] - 1) & (y < u.shape[0] - 1)
+    if not np.any(valid):
+        return uu, vv
+    x0 = np.floor(x[valid]).astype(int)
+    y0 = np.floor(y[valid]).astype(int)
+    wx = x[valid] - x0
+    wy = y[valid] - y0
+    u00, u10, u01, u11 = u[y0, x0], u[y0, x0 + 1], u[y0 + 1, x0], u[y0 + 1, x0 + 1]
+    v00, v10, v01, v11 = v[y0, x0], v[y0, x0 + 1], v[y0 + 1, x0], v[y0 + 1, x0 + 1]
+    u_finite = np.isfinite(u00) & np.isfinite(u10) & np.isfinite(u01) & np.isfinite(u11)
+    v_finite = np.isfinite(v00) & np.isfinite(v10) & np.isfinite(v01) & np.isfinite(v11)
+    values_u = (1.0 - wx) * (1.0 - wy) * u00 + wx * (1.0 - wy) * u10 + (1.0 - wx) * wy * u01 + wx * wy * u11
+    values_v = (1.0 - wx) * (1.0 - wy) * v00 + wx * (1.0 - wy) * v10 + (1.0 - wx) * wy * v01 + wx * wy * v11
+    selected = np.flatnonzero(valid)
+    uu[selected[u_finite]] = values_u[u_finite]
+    vv[selected[v_finite]] = values_v[v_finite]
+    return uu, vv
+
+
+def _near_closed_streamline_traces(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+) -> tuple[list[tuple[int, dict[str, object]]], bool, bool]:
+    """Batch the independent near-closed streamline integrations.
+
+    The state update is identical to ``_trace_streamline_candidate``.  Only
+    the evaluation order changes: all radius/start-angle/direction trajectories
+    advance one integration step together, avoiding millions of Python calls.
+    """
+    specs: list[tuple[int, float, float]] = []
+    n_angles = max(1, int(params.streamline_start_angles))
+    for radius in range(int(params.start_radius_cells), int(params.max_radius_cells) + 1):
+        for angle in np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False):
+            specs.extend((radius, float(angle), direction) for direction in (1.0, -1.0))
+    radii = np.asarray([item[0] for item in specs], dtype="float64")
+    angles = np.asarray([item[1] for item in specs], dtype="float64")
+    directions = np.asarray([item[2] for item in specs], dtype="float64")
+    count = len(specs)
+    max_steps = max(8, int(params.streamline_max_steps))
+    paths = np.full((count, max_steps + 1, 2), np.nan, dtype="float64")
+    start_x = float(center_i) + radii * np.cos(angles)
+    start_y = float(center_j) + radii * np.sin(angles)
+    paths[:, 0, 0], paths[:, 0, 1] = start_x, start_y
+    x, y = start_x.copy(), start_y.copy()
+    previous_angle = np.arctan2(y - float(center_j), x - float(center_i))
+    winding = np.zeros(count, dtype="float64")
+    lengths = np.ones(count, dtype=int)
+    active = np.ones(count, dtype=bool)
+    closed = np.zeros(count, dtype=bool)
+    failed_finite = np.zeros(count, dtype=bool)
+    left_domain = np.zeros(count, dtype=bool)
+    step = max(float(params.streamline_step_cells), 0.05)
+
+    for _ in range(max_steps):
+        ids = np.flatnonzero(active)
+        if not ids.size:
+            break
+        at_edge = (x[ids] <= 0.0) | (y[ids] <= 0.0) | (x[ids] >= u.shape[1] - 1) | (y[ids] >= u.shape[0] - 1)
+        if np.any(at_edge):
+            edge_ids = ids[at_edge]
+            left_domain[edge_ids] = True
+            active[edge_ids] = False
+        ids = ids[~at_edge]
+        if not ids.size:
+            continue
+        uu, vv = _sample_uv_many(u, v, x[ids], y[ids])
+        speed = np.hypot(uu, vv)
+        finite = np.isfinite(speed) & (speed > 1.0e-10)
+        if np.any(~finite):
+            bad_ids = ids[~finite]
+            failed_finite[bad_ids] = True
+            active[bad_ids] = False
+        ids = ids[finite]
+        if not ids.size:
+            continue
+        uu, vv, speed = uu[finite], vv[finite], speed[finite]
+        ux = directions[ids] * uu / speed
+        uy = directions[ids] * vv / speed
+        mid_x = x[ids] + 0.5 * step * ux
+        mid_y = y[ids] + 0.5 * step * uy
+        mu, mv = _sample_uv_many(u, v, mid_x, mid_y)
+        mid_speed = np.hypot(mu, mv)
+        midpoint_valid = np.isfinite(mid_speed) & (mid_speed > 1.0e-10)
+        if np.any(midpoint_valid):
+            ux[midpoint_valid] = directions[ids[midpoint_valid]] * mu[midpoint_valid] / mid_speed[midpoint_valid]
+            uy[midpoint_valid] = directions[ids[midpoint_valid]] * mv[midpoint_valid] / mid_speed[midpoint_valid]
+        new_x = x[ids] + step * ux
+        new_y = y[ids] + step * uy
+        outside = (new_x < 0.0) | (new_y < 0.0) | (new_x > u.shape[1] - 1) | (new_y > u.shape[0] - 1)
+        if np.any(outside):
+            outside_ids = ids[outside]
+            left_domain[outside_ids] = True
+            active[outside_ids] = False
+        valid_ids = ids[~outside]
+        if not valid_ids.size:
+            continue
+        valid_x, valid_y = new_x[~outside], new_y[~outside]
+        x[valid_ids], y[valid_ids] = valid_x, valid_y
+        new_angle = np.arctan2(valid_y - float(center_j), valid_x - float(center_i))
+        winding[valid_ids] += np.asarray(_angle_diff(new_angle, previous_angle[valid_ids]), dtype="float64")
+        previous_angle[valid_ids] = new_angle
+        paths[valid_ids, lengths[valid_ids], 0] = valid_x
+        paths[valid_ids, lengths[valid_ids], 1] = valid_y
+        lengths[valid_ids] += 1
+        closure = np.hypot(valid_x - start_x[valid_ids], valid_y - start_y[valid_ids])
+        completed = (
+            (lengths[valid_ids] >= int(params.streamline_min_points))
+            & (np.abs(winding[valid_ids]) >= 2.0 * math.pi * float(params.streamline_min_winding_turns))
+            & (closure <= float(params.streamline_closure_tolerance_cells))
+        )
+        if np.any(completed):
+            completed_ids = valid_ids[completed]
+            closed[completed_ids] = True
+            active[completed_ids] = False
+
+    accepted: list[tuple[int, dict[str, object]]] = []
+    for idx in np.flatnonzero(closed):
+        points = paths[idx, : lengths[idx]].copy()
+        closure_error = float(np.hypot(points[-1, 0] - start_x[idx], points[-1, 1] - start_y[idx]))
+        radial = np.hypot(points[:, 0] - float(center_i), points[:, 1] - float(center_j))
+        radial_cv = float(np.nanstd(radial) / max(np.nanmean(radial), 1.0e-6))
+        winding_turns = float(abs(winding[idx]) / (2.0 * math.pi))
+        accepted.append((
+            int(radii[idx]),
+            {
+                "points": points,
+                "closed": True,
+                "failed_finite": bool(failed_finite[idx]),
+                "left_domain": bool(left_domain[idx]),
+                "closure_error_cells": closure_error,
+                "winding_turns": winding_turns,
+                "radial_cv": radial_cv,
+                "score": float(closure_error + 2.0 * abs(1.0 - min(winding_turns, 1.5)) + radial_cv),
+            },
+        ))
+    return accepted, bool(np.any(failed_finite)), bool(np.any(lengths > 1))
+
+
+def _near_closed_streamline_check(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+) -> dict[str, float | bool | str]:
+    """Accept a finite, near-closed streamline without a circular-flow test.
+
+    This deliberately scans every configured starting radius.  The historical
+    circle test stops at the first bad radius, which is unsuitable when an
+    irregular closed streamline exists outside a weak inner core.
+    """
+    failure_counts = {key: 0 for key in FAILURE_LABELS}
+    candidates: list[tuple[int, dict[str, object], float, float]] = []
+    traces, saw_nonfinite, saw_trace = _near_closed_streamline_traces(u, v, center_i, center_j, params)
+    for radius, trace in traces:
+                points = np.asarray(trace["points"], dtype="float64")
+                if points.size:
+                    uu = np.empty(len(points), dtype="float64")
+                    vv = np.empty(len(points), dtype="float64")
+                    for idx, (x, y) in enumerate(points):
+                        uu[idx], vv[idx] = _sample_uv_at(u, v, float(x), float(y))
+                    finite = np.isfinite(uu) & np.isfinite(vv) & (np.hypot(uu, vv) > 1.0e-10)
+                    finite_fraction = float(finite.mean()) if finite.size else 0.0
+                    mean_speed = float(np.nanmean(np.hypot(uu[finite], vv[finite]))) if finite.any() else np.nan
+                else:
+                    finite_fraction, mean_speed = 0.0, np.nan
+                if bool(trace["closed"]) and finite_fraction >= float(params.min_finite_fraction):
+                    candidates.append((radius, trace, finite_fraction, mean_speed))
+
+    if candidates:
+        # Prefer the largest enclosing streamline; use closure error only to
+        # break ties at one radius, then prefer more complete winding.
+        radius, trace, finite_fraction, mean_speed = sorted(
+            candidates,
+            key=lambda item: (
+                -item[0],
+                float(item[1]["closure_error_cells"]),
+                -float(item[1]["winding_turns"]),
+                float(item[1]["score"]),
+            ),
+        )[0]
+        boundary_i, boundary_j = _serialize_streamline_points(np.asarray(trace["points"], dtype="float64"))
+        return {
+            "circle_passed": True,
+            "hua_pass": True,
+            "radius_cells": float(radius),
+            "accepted_radius_cells": float(radius),
+            "finite_fraction": finite_fraction,
+            "mean_circle_speed_ms": mean_speed,
+            "max_velocity_ratio": np.nan,
+            "velocity_ratio_soft_warning": "not_evaluated",
+            "max_angle_jump_deg": np.nan,
+            "angle_jump_soft_warning": "not_evaluated",
+            "direction_exception_count": np.nan,
+            "direction_exception_soft_warning": "not_evaluated",
+            "positive_angle_diff_count": np.nan,
+            "negative_angle_diff_count": np.nan,
+            "direction_exception_limit": np.nan,
+            "boundary_monotonic_required": False,
+            "boundary_monotonic_passed": "not_evaluated",
+            "boundary_monotonic_exception_limit": np.nan,
+            "tangent_pass_fraction": np.nan,
+            "tangent_alignment_soft_warning": "not_evaluated",
+            "symmetry_pass_fraction": np.nan,
+            "opposite_reversal_fraction": np.nan,
+            "circulation_sign": np.nan,
+            "dominant_failure_code": -1.0,
+            "dominant_failure": "none",
+            "first_hard_failure_code": -1.0,
+            "first_hard_failure": "none",
+            "hard_failure_order": "finite->near_closed_streamline",
+            "boundary_mode": "near_closed_streamline",
+            "boundary_source": "near_closed_streamline",
+            "streamline_closed": True,
+            "streamline_points": float(len(np.asarray(trace["points"]))),
+            "streamline_boundary_i": boundary_i,
+            "streamline_boundary_j": boundary_j,
+            "streamline_closure_error_cells": float(trace["closure_error_cells"]),
+            "streamline_winding_turns": float(trace["winding_turns"]),
+            "streamline_direction_exception_fraction": np.nan,
+            "tangent_fraction_24deg": np.nan,
+            "tangent_fraction_30deg": np.nan,
+            "tangent_fraction_36deg": np.nan,
+            "tangent_fraction_45deg": np.nan,
+            **{f"failure_{key}_{label}_count": 0.0 for key, label in FAILURE_LABELS.items()},
+        }
+
+    failure_code = 0 if saw_nonfinite and saw_trace else 10
+    failure_counts[failure_code] = 1
+    return {
+        "circle_passed": False,
+        "hua_pass": False,
+        "radius_cells": np.nan,
+        "accepted_radius_cells": 0.0,
+        "finite_fraction": 0.0,
+        "mean_circle_speed_ms": np.nan,
+        "max_velocity_ratio": np.nan,
+        "velocity_ratio_soft_warning": "not_evaluated",
+        "max_angle_jump_deg": np.nan,
+        "angle_jump_soft_warning": "not_evaluated",
+        "direction_exception_count": np.nan,
+        "direction_exception_soft_warning": "not_evaluated",
+        "positive_angle_diff_count": np.nan,
+        "negative_angle_diff_count": np.nan,
+        "direction_exception_limit": np.nan,
+        "boundary_monotonic_required": False,
+        "boundary_monotonic_passed": "not_evaluated",
+        "boundary_monotonic_exception_limit": np.nan,
+        "tangent_pass_fraction": np.nan,
+        "tangent_alignment_soft_warning": "not_evaluated",
+        "symmetry_pass_fraction": np.nan,
+        "opposite_reversal_fraction": np.nan,
+        "circulation_sign": np.nan,
+        "dominant_failure_code": float(failure_code),
+        "dominant_failure": FAILURE_LABELS[failure_code],
+        "first_hard_failure_code": float(failure_code),
+        "first_hard_failure": FAILURE_LABELS[failure_code],
+        "hard_failure_order": "finite->near_closed_streamline",
+        "boundary_mode": "near_closed_streamline",
+        "boundary_source": "near_closed_streamline_rejected",
+        "streamline_closed": False,
+        "streamline_points": 0.0,
+        "streamline_boundary_i": "",
+        "streamline_boundary_j": "",
+        "streamline_closure_error_cells": np.nan,
+        "streamline_winding_turns": np.nan,
+        "streamline_direction_exception_fraction": np.nan,
+        "tangent_fraction_24deg": np.nan,
+        "tangent_fraction_30deg": np.nan,
+        "tangent_fraction_36deg": np.nan,
+        "tangent_fraction_45deg": np.nan,
+        **{f"failure_{key}_{label}_count": float(failure_counts[key]) for key, label in FAILURE_LABELS.items()},
+    }
 
 
 def _serialize_streamline_points(points: np.ndarray, limit: int = 720) -> tuple[str, str]:
@@ -2739,6 +3032,62 @@ def _hua_verify_radius(
     lon: np.ndarray | None = None,
     lat: np.ndarray | None = None,
 ) -> dict[str, float | bool | str]:
+    if params.deep_hua_mode == "tangent_then_near_closed_streamline":
+        # Preserve the established circle/tangent decision first.  The
+        # non-circular streamline search is a recovery branch only, so it
+        # cannot replace layers already accepted by the historical rule.
+        primary = _hua_verify_radius(
+            u,
+            v,
+            center_i,
+            center_j,
+            replace(params, deep_hua_mode="full"),
+            ssh=ssh,
+            speed=speed,
+            extremum_type=extremum_type,
+            lon=lon,
+            lat=lat,
+        )
+        primary = dict(primary)
+        if bool(primary.get("hua_pass", False)):
+            return {
+                **primary,
+                "deep_boundary_branch": "tangent_primary",
+                "fallback_attempted": False,
+                "primary_first_hard_failure": "none",
+                "fallback_first_hard_failure": "not_attempted",
+            }
+
+        recovered = _near_closed_streamline_check(u, v, center_i, center_j, params)
+        recovered = dict(recovered)
+        primary_failure = str(primary.get("first_hard_failure", "hua_failed"))
+        if bool(recovered.get("hua_pass", False)):
+            return {
+                **recovered,
+                "deep_boundary_branch": "near_closed_streamline_fallback",
+                "fallback_attempted": True,
+                "fallback_trigger": primary_failure,
+                "primary_first_hard_failure": primary_failure,
+                "fallback_first_hard_failure": "none",
+                "primary_tangent_pass_fraction": primary.get("tangent_pass_fraction", np.nan),
+                "primary_accepted_radius_cells": primary.get("accepted_radius_cells", 0.0),
+                "boundary_mode": "tangent_then_near_closed_streamline",
+                "boundary_source": "near_closed_streamline_fallback",
+            }
+        return {
+            **recovered,
+            "deep_boundary_branch": "rejected_after_near_closed_fallback",
+            "fallback_attempted": True,
+            "fallback_trigger": primary_failure,
+            "primary_first_hard_failure": primary_failure,
+            "fallback_first_hard_failure": str(recovered.get("first_hard_failure", "no_closed_streamline")),
+            "primary_tangent_pass_fraction": primary.get("tangent_pass_fraction", np.nan),
+            "primary_accepted_radius_cells": primary.get("accepted_radius_cells", 0.0),
+            "boundary_mode": "tangent_then_near_closed_streamline",
+            "boundary_source": "near_closed_streamline_fallback_rejected",
+        }
+    if params.deep_hua_mode == "near_closed_streamline":
+        return _near_closed_streamline_check(u, v, center_i, center_j, params)
     if params.boundary_mode == "ssh_effective_contour_primary" and ssh is not None:
         if speed is None:
             speed = np.hypot(u, v)

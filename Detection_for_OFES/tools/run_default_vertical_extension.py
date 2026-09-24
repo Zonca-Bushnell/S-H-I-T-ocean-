@@ -57,10 +57,10 @@ def run_days(args: argparse.Namespace, days: list[date]) -> None:
             "--surface-root", str(args.surface_root), "--filter-root", str(args.filter_root),
             "--output-root", str(args.output_root), "--day", day.isoformat(),
             "--max-depth-layers", str(args.max_depth_layers), "--resume",
-            # Calibrated Jan1 continuation: retain a physical tangential
-            # coherence check while avoiding weak-flow direction diagnostics as
-            # layer-stopping gates.  The center remains a local speed minimum.
-            "--deep-hua-mode", "full",
+            # Every layer starts with the calibrated tangent rule.  Only a
+            # rejected layer is retried with a looser, non-circular near-closed
+            # streamline; the next layer returns to tangent-first.
+            "--deep-hua-mode", "tangent_then_near_closed_streamline",
             "--deep-center-selection", "local_step_min",
             "--deep-center-step-cells", "2",
             "--deep-tangent-tolerance-deg", "45",
@@ -69,6 +69,10 @@ def run_days(args: argparse.Namespace, days: list[date]) -> None:
             "--disable-angle-jump-hard-gate",
             "--disable-direction-exception-hard-gate",
             "--disable-opposite-reversal-hard-gate",
+            "--near-streamline-min-points", "12",
+            "--near-streamline-min-winding-turns", "0.50",
+            "--near-streamline-closure-tolerance-cells", "2.50",
+            "--near-streamline-min-finite-fraction", "0.90",
         ]
         env = os.environ.copy()
         env["HDF5_USE_FILE_LOCKING"] = "FALSE"
@@ -111,7 +115,7 @@ def finalize(args: argparse.Namespace, days: list[date]) -> None:
     ], cwd=REPO_ROOT, check=True)
     payload = {
         "days": len(days), "center_rows": int(len(centers)), "passed_rows": int(len(passed)), "vertical_objects": int(len(summary)),
-        "vertical_profile": "continuous_local_min_2cells_tangent45_fraction35",
+        "vertical_profile": "continuous_local_min_2cells_tangent45_fraction35_then_near_closed_streamline",
         "diagnostic_only_gates": ["velocity_ratio", "angle_jump", "direction_exception", "opposite_reversal"],
     }
     (args.output_root / "vertical_extension_run_summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

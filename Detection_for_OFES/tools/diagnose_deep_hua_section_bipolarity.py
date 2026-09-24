@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-file", type=Path, required=True)
     parser.add_argument("--vertical-root", type=Path, action="append", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--day", default="1991-01-01")
     return parser.parse_args()
 
 
@@ -85,8 +86,17 @@ def read_vertical_table(run: Path, stem: str) -> pd.DataFrame:
     return pd.read_csv(csv)
 
 
-def diagnose_run(root: Path, dataset: xr.Dataset, lat0: float, dlat: float, lon0: float, dlon: float, output_root: Path) -> dict[str, object]:
-    run = root / "raw_detection" / "daily_runs" / "19910101"
+def diagnose_run(
+    root: Path,
+    dataset: xr.Dataset,
+    lat0: float,
+    dlat: float,
+    lon0: float,
+    dlon: float,
+    output_root: Path,
+    day: str = "1991-01-01",
+) -> dict[str, object]:
+    run = root / "raw_detection" / "daily_runs" / day.replace("-", "")
     structures = read_vertical_table(run, "structures_hua_style")
     structures = structures.loc[structures["depth_index"].astype(int).gt(0)].copy()
     if structures.empty:
@@ -152,6 +162,7 @@ def diagnose_run(root: Path, dataset: xr.Dataset, lat0: float, dlat: float, lon0
     records.to_csv(target / "section_bipolarity_layer_diagnostics.csv", index=False)
     per_object.to_csv(target / "section_bipolarity_object_summary.csv", index=False)
     row = {
+        "day": day,
         "profile": name,
         "objects_with_below_surface_layers": int(len(per_object)),
         "median_max_depth_m": float(per_object["max_depth_m"].median()),
@@ -171,7 +182,16 @@ def main() -> None:
         latitude = dataset["latitude"].values.astype("f8")
         longitude = dataset["longitude"].values.astype("f8")
         rows = [
-            diagnose_run(root, dataset, float(latitude[0]), float(latitude[1] - latitude[0]), float(longitude[0]), float(longitude[1] - longitude[0]), args.output_root)
+            diagnose_run(
+                root,
+                dataset,
+                float(latitude[0]),
+                float(latitude[1] - latitude[0]),
+                float(longitude[0]),
+                float(longitude[1] - longitude[0]),
+                args.output_root,
+                args.day,
+            )
             for root in args.vertical_root
         ]
     pd.DataFrame(rows).to_csv(args.output_root / "section_bipolarity_comparison.csv", index=False)

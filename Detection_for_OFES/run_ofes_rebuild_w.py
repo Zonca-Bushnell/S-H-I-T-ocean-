@@ -43,7 +43,13 @@ class SelectedObject:
 
 
 def main() -> None:
-    cfg = config_from_args(build_parser().parse_args())
+    parsed = build_parser().parse_args()
+    if not parsed.legacy_rebuild_w:
+        raise SystemExit(
+            "rebuild-W is a legacy workflow and is not part of eta_hp500_geometry_vertical_v1. "
+            "Pass --legacy-rebuild-w only for an explicit historical rebuild-W run."
+        )
+    cfg = config_from_args(parsed)
     args = cfg.to_runtime_args()
     data_root = cfg.io.data_root
     result_root = cfg.io.result_root
@@ -64,6 +70,7 @@ def main() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compare OFES native W against Dipole-style rebuilt W.")
+    parser.add_argument("--legacy-rebuild-w", action="store_true", help="Required acknowledgement for this independent legacy workflow.")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--result-root", type=Path, default=DEFAULT_RESULT_ROOT)
     parser.add_argument("--output-root", type=Path, default=None)
@@ -2968,6 +2975,11 @@ def plot_composite_native_w_cross_section_pillow(composite: dict[str, object], p
     class_text = str(composite.get("multipole_class", "all"))
     region_text = str(composite.get("region", "")).strip()
     region_suffix = f" | {region_text}" if region_text else ""
+    method = str(composite.get("composite_method", "cressman"))
+    method_text = (
+        f"Cressman R={composite['cressman_radius_r']}R"
+        if method == "cressman" else "direct pointwise mean"
+    )
     draw.text(
         (35, 28),
         f"Native W crossing section | {lat_label(float(composite['target_lat']))} | {composite['polarity']} | {class_text}{region_suffix}",
@@ -2976,7 +2988,7 @@ def plot_composite_native_w_cross_section_pillow(composite: dict[str, object], p
     )
     draw.text(
         (35, 68),
-        f"{native_label}; objects={composite['object_count']}; Cressman R={composite['cressman_radius_r']}R; min objects={composite['cressman_min_objects']}; +/-{lim:.2g} x10^-6 m/s",
+        f"{native_label}; objects={composite['object_count']}; {method_text}; min objects={composite['cressman_min_objects']}; +/-{lim:.2g} x10^-6 m/s",
         fill=(80, 88, 100),
         font=small_font,
     )

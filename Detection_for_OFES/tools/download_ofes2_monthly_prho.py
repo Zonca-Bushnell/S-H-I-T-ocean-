@@ -7,7 +7,6 @@ import csv
 import json
 import os
 import time
-from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -26,19 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--start-year", type=int, required=True)
     parser.add_argument("--end-year", type=int, required=True)
-    parser.add_argument("--lat-block-rows", type=int, default=20)
-    parser.add_argument("--block-retries", type=int, default=5)
-    parser.add_argument("--retry-seconds", type=float, default=10.0)
+    parser.add_argument("--lat-block-rows", type=int, default=5)
+    parser.add_argument("--block-retries", type=int, default=8)
+    parser.add_argument("--retry-seconds", type=float, default=5.0)
     parser.add_argument("--worker-name", required=True)
     return parser.parse_args()
-
-
-def atomic_save(path: Path, values: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".npy.part")
-    with temporary.open("wb") as handle:
-        np.save(handle, values.astype("f4", copy=False), allow_pickle=False)
-    os.replace(temporary, path)
 
 
 def cache_is_complete(path: Path) -> bool:
@@ -87,11 +78,53 @@ def read_time_index(dataset: object, start_year: int, end_year: int) -> tuple[di
     )
 
 
-def read_month(dataset: object, remote_index: int, label: str, args: argparse.Namespace) -> tuple[np.ndarray, float]:
-    values = np.full(SHAPE, np.nan, dtype="f4")
+def partial_paths(path: Path) -> tuple[Path, Path]:
+    return path.with_suffix(".npy.part"), path.with_suffix(".npy.progress.json")
+
+
+def load_progress(path: Path, block_rows: int, block_count: int) -> tuple[set[int], dict[int, int]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("latitude_block_rows") != block_rows or payload.get("block_count") != block_count:
+            return set(), {}
+        completed = {int(item) for item in payload.get("completed_blocks", [])}
+        invalid = {int(key): int(value) for key, value in payload.get("invalid_counts", {}).items()}
+        return completed, invalid
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return set(), {}
+
+
+def save_progress(path: Path, block_rows: int, block_count: int, completed: set[int], invalid: dict[int, int]) -> None:
+    write_json(path, {
+        "latitude_block_rows": block_rows,
+        "block_count": block_count,
+        "completed_blocks": sorted(completed),
+        "invalid_counts": {str(key): value for key, value in invalid.items()},
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
+
+
+def open_partial(path: Path) -> np.memmap:
+    try:
+        values = np.load(path, mmap_mode="r+", allow_pickle=False)
+        if values.shape == SHAPE and values.dtype == np.dtype("f4"):
+            return values
+    except (OSError, ValueError):
+        pass
+    path.unlink(missing_ok=True)
+    return np.lib.format.open_memmap(path, mode="w+", dtype="f4", shape=SHAPE)
+
+
+def read_month(dataset: object, remote_index: int, label: str, target_path: Path, args: argparse.Namespace) -> float:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path, progress_path = partial_paths(target_path)
     block_count = (SHAPE[1] + args.lat_block_rows - 1) // args.lat_block_rows
-    invalid_count = 0
+    completed, invalid_counts = load_progress(progress_path, args.lat_block_rows, block_count)
+    values = open_partial(partial_path)
     for block_number, start in enumerate(range(0, SHAPE[1], args.lat_block_rows), start=1):
+        if block_number in completed:
+            print(f"[prho] {label} block {block_number}/{block_count} cached", flush=True)
+            continue
         stop = min(SHAPE[1], start + args.lat_block_rows)
         for attempt in range(args.block_retries + 1):
             try:
@@ -99,10 +132,13 @@ def read_month(dataset: object, remote_index: int, label: str, args: argparse.Na
                 raw = np.ma.asarray(source["prho"][(slice(remote_index, remote_index + 1), slice(None), slice(start, stop), slice(None))].data).filled(np.nan)  # type: ignore[index]
                 block = np.asarray(raw, dtype="f4")[0]
                 invalid = ~np.isfinite(block) | (np.abs(block) > FILL_ABS_LIMIT)
-                invalid_count += int(invalid.sum())
+                invalid_counts[block_number] = int(invalid.sum())
                 if invalid.any():
                     block[invalid] = np.nan
                 values[:, start:stop, :] = block
+                values.flush()
+                completed.add(block_number)
+                save_progress(progress_path, args.lat_block_rows, block_count, completed, invalid_counts)
                 break
             except Exception as exc:
                 if attempt >= args.block_retries:
@@ -111,7 +147,11 @@ def read_month(dataset: object, remote_index: int, label: str, args: argparse.Na
                 print(f"[prho] retry {label} block {block_number}/{block_count} in {delay:.0f}s: {exc}", flush=True)
                 time.sleep(delay)
         print(f"[prho] {label} block {block_number}/{block_count}", flush=True)
-    return values, invalid_count / values.size
+    values.flush()
+    del values
+    os.replace(partial_path, target_path)
+    progress_path.unlink(missing_ok=True)
+    return sum(invalid_counts.values()) / np.prod(SHAPE)
 
 
 def main() -> None:
@@ -123,11 +163,11 @@ def main() -> None:
     status_path = state_root / "monthly_prho_status.csv"
     manifest_path = state_root / "monthly_prho_manifest.json"
 
-    with nullcontext(open_url(BASE_URL, protocol="dap2")) as dataset:
-        index, lon, lat, depth, time_units = read_time_index(dataset, args.start_year, args.end_year)
-        if (depth.size, lat.size, lon.size) != SHAPE:
-            raise RuntimeError(f"Unexpected remote prho shape: {(depth.size, lat.size, lon.size)}")
-        manifest = {
+    dataset = open_url(BASE_URL, protocol="dap2")
+    index, lon, lat, depth, time_units = read_time_index(dataset, args.start_year, args.end_year)
+    if (depth.size, lat.size, lon.size) != SHAPE:
+        raise RuntimeError(f"Unexpected remote prho shape: {(depth.size, lat.size, lon.size)}")
+    manifest = {
             "status": "running",
             "source_url": BASE_URL,
             "protocol": "DAP2 via pydap",
@@ -139,27 +179,27 @@ def main() -> None:
             "latitude_block_rows": args.lat_block_rows,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
-        write_json(manifest_path, manifest)
-        rows: list[dict[str, object]] = []
-        for year in range(args.start_year, args.end_year + 1):
-            for month in range(1, 13):
-                path = args.output_root / "raw_monthly" / f"{year:04d}{month:02d}" / "prho.npy"
-                remote_index = index[(year, month)]
-                if cache_is_complete(path):
-                    data = np.load(path, mmap_mode="r", allow_pickle=False)
-                    status = "cached"
-                    invalid_fraction = float((~np.isfinite(data)).mean())
-                else:
-                    data, invalid_fraction = read_month(dataset, remote_index, f"{year:04d}-{month:02d}", args)
-                    atomic_save(path, data)
-                    status = "downloaded"
-                rows.append({
-                    "year": year, "month": month, "remote_index": remote_index, "status": status,
-                    "bytes": path.stat().st_size, "finite_fraction": float(np.isfinite(data).mean()),
-                    "invalid_fill_fraction": invalid_fraction, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                })
-                write_status(status_path, rows)
-                print(f"[prho] {year:04d}-{month:02d} {status}", flush=True)
+    write_json(manifest_path, manifest)
+    rows: list[dict[str, object]] = []
+    for year in range(args.start_year, args.end_year + 1):
+        for month in range(1, 13):
+            path = args.output_root / "raw_monthly" / f"{year:04d}{month:02d}" / "prho.npy"
+            remote_index = index[(year, month)]
+            if cache_is_complete(path):
+                data = np.load(path, mmap_mode="r", allow_pickle=False)
+                status = "cached"
+                invalid_fraction = float((~np.isfinite(data)).mean())
+            else:
+                invalid_fraction = read_month(dataset, remote_index, f"{year:04d}-{month:02d}", path, args)
+                data = np.load(path, mmap_mode="r", allow_pickle=False)
+                status = "downloaded"
+            rows.append({
+                "year": year, "month": month, "remote_index": remote_index, "status": status,
+                "bytes": path.stat().st_size, "finite_fraction": float(np.isfinite(data).mean()),
+                "invalid_fill_fraction": invalid_fraction, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            })
+            write_status(status_path, rows)
+            print(f"[prho] {year:04d}-{month:02d} {status}", flush=True)
     manifest["status"] = "complete"
     manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json(manifest_path, manifest)

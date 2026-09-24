@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-from netCDF4 import Dataset
 from scipy.ndimage import map_coordinates
 
 from Origin_eddy_detection.src.eddy_pipeline.detection_hybrid import (
@@ -55,8 +56,32 @@ def write_table(frame: pd.DataFrame, path: Path) -> None:
     # Parquet DLLs even though the numerical NetCDF stack is available.
     try:
         frame.to_parquet(path.with_suffix(".parquet"), index=False)
-    except (ImportError, OSError):
+    except Exception:
         pass
+
+
+def open_binary_velocity_dataset(root: Path, day: date) -> SimpleNamespace:
+    daily = root / f"{day:%Y%m%d}"
+    metadata_path = daily / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(metadata_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    nz, ny, nx = (int(value) for value in metadata["shape_depth_lat_lon"])
+    expected = nz * ny * nx * np.dtype("f4").itemsize
+    u_path, v_path = daily / "uo_glor.f32", daily / "vo_glor.f32"
+    for path in (u_path, v_path):
+        if path.stat().st_size != expected:
+            raise ValueError(f"Incomplete binary velocity file: {path} ({path.stat().st_size} != {expected})")
+    variables = {
+        "longitude": np.fromfile(daily / "longitude.f64", dtype="<f8"),
+        "latitude": np.fromfile(daily / "latitude.f64", dtype="<f8"),
+        "depth": np.fromfile(daily / "depth.f64", dtype="<f8"),
+        "uo_glor": np.memmap(u_path, mode="r", dtype="<f4", shape=(1, nz, ny, nx)),
+        "vo_glor": np.memmap(v_path, mode="r", dtype="<f4", shape=(1, nz, ny, nx)),
+    }
+    if variables["longitude"].size != nx or variables["latitude"].size != ny or variables["depth"].size != nz:
+        raise ValueError(f"Coordinate dimensions do not match velocity shape in {daily}")
+    return SimpleNamespace(variables=variables)
 
 
 def params_from_args(args: argparse.Namespace) -> DetectionParams:
@@ -75,7 +100,7 @@ def params_from_args(args: argparse.Namespace) -> DetectionParams:
         symmetry_tolerance_deg=120.0,
         min_tangent_fraction=float(args.deep_min_tangent_fraction),
         min_reversal_fraction=float(args.deep_min_reversal_fraction),
-        min_finite_fraction=0.95,
+        min_finite_fraction=float(args.near_streamline_min_finite_fraction),
         direction_exception_extra=0,
         enforce_velocity_ratio_hard_gate=bool(args.enforce_velocity_ratio_hard_gate),
         enforce_tangent_alignment_hard_gate=bool(args.enforce_tangent_alignment_hard_gate),
@@ -84,7 +109,14 @@ def params_from_args(args: argparse.Namespace) -> DetectionParams:
         enforce_direction_exception_hard_gate=not bool(args.disable_direction_exception_hard_gate),
         enforce_opposite_reversal_hard_gate=not bool(args.disable_opposite_reversal_hard_gate),
         deep_hua_mode=str(getattr(args, "deep_hua_mode", "minimal_finite_only")),
-        boundary_mode="ssh_primary_open_ocean_no_streamline_gate",
+        boundary_mode=(
+            "near_closed_streamline"
+            if str(getattr(args, "deep_hua_mode", "")) in {"near_closed_streamline", "tangent_then_near_closed_streamline"}
+            else "ssh_primary_open_ocean_no_streamline_gate"
+        ),
+        streamline_closure_tolerance_cells=float(args.near_streamline_closure_tolerance_cells),
+        streamline_min_winding_turns=float(args.near_streamline_min_winding_turns),
+        streamline_min_points=int(args.near_streamline_min_points),
     )
 
 
@@ -253,13 +285,26 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
     if int(args.max_surface_objects) > 0:
         source = source.sort_values(["hua_object_id"]).head(int(args.max_surface_objects)).copy()
     out_dir = args.output_root / "raw_detection" / "daily_runs" / f"{day:%Y%m%d}"
-    if args.resume and (out_dir / "centers_hua_style.parquet").exists():
+    resume_outputs = (
+        out_dir / "centers_hua_style.parquet",
+        out_dir / "structures_hua_style.parquet",
+        out_dir / "vertical_extension_summary.json",
+    )
+    if args.resume and all(path.exists() and path.stat().st_size > 0 for path in resume_outputs):
         return {"day": day.isoformat(), "status": "resume"}
+    binary_root = getattr(args, "filter_binary_root", None)
     input_path = args.filter_root / f"global_phy_{day:%Y%m%d}.nc"
-    if not input_path.exists():
+    if binary_root is None and not input_path.exists():
         raise FileNotFoundError(input_path)
 
     params = params_from_args(args)
+    vertical_algorithm = (
+        "tangent_then_near_closed_streamline_depth_continuation"
+        if params.deep_hua_mode == "tangent_then_near_closed_streamline"
+        else "near_closed_streamline_depth_continuation"
+        if params.deep_hua_mode == "near_closed_streamline"
+        else "existing_hua_depth_continuation"
+    )
     centers: list[dict[str, object]] = [
         make_surface_record(row, day=day, source_label=source_label) for _, row in source.iterrows()
     ]
@@ -267,7 +312,15 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
     voxels: list[dict[str, object]] = []
     states: list[dict[str, object]] = []
 
-    with Dataset(input_path) as ds:
+    if binary_root is not None:
+        dataset_context = nullcontext(open_binary_velocity_dataset(binary_root, day))
+        velocity_input_mode = "matlab_netcdf_to_raw_binary_bridge"
+    else:
+        from netCDF4 import Dataset
+        dataset_context = Dataset(input_path)
+        velocity_input_mode = "netcdf4"
+
+    with dataset_context as ds:
         lon = np.asarray(ds.variables["longitude"][:], dtype="f8")
         lat = np.asarray(ds.variables["latitude"][:], dtype="f8")
         depth = np.asarray(ds.variables["depth"][:], dtype="f8")
@@ -291,7 +344,7 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                 "radius_km": radius_km if np.isfinite(radius_km) else radius * float(np.nanmean([dx_km, dy_km])),
                 "polarity": str(row.get("polarity", "")),
             })
-            if np.isfinite(radius) and radius > 0:
+            if args.write_object_voxels and np.isfinite(radius) and radius > 0:
                 voxels.extend(
                     _object_voxels_for_layer(
                         u0, v0, lon, lat, float(depth[0]), day=day, object_id=object_id,
@@ -358,7 +411,7 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                             float(refined["center_j_refined"]) - anchor_j,
                         )),
                         "vertical_extension_source": source_label,
-                        "vertical_extension_algorithm": "existing_hua_depth_continuation",
+                        "vertical_extension_algorithm": vertical_algorithm,
                         "vertical_extension_stop_reason": "" if passed else str(check.get("first_hard_failure", "hua_failed")),
                     }
                 )
@@ -374,11 +427,12 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
                     "refined_ok": record["refined_ok"], "refined_offset_km": record["refined_offset_km"],
                     "radius_km": radius * float(np.nanmean([dx_km, dy_km])), "polarity": str(source_row.get("polarity", "")),
                 })
-                voxels.extend(_object_voxels_for_layer(
-                    u, v, lon, lat, float(depth[depth_index]), day=day, object_id=state["object_id"],
-                    depth_index=int(depth_index), center_i=center_i, center_j=center_j, radius_cells=radius,
-                    polarity=str(source_row.get("polarity", "")),
-                ))
+                if args.write_object_voxels:
+                    voxels.extend(_object_voxels_for_layer(
+                        u, v, lon, lat, float(depth[depth_index]), day=day, object_id=state["object_id"],
+                        depth_index=int(depth_index), center_i=center_i, center_j=center_j, radius_cells=radius,
+                        polarity=str(source_row.get("polarity", "")),
+                    ))
                 state["prev_prev_i"], state["prev_prev_j"] = anchor_i, anchor_j
                 state["prev_i"] = int(np.clip(round(float(refined["center_i_refined"])), 0, len(lon) - 1))
                 state["prev_j"] = int(np.clip(round(float(refined["center_j_refined"])), 0, len(lat) - 1))
@@ -389,19 +443,23 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
 
     centers_df = pd.DataFrame(centers)
     structures_df = pd.DataFrame(structures)
+    if args.vertical_profile_id:
+        centers_df["vertical_profile_id"] = str(args.vertical_profile_id)
+        structures_df["vertical_profile_id"] = str(args.vertical_profile_id)
     voxels_df = pd.DataFrame(voxels)
     write_table(centers_df, out_dir / "centers_hua_style")
     write_table(structures_df, out_dir / "structures_hua_style")
-    voxel_path = args.output_root / "raw_detection" / "object_voxels_parts" / f"year={day.year}" / f"date={day:%Y%m%d}.parquet"
-    voxel_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        voxels_df.to_parquet(voxel_path, index=False)
-    except (ImportError, OSError):
-        voxels_df.to_csv(voxel_path.with_suffix(".csv.gz"), index=False, compression="gzip")
+    if args.write_object_voxels:
+        voxel_path = args.output_root / "raw_detection" / "object_voxels_parts" / f"year={day.year}" / f"date={day:%Y%m%d}.parquet"
+        voxel_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            voxels_df.to_parquet(voxel_path, index=False)
+        except (ImportError, OSError):
+            voxels_df.to_csv(voxel_path.with_suffix(".csv.gz"), index=False, compression="gzip")
     summary = {
         "day": day.isoformat(), "surface_objects": int(len(source)), "center_rows": int(len(centers_df)),
         "passed_rows": int(centers_df["hua_pass"].fillna(False).astype(bool).sum()), "voxels": int(len(voxels_df)),
-        "algorithm": "depth_major_existing_hua", "max_depth_layers": int(args.max_depth_layers),
+        "algorithm": f"depth_major_{params.deep_hua_mode}", "max_depth_layers": int(args.max_depth_layers),
         "enforce_velocity_ratio_hard_gate": bool(args.enforce_velocity_ratio_hard_gate),
         "enforce_tangent_alignment_hard_gate": bool(args.enforce_tangent_alignment_hard_gate),
         "enforce_angle_jump_hard_gate": not bool(args.disable_angle_jump_hard_gate),
@@ -409,11 +467,24 @@ def extend_day(args: argparse.Namespace, day: date) -> dict[str, object]:
         "enforce_direction_exception_hard_gate": not bool(args.disable_direction_exception_hard_gate),
         "enforce_opposite_reversal_hard_gate": not bool(args.disable_opposite_reversal_hard_gate),
         "deep_hua_mode": str(getattr(args, "deep_hua_mode", "minimal_finite_only")),
+        "vertical_profile_id": str(args.vertical_profile_id or "unspecified"),
         "deep_center_selection": str(args.deep_center_selection),
         "deep_center_step_cells": int(args.deep_center_step_cells),
         "deep_center_speed_tolerance": float(args.deep_center_speed_tolerance),
         "deep_center_min_axis_km": float(args.deep_center_min_axis_km),
         "deep_search_cells": int(args.deep_search_cells),
+        "streamline_near_closed_parameters": {
+            "start_angles": int(params.streamline_start_angles),
+            "integration_directions": 2,
+            "step_cells": float(params.streamline_step_cells),
+            "max_steps": int(params.streamline_max_steps),
+            "closure_tolerance_cells": float(params.streamline_closure_tolerance_cells),
+            "min_winding_turns": float(params.streamline_min_winding_turns),
+            "min_points": int(params.streamline_min_points),
+            "min_finite_fraction": float(params.min_finite_fraction),
+        },
+        "velocity_input_mode": velocity_input_mode,
+        "write_object_voxels": bool(args.write_object_voxels),
         "surface_input": str(source_table) if source_table is not None else str(day_path(args.surface_root, day)),
         "surface_selection": "qc_pass=True" if source_table is not None else "hua_pass=True and non-transient",
     }
@@ -429,8 +500,13 @@ def main() -> None:
         help="Explicit centers_hua_style.csv source. Selects qc_pass=True and does not apply persistence filtering.",
     )
     parser.add_argument("--filter-root", type=Path, default=DEFAULT_FILTER_ROOT)
+    parser.add_argument(
+        "--filter-binary-root", type=Path,
+        help="Optional raw-binary velocity bridge root containing YYYYMMDD/metadata.json and u/v float32 files.",
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--day", required=True)
+    parser.add_argument("--vertical-profile-id", default="")
     parser.add_argument("--max-depth-layers", type=int, default=105)
     parser.add_argument("--deep-search-cells", type=int, default=6)
     parser.add_argument(
@@ -481,9 +557,15 @@ def main() -> None:
         help="Retain opposite-reversal diagnostics but never reject a deep layer for them.",
     )
     parser.add_argument(
-        "--deep-hua-mode", choices=["full", "minimal_reversal_only", "minimal_finite_only"], default="minimal_finite_only",
+        "--deep-hua-mode", choices=["full", "minimal_reversal_only", "minimal_finite_only", "near_closed_streamline", "tangent_then_near_closed_streamline"], default="minimal_finite_only",
         help="Deep-only Hua validation kernel; the default retains only finite-velocity coverage.",
     )
+    parser.add_argument("--near-streamline-closure-tolerance-cells", type=float, default=1.75)
+    parser.add_argument("--near-streamline-min-winding-turns", type=float, default=0.75)
+    parser.add_argument("--near-streamline-min-points", type=int, default=16)
+    parser.add_argument("--near-streamline-min-finite-fraction", type=float, default=0.95)
+    parser.add_argument("--write-object-voxels", action="store_true",
+                        help="Materialize tracking voxels. Disabled for continuation/section/W-only runs.")
     parser.add_argument("--max-surface-objects", type=int, default=0, help="Smoke-only cap; <=0 keeps every final surface object.")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()

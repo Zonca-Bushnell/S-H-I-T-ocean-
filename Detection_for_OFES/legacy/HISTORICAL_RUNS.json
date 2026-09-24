@@ -1,0 +1,16 @@
+{
+  "read_only": true,
+  "purpose": "Historical OFES outputs retained for comparison; never reused as official-profile stage inputs.",
+  "registrations": [
+    {
+      "name": "full_tangent_native_w_baseline_19910101_19910119",
+      "path": "E:\\DATA\\01_Eddy_correspond\\02_OFES\\Fromthebeginning\\05_TEMP\\nh_cyclonic_strict_core_native_w_pointwise_unrotated_eta_19910101_19910119",
+      "role": "native-W A/B comparison only"
+    },
+    {
+      "name": "historical_vertical_experiments",
+      "path": "E:\\DATA\\01_Eddy_correspond\\02_OFES\\Fromthebeginning\\04_Vertical",
+      "role": "legacy and sensitivity outputs only"
+    }
+  ]
+}

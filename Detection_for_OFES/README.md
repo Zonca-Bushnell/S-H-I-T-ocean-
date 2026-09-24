@@ -1,56 +1,82 @@
 # Detection_for_OFES
 
-OFES-specific I/O, SSH-contour detection orchestration, vertical continuation,
-and native-W composites. Generic detection remains in `Origin_eddy_detection`.
+## Official Workflow
 
-## Current Default
-
-`eta_hp500_geometry_vertical` is the only active OFES research profile.
+There is one production scientific profile:
 
 ```text
-SSH              OFES eta free-surface height only
-surface filter   Gaussian field - LP_500 km(field), daily field
-candidates       multiscale SSH seeds, no tile cap, SSH-primary contours
-surface QC       geometry + same-day overlap; no streamline hard gate
-persistence      disabled
-vertical         local 2-cell continuation, section-bipolar tie-break,
-                 tangent tolerance 45 degrees and fraction >= 0.35
+eta_hp500_geometry_vertical_v1
 ```
 
-`eta` already is the OFES free surface. Production code must not subtract
-`pressur`; `eta - (pressur - 1000)` is historical diagnostic-only.
+It is intentionally narrow and traceable:
 
-Start or resume Jan01-Jan19 with 19 workers:
+```text
+SSH              OFES native eta only; never pressur or an MSS anomaly
+surface          daily Gaussian eta - LP500 km(eta)
+detection        no tile cap, SSH-primary contour
+surface QC       geometry + same-day, same-polarity overlap
+excluded         streamline hard gate, persistence, tracking, rebuild-W
+vertical         tangent 45 degrees / fraction >= 0.35, then relaxed
+                 near-closed-streamline fallback
+strict core      section-bipolar classification only; never changes acceptance
+native W         NH cyclonic strict-core; native W; unrotated pointwise mean
+```
+
+Run or resume through the sole launcher:
 
 ```powershell
-& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_default_geometry_vertical.ps1'
+& 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_ofes_default_run.ps1' -Resume
 ```
 
-Outputs:
+For a partial, auditable run:
+
+```powershell
+D:\Util\lever\02_miniforge\envs\OFES_detection\python.exe -m Detection_for_OFES.workflows.default_pipeline `
+  --profile eta_hp500_geometry_vertical_v1 `
+  --start 1991-01-01 --end 1991-01-19 --resume `
+  --stages surface-inputs,surface-filter,raw-detection,geometry-qc
+```
+
+All official results live only below:
 
 ```text
-E:\DATA\01_Eddy_correspond\02_OFES\Fromthebeginning\04_Vertical\eta_highpass_500km_no_tilecap_ssh_geometry_section_bipolar_jan01_jan19
+E:\DATA\01_Eddy_correspond\02_OFES\Fromthebeginning\runs\
+  eta_hp500_geometry_vertical_v1\YYYYMMDD_YYYYMMDD\
+    00_manifest\
+    01_surface\{eta_inputs,highpass_500km,raw_detection,geometry_qc}\
+    02_velocity\highpass_500km_full105\
+    03_vertical\tangent45_fraction35_then_near_closed_relaxed\
+    04_section_bipolar\
+    05_native_w\nh_cyclonic_strict_core\
+    06_reports\
+    logs\
 ```
 
-`hua_object_id` is the immutable surface source ID. All derived tables retain
-it; any numeric tracking ID must also retain `source_hua_object_id`.
+Every stage has a date-level input/profile fingerprint under `00_manifest/stages`.
+`--resume` skips only a matching complete day; it refuses to reuse an output
+whose profile or input identity changed. `hua_object_id` remains the object
+primary key. Official outputs add `run_id`, `profile_id`,
+`vertical_profile_id`, date, and depth index where applicable.
 
-## Interfaces
-
-- `profiles.py`: named workflow definitions and all default scientific values.
-- `tools.build_ofes_eta_surface_inputs`: one-time native `eta` to velocity-grid
-  input construction; surface `u/v` are copied unchanged.
-- `tools.run_default_geometry_vertical`: the only default end-to-end runner.
-- `tools.run_ofes_isopycnal_composite`: shared native `prho`/`w` composite
-  engine; specialty composites call this engine rather than rebuilding it.
+Default execution is FFT horizontal convolution with compression level 1,
+up to 8 date workers for surface stages, 2 for full-depth velocity and vertical
+stages, depth-major continuation, no default object voxels, and direct readonly
+DTA memmaps for Native W. `--stage-raw` remains an explicit network-storage
+fallback for W sampling.
 
 ## Historical And Experiments
 
-- `tools.run_default_vertical_extension --legacy-rossby-workflow` is retained
-  only for the former Rossby/persistence catalog.
-- eta-MSS, three-kernel, pressure-adjusted and persistence comparisons are
-  historical experiments, not production commands.
-- Hua center/gate sensitivity scripts live under `tools.experiments.vertical`;
-  compatibility entry points are not default launchers.
-- Legacy rebuild-W still consumes `origin_streamline_cpu_jan01_jan19_life1`
-  until its object definition is migrated independently.
+Existing results under `Fromthebeginning/04_Vertical`, `05_TEMP`, threshold
+sweeps, three-kernel comparisons, MSS comparisons, Rossby paths, MATLAB bridge,
+and rebuild-W are historical or experimental. They are not moved, deleted, or
+rewritten by the official workflow. Their registry is in
+[`legacy/HISTORICAL_RUNS.json`](legacy/HISTORICAL_RUNS.json).
+
+- `tools.run_default_geometry_vertical`, `start_default_geometry_vertical.ps1`,
+  and `run_default_surface_catalog.ps1` are compatibility forwarders.
+- `tools.run_default_vertical_extension --legacy-rossby-workflow` is explicit
+  legacy reproduction only.
+- `run_ofes_rebuild_w.py` remains a separate legacy workflow and cannot read
+  official-profile objects implicitly.
+- Research commands are documented under `experiments/`; they never appear in
+  the official launch instructions.
