@@ -1,0 +1,6 @@
+{
+  "date": "2018-01-01",
+  "candidate_count_after_merge_and_tile_cap": 1,
+  "seed_scale_counts_after_merge_and_tile_cap": {},
+  "candidate_selection": "tile_topn"
+}

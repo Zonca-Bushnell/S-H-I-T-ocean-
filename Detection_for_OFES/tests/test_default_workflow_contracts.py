@@ -14,22 +14,24 @@ class DefaultWorkflowContractTests(unittest.TestCase):
     def test_profile_is_eta_highpass_geometry_only(self) -> None:
         profile = geometry_vertical_profile()
         self.assertEqual(profile.name, "eta_hp500_geometry_vertical_v1")
-        self.assertEqual(profile.ssh_definition, "ofes_eta_free_surface")
-        self.assertEqual(profile.highpass_cutoff_km, 500.0)
-        self.assertEqual(profile.kernel, "gaussian")
-        self.assertTrue(profile.remove_streamline_gate)
-        self.assertEqual(profile.temporal_window_days, 1)
-        self.assertEqual(profile.deep_hua_mode, "tangent_then_near_closed_streamline")
-        self.assertFalse(profile.write_object_voxels)
+        self.assertEqual(profile.surface.ssh_definition, "ofes_eta_free_surface")
+        self.assertEqual(profile.surface.highpass_cutoff_km, 500.0)
+        self.assertEqual(profile.surface.kernel, "gaussian")
+        self.assertFalse(profile.surface.streamline_hard_gate)
+        self.assertFalse(profile.surface.persistence)
+        self.assertEqual(profile.vertical.mode, "tangent_then_near_closed_streamline")
+        self.assertFalse(profile.vertical.write_object_voxels)
         self.assertEqual((profile.surface_workers, profile.velocity_filter_workers, profile.vertical_workers, profile.composite_workers), (8, 2, 2, 8))
         profile_text = repr(profile).lower()
-        for prohibited in ("pressur", "mss", "rossby", "persistence", "tracking", "rebuild"):
+        for prohibited in ("pressur", "mss", "rossby", "rebuild"):
             self.assertNotIn(prohibited, profile_text)
 
     def test_context_uses_only_canonical_run_layout(self) -> None:
         context = RunContext(geometry_vertical_profile(), "1991-01-01", "1991-01-19")
         root = str(context.root).replace("/", "\\")
-        self.assertIn("Fromthebeginning\\runs\\eta_hp500_geometry_vertical_v1\\19910101_19910119", root)
+        self.assertIn("Fromthebeginning\\runs\\eta_hp500_geometry_vertical_v1\\layout_v2\\19910101_19910119", root)
+        self.assertEqual(context.tracking.name, "05_tracking")
+        self.assertEqual(context.shape.name, "06_shape")
         self.assertEqual(context.vertical.name, "tangent45_fraction35_then_near_closed_relaxed")
         self.assertEqual(context.native_w.name, "nh_cyclonic_strict_core")
 

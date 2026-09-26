@@ -14,7 +14,7 @@ $stderr = Join-Path $logDir 'download_fes2014.stderr.log'
 $script = Join-Path $repoRoot 'Detection_for_OFES\tools\download_fes2014.py'
 $componentArgs = $Components -split '\s+' | Where-Object { $_ }
 $argList = @(
-  '-m', 'Detection_for_OFES.tools.download_fes2014',
+  '-m', 'Detection_for_OFES.datasets.download_fes2014',
   '--dest-root', $DestRoot,
   '--components'
 ) + $componentArgs

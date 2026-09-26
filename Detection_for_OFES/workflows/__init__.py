@@ -1,6 +1,5 @@
 """Canonical OFES research workflows.
 
-Only modules in this package define default scientific behavior.  ``tools``
-contains reusable stage implementations; ``experiments`` and ``legacy`` are
-explicit non-default entry points.
+Only modules in this package define default scientific behavior. Historical
+results are registered as read-only metadata under ``legacy``.
 """

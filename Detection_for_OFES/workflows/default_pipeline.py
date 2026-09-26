@@ -18,7 +18,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from Detection_for_OFES.ofes_io import ctl_path, expected_dta_bytes, parse_ctl, require_daily_file
+from Detection_for_OFES.io.ofes import ctl_path, expected_dta_bytes, parse_ctl, require_daily_file
 from Detection_for_OFES.profiles import (
     HISTORICAL_FULL_TANGENT_W,
     OFES_DATA_ROOT,
@@ -27,6 +27,7 @@ from Detection_for_OFES.profiles import (
 )
 from Detection_for_OFES.workflows.context import RunContext
 from Detection_for_OFES.workflows.contracts import (
+    code_fingerprint,
     file_identity,
     fingerprint,
     is_current,
@@ -45,6 +46,7 @@ DAY_STAGES = (
     "vertical",
     "section-bipolar",
 )
+OPTIONAL_STAGES = ("tracking", "shape")
 RANGE_STAGES = ("native-w", "report")
 ALL_STAGES = DAY_STAGES + RANGE_STAGES
 
@@ -78,6 +80,7 @@ def contract(context: RunContext, stage: str, token: str, inputs: Iterable[Path]
         "run_id": context.run_id,
         "profile_id": context.profile.name,
         "vertical_profile_id": context.profile.vertical_profile_id,
+        "code_fingerprint": code_fingerprint(),
         "stage": stage,
         "token": token,
         "inputs": [file_identity(path) for path in input_paths],
@@ -95,6 +98,7 @@ def annotate_csv(path: Path, context: RunContext, current: date | None = None) -
     values = {
         "run_id": context.run_id,
         "profile_id": context.profile.name,
+        "code_fingerprint": code_fingerprint(),
         "vertical_profile_id": context.profile.vertical_profile_id,
     }
     if current is not None:
@@ -122,10 +126,7 @@ def complete_or_run(
         print(f"[resume] {stage} {token}", flush=True)
         return False
     if resume and status.exists() and any(path.exists() for path in outputs):
-        raise RuntimeError(
-            f"Unsafe resume refused for {stage} {token}: output exists but its contract differs. "
-            "Use a new date-range run root or remove only this incomplete new-run stage."
-        )
+        print(f"[invalidate] {stage} {token}: contract changed; rebuilding this stage", flush=True)
     print(f"[run] {stage} {token}", flush=True)
     run(command, context.logs / stage / token)
     required(outputs)
@@ -143,10 +144,11 @@ def stage_surface_inputs(context: RunContext, current: date, resume: bool) -> No
     source_velocity = VELOCITY_SOURCE_ROOT / output.name
     complete_or_run(
         context, "surface-inputs", ymd(current), [native_eta_file(current), source_velocity], [output],
-        {"ssh_definition": context.profile.ssh_definition, "eta_only": True},
-        [sys.executable, "-m", "Detection_for_OFES.tools.build_ofes_eta_surface_inputs",
+        {"ssh_definition": context.profile.surface.ssh_definition, "eta_only": True},
+        [sys.executable, "-m", "Detection_for_OFES.stages.surface_inputs",
          "--data-root", str(OFES_DATA_ROOT), "--velocity-root", str(VELOCITY_SOURCE_ROOT),
-         "--output-root", str(context.eta_inputs), "--start", current.isoformat(), "--end", current.isoformat()],
+         "--output-root", str(context.eta_inputs), "--start", current.isoformat(), "--end", current.isoformat(),
+         "--overwrite"],
         resume=resume,
     )
 
@@ -154,17 +156,18 @@ def stage_surface_inputs(context: RunContext, current: date, resume: bool) -> No
 def filter_command(context: RunContext, current: date, output_root: Path, layers: int, workers: int) -> list[str]:
     profile = context.profile
     return [
-        sys.executable, "-m", "Detection_for_OFES.tools.build_ofes_meso_filter",
+        sys.executable, "-m", "Detection_for_OFES.filters.gaussian_highpass",
         "--input-root", str(context.eta_inputs), "--output-root", str(output_root),
         "--start", current.isoformat(), "--end", current.isoformat(),
         "--available-start", context.start, "--available-end", context.end,
-        "--temporal-window-days", str(profile.temporal_window_days),
-        "--filter-mode", "highpass", "--large-cutoff-km", str(profile.highpass_cutoff_km),
-        "--spatial-kernel", profile.kernel, "--large-cutoff-mode", "fixed",
+        "--temporal-window-days", "1",
+        "--filter-mode", "highpass", "--large-cutoff-km", str(profile.surface.highpass_cutoff_km),
+        "--spatial-kernel", profile.surface.kernel, "--large-cutoff-mode", "fixed",
         "--max-depth-layers", str(layers), "--workers", str(workers),
         "--convolution-engine", profile.convolution_engine,
         "--compression-level", str(profile.compression_level),
         "--science-tag", profile.name,
+        "--overwrite",
     ]
 
 
@@ -188,11 +191,10 @@ def stage_raw_detection(context: RunContext, current: date, resume: bool) -> Non
         context, "raw-detection", ymd(current), [source], [centers, structures],
         {"candidate_selection": "global_topn", "tile_cap": "disabled", "ssh_primary": True,
          "streamline_hard_gate": False, "persistence": False, "tracking": False},
-        [sys.executable, "-m", "Detection_for_OFES.tools.build_unified_eddy_catalog",
-         "--filter-input-root", str(context.eta_inputs), "--filter-output-root", str(context.surface_filter),
+        [sys.executable, "-m", "Detection_for_OFES.stages.surface_detection",
+         "--filter-output-root", str(context.surface_filter),
          "--output-root", str(context.surface_root), "--start", current.isoformat(), "--end", current.isoformat(),
-         "--skip-filter", "--candidate-only", "--candidate-selection", "global_topn",
-         "--open-ocean-no-streamline-gate", "--max-depth-m", "3", "--workers", "1"],
+         "--profile", context.profile.name, "--workers", "1"],
         resume=resume,
     )
     annotate_csv(centers, context, current)
@@ -200,6 +202,7 @@ def stage_raw_detection(context: RunContext, current: date, resume: bool) -> Non
 
 
 def stage_geometry_qc(context: RunContext, current: date, resume: bool) -> None:
+    geometry = context.profile.geometry
     raw = context.raw_detection / "daily_runs" / ymd(current)
     filtered = context.surface_filter / f"global_phy_{ymd(current)}.nc"
     directory = context.geometry_qc / "daily_runs" / ymd(current)
@@ -209,14 +212,32 @@ def stage_geometry_qc(context: RunContext, current: date, resume: bool) -> None:
         context, "geometry-qc", ymd(current), [raw / "centers_hua_style.csv", raw / "structures_hua_style.csv", filtered],
         [centers, structures],
         {"streamline_hard_gate": "removed", "persistence": "disabled", "jet_split": "disabled",
-         "shape_error_percent": {"normal": 70, "acc": 55, "open_ocean": 80},
-         "min_area_cells": {"normal": 16, "open_ocean": 9},
-         "min_radius_km": {"normal": 25, "open_ocean": 18},
-         "same_polarity_overlap": {"center_factor": 0.75, "area_fraction": 0.50}},
-        [sys.executable, "-m", "Detection_for_OFES.tools.postprocess_ofes_eddy_qc",
+         "shape_error_percent": {"normal": geometry.shape_error_normal_percent,
+                                   "acc": geometry.shape_error_acc_percent,
+                                   "open_ocean": geometry.shape_error_open_ocean_percent},
+         "min_area_cells": {"normal": geometry.area_cells_normal,
+                            "open_ocean": geometry.area_cells_open_ocean},
+         "min_radius_km": {"normal": geometry.radius_km_normal,
+                           "open_ocean": geometry.radius_km_open_ocean},
+         "same_polarity_overlap": {"center_factor": geometry.overlap_center_factor,
+                                   "area_fraction": geometry.overlap_fraction}},
+        [sys.executable, "-m", "Detection_for_OFES.stages.geometry_qc",
          "--source-root", str(context.raw_detection), "--filter-root", str(context.surface_filter),
          "--output-root", str(context.geometry_qc), "--day", current.isoformat(),
-         "--accept-ssh-primary-without-streamline", "--skip-persistence"],
+         "--accept-ssh-primary-without-streamline", "--skip-persistence",
+         "--max-shape-error-percent", str(geometry.shape_error_normal_percent),
+         "--acc-max-shape-error-percent", str(geometry.shape_error_acc_percent),
+         "--open-ocean-max-shape-error-percent", str(geometry.shape_error_open_ocean_percent),
+         "--min-compactness", str(geometry.compactness_normal),
+         "--open-ocean-min-compactness", str(geometry.compactness_open_ocean),
+         "--min-boundary-points", str(geometry.boundary_points_normal),
+         "--open-ocean-min-boundary-points", str(geometry.boundary_points_open_ocean),
+         "--min-area-cells", str(geometry.area_cells_normal),
+         "--open-ocean-min-area-cells", str(geometry.area_cells_open_ocean),
+         "--min-radius-km", str(geometry.radius_km_normal),
+         "--open-ocean-min-radius-km", str(geometry.radius_km_open_ocean),
+         "--overlap-center-factor", str(geometry.overlap_center_factor),
+         "--overlap-area-fraction", str(geometry.overlap_fraction)],
         resume=resume,
     )
     annotate_csv(centers, context, current)
@@ -244,32 +265,32 @@ def stage_vertical(context: RunContext, current: date, resume: bool) -> None:
     complete_or_run(
         context, "vertical", ymd(current), [table, velocity], [centers, structures, summary],
         {"depth_major": True, "max_depth_layers": 105, "center_search_cells": 6,
-         "center_step_cells": profile.deep_center_step_cells,
-         "mode": profile.deep_hua_mode, "tangent_deg": profile.deep_tangent_tolerance_deg,
-         "tangent_fraction": profile.deep_min_tangent_fraction,
+         "center_step_cells": profile.vertical.center_step_cells,
+         "mode": profile.vertical.mode, "tangent_deg": profile.vertical.tangent_tolerance_deg,
+         "tangent_fraction": profile.vertical.tangent_min_fraction,
          "near_closed": {"radius_cells": [2, 12], "starts": 4, "directions": 2,
-                         "min_points": profile.near_streamline_min_points,
-                         "min_winding_turns": profile.near_streamline_min_winding_turns,
-                         "closure_tolerance_cells": profile.near_streamline_closure_tolerance_cells,
-                         "min_finite_fraction": profile.near_streamline_min_finite_fraction},
+                         "min_points": profile.vertical.near_min_points,
+                         "min_winding_turns": profile.vertical.near_min_winding_turns,
+                         "closure_tolerance_cells": profile.vertical.near_closure_tolerance_cells,
+                         "min_finite_fraction": profile.vertical.near_min_finite_fraction},
          "disabled_hard_gates": ["angle_jump", "direction_exception", "opposite_reversal"],
-         "write_object_voxels": profile.write_object_voxels},
-        [sys.executable, "-m", "Detection_for_OFES.tools.extend_final_surface_vertical",
+         "write_object_voxels": profile.vertical.write_object_voxels},
+        [sys.executable, "-m", "Detection_for_OFES.stages.vertical",
          "--surface-table", str(table), "--filter-root", str(context.velocity_filter),
          "--output-root", str(context.vertical), "--day", current.isoformat(),
          "--vertical-profile-id", profile.vertical_profile_id, "--max-depth-layers", "105",
          "--deep-search-cells", "6", "--start-radius-cells", "2", "--max-radius-cells", "12",
-         "--deep-hua-mode", profile.deep_hua_mode, "--deep-center-selection", profile.deep_center_selection,
-         "--deep-center-step-cells", str(profile.deep_center_step_cells),
-         "--deep-center-speed-tolerance", str(profile.deep_center_speed_tolerance),
-         "--deep-tangent-tolerance-deg", str(profile.deep_tangent_tolerance_deg),
-         "--deep-min-tangent-fraction", str(profile.deep_min_tangent_fraction),
+         "--deep-hua-mode", profile.vertical.mode, "--deep-center-selection", profile.vertical.center_selection,
+         "--deep-center-step-cells", str(profile.vertical.center_step_cells),
+         "--deep-center-speed-tolerance", str(profile.vertical.center_speed_tolerance),
+         "--deep-tangent-tolerance-deg", str(profile.vertical.tangent_tolerance_deg),
+         "--deep-min-tangent-fraction", str(profile.vertical.tangent_min_fraction),
          "--enforce-tangent-alignment-hard-gate", "--disable-angle-jump-hard-gate",
          "--disable-direction-exception-hard-gate", "--disable-opposite-reversal-hard-gate",
-         "--near-streamline-min-points", str(profile.near_streamline_min_points),
-         "--near-streamline-min-winding-turns", str(profile.near_streamline_min_winding_turns),
-         "--near-streamline-closure-tolerance-cells", str(profile.near_streamline_closure_tolerance_cells),
-         "--near-streamline-min-finite-fraction", str(profile.near_streamline_min_finite_fraction)],
+         "--near-streamline-min-points", str(profile.vertical.near_min_points),
+         "--near-streamline-min-winding-turns", str(profile.vertical.near_min_winding_turns),
+         "--near-streamline-closure-tolerance-cells", str(profile.vertical.near_closure_tolerance_cells),
+         "--near-streamline-min-finite-fraction", str(profile.vertical.near_min_finite_fraction)],
         resume=resume,
     )
     annotate_csv(centers, context, current)
@@ -281,6 +302,7 @@ def section_root(context: RunContext, current: date) -> Path:
 
 
 def stage_section_bipolar(context: RunContext, current: date, resume: bool) -> None:
+    thresholds = context.profile.section_bipolar
     velocity = context.velocity_filter / f"global_phy_{ymd(current)}.nc"
     structures = context.vertical / "raw_detection" / "daily_runs" / ymd(current) / "structures_hua_style.csv"
     diagnostics = section_root(context, current) / "section_bipolarity_object_summary.csv"
@@ -288,16 +310,76 @@ def stage_section_bipolar(context: RunContext, current: date, resume: bool) -> N
     catalog = catalog_dir / "vertical_continuation_object_catalog.csv"
     complete_or_run(
         context, "section-bipolar", ymd(current), [velocity, structures], [diagnostics, catalog],
-        {"classification_only": True, "radii": ["0.6R", "1.0R"],
-         "supported": 0.50, "core": 0.60, "strict_core": 0.70},
+        {"classification_only": True, "radii": list(thresholds.radii_r),
+         "supported": thresholds.supported_fraction, "core": thresholds.core_fraction,
+         "strict_core": thresholds.strict_core_fraction},
         [sys.executable, "-m", "Detection_for_OFES.workflows.section_stage",
          "--velocity-file", str(velocity), "--vertical-root", str(context.vertical),
          "--diagnostic-root", str(context.section_bipolar / ymd(current)),
          "--catalog-root", str(catalog_dir), "--day", current.isoformat(),
-         "--vertical-definition", context.profile.vertical_profile_id],
+         "--vertical-definition", context.profile.vertical_profile_id,
+         "--supported-min-fraction", str(thresholds.supported_fraction),
+         "--core-min-fraction", str(thresholds.core_fraction),
+         "--strict-core-min-fraction", str(thresholds.strict_core_fraction)],
         resume=resume,
     )
     annotate_csv(catalog, context, current)
+
+
+def vertical_center_inputs(context: RunContext) -> list[Path]:
+    start, end = date.fromisoformat(context.start), date.fromisoformat(context.end)
+    return [
+        context.vertical / "raw_detection" / "daily_runs" / ymd(day) / "centers_hua_style.csv"
+        for day in dates(start, end)
+    ]
+
+
+def stage_tracking(context: RunContext, resume: bool) -> None:
+    profile = context.profile.tracking
+    output = context.tracking / "tracked_object_days.csv"
+    complete_or_run(
+        context, "tracking", f"{context.start}_{context.end}", vertical_center_inputs(context), [output],
+        {"filtering": False, "shift_cells": profile.shift_cells,
+         "continuous_score": profile.continuous_score, "split_merge_score": profile.split_merge_score,
+         "boundary_contract": "surface_ssh_contour; deep_tangent_or_near_closed"},
+        [sys.executable, "-m", "Detection_for_OFES.stages.tracking",
+         "--vertical-root", str(context.vertical), "--output-root", str(context.tracking),
+         "--start", context.start, "--end", context.end,
+         "--shift-cells", str(profile.shift_cells), "--continuous-score", str(profile.continuous_score),
+         "--split-merge-score", str(profile.split_merge_score)],
+        resume=resume,
+    )
+    annotate_csv(output, context)
+
+
+def stage_shape(context: RunContext, resume: bool, with_tracking: bool) -> None:
+    profile = context.profile.shape
+    tracking_table = context.tracking / "tracked_object_days.csv"
+    inputs = vertical_center_inputs(context) + ([tracking_table] if with_tracking else [])
+    output = context.shape / "object_day_shape.csv"
+    command = [
+        sys.executable, "-m", "Detection_for_OFES.stages.shape",
+        "--vertical-root", str(context.vertical), "--output-root", str(context.shape),
+        "--start", context.start, "--end", context.end,
+        "--min-layers", str(profile.min_layers),
+        "--upright-quantile", str(profile.upright_quantile),
+        "--upright-fallback", str(profile.upright_fallback),
+        "--coherent-monotonic-ratio", str(profile.coherent_monotonic_ratio),
+        "--coherent-mean-turn-deg", str(profile.coherent_mean_turn_deg),
+        "--complex-max-turn-deg", str(profile.complex_max_turn_deg),
+        "--complex-monotonic-ratio", str(profile.complex_monotonic_ratio),
+    ]
+    if with_tracking:
+        command += ["--tracking-table", str(tracking_table)]
+    complete_or_run(
+        context, "shape", f"{context.start}_{context.end}", inputs, [output],
+        {"filtering": False, "min_layers": profile.min_layers,
+         "upright": {"quantile": profile.upright_quantile, "fallback": profile.upright_fallback},
+         "coherent": {"monotonic": profile.coherent_monotonic_ratio, "mean_turn_deg": profile.coherent_mean_turn_deg},
+         "complex": {"max_turn_deg": profile.complex_max_turn_deg, "monotonic": profile.complex_monotonic_ratio}},
+        command, resume=resume,
+    )
+    annotate_csv(output, context)
 
 
 def stage_native_w(context: RunContext, resume: bool, stage_raw: bool) -> None:
@@ -308,8 +390,8 @@ def stage_native_w(context: RunContext, resume: bool, stage_raw: bool) -> None:
         {"selection": "NH cyclonic section-bipolar strict-core", "w": "native OFES", "orientation": "unrotated",
          "grid": "[-2R,2R] at 0.04R", "method": "pointwise_mean", "min_objects": 8,
          "workers": context.profile.composite_workers, "raw_mode": "staged" if stage_raw else "direct_memmap"},
-        [sys.executable, "-m", "Detection_for_OFES.tools.run_multiday_nh_cyclonic_native_w_composite",
-         "--vertical-root", str(context.root), "--surface-qc-root", str(context.geometry_qc), "--vertical-run-root", str(context.vertical),
+        [sys.executable, "-m", "Detection_for_OFES.composite.native_w",
+         "--surface-qc-root", str(context.geometry_qc), "--vertical-run-root", str(context.vertical),
          "--strict-core-catalog-root", str(context.section_bipolar), "--output-root", str(context.native_w),
          "--data-root", str(OFES_DATA_ROOT), "--start", context.start, "--end", context.end,
          "--workers", str(context.profile.composite_workers), "--selection-mode", "strict_core_nh"] +
@@ -326,7 +408,7 @@ def stage_report(context: RunContext, resume: bool) -> None:
     complete_or_run(
         context, "report", f"{context.start}_{context.end}", [candidate, HISTORICAL_FULL_TANGENT_W / "manifest.json"], [output],
         {"comparison_baseline": str(HISTORICAL_FULL_TANGENT_W), "color_map": "coolwarm"},
-        [sys.executable, "-m", "Detection_for_OFES.tools.compare_native_w_composites",
+        [sys.executable, "-m", "Detection_for_OFES.composite.compare",
          "--baseline-root", str(HISTORICAL_FULL_TANGENT_W), "--candidate-root", str(context.native_w),
          "--output-root", str(output_dir)],
         resume=resume,
@@ -338,17 +420,19 @@ def write_run_manifest(context: RunContext, selected_stages: tuple[str, ...]) ->
     payload = {
         "run_id": context.run_id,
         "profile_id": context.profile.name,
+        "code_fingerprint": code_fingerprint(),
         "profile": asdict(context.profile),
         "date_range": [context.start, context.end],
         "selected_stages": list(selected_stages),
         "scientific_contract": {
             "ssh": "OFES eta only; no pressure correction and no MSS anomaly",
             "surface": "daily Gaussian eta - LP500km(eta)",
-            "surface_qc": "SSH-primary geometry + same-polarity overlap; no streamline gate/persistence/tracking",
+            "surface_qc": "SSH-primary geometry + same-polarity overlap; no streamline gate or persistence",
             "vertical": "tangent45/fraction0.35 then relaxed near-closed fallback",
             "strict_core": "section-bipolar classification only",
             "native_w": "NH cyclonic strict-core, native unrotated pointwise mean",
-            "excluded": ["pressur", "annual_mss", "rossby_filter", "persistence", "tracking", "rebuild_w"],
+            "optional_non_filtering": ["tracking", "shape"],
+            "excluded": ["pressur", "annual_mss", "rossby_filter", "persistence", "rebuild_w"],
         },
     }
     (context.manifest_root / "run_manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -361,9 +445,9 @@ def write_run_manifest(context: RunContext, selected_stages: tuple[str, ...]) ->
 
 def parse_stages(value: str) -> tuple[str, ...]:
     requested = ALL_STAGES if value.strip().lower() == "all" else tuple(item.strip() for item in value.split(",") if item.strip())
-    invalid = sorted(set(requested).difference(ALL_STAGES))
+    invalid = sorted(set(requested).difference(ALL_STAGES + OPTIONAL_STAGES))
     if invalid:
-        raise ValueError(f"Unknown stages: {', '.join(invalid)}. Valid stages: {', '.join(ALL_STAGES)}")
+        raise ValueError(f"Unknown stages: {', '.join(invalid)}. Valid stages: {', '.join(ALL_STAGES + OPTIONAL_STAGES)}")
     return requested
 
 
@@ -383,10 +467,8 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--stages", default="all", help="Comma-separated stage names, or all.")
     parser.add_argument("--stage-raw", action="store_true", help="Optional native-W raw-file staging for network storage.")
-    parser.add_argument("--workers", type=int, default=None, help="Deprecated compatibility alias; per-stage limits come from the profile.")
-    parser.add_argument("--vertical-workers", type=int, default=None, help="Deprecated compatibility alias; ignored in favor of profile vertical_workers.")
-    parser.add_argument("--composite-workers", type=int, default=None, help="Deprecated compatibility alias; ignored in favor of profile composite_workers.")
-    parser.add_argument("--skip-native-w", action="store_true", help="Compatibility flag that removes native-w and report from an all-stage request.")
+    parser.add_argument("--with-tracking", action="store_true", help="Run optional tracking without filtering catalogs.")
+    parser.add_argument("--with-shape", action="store_true", help="Run optional object-day shape classification.")
     args = parser.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     if end < start:
@@ -394,8 +476,10 @@ def main() -> None:
     profile = geometry_vertical_profile(args.profile)
     context = RunContext(profile, args.start, args.end)
     selected = parse_stages(args.stages)
-    if args.skip_native_w:
-        selected = tuple(stage for stage in selected if stage not in {"native-w", "report"})
+    if args.with_tracking and "tracking" not in selected:
+        selected += ("tracking",)
+    if args.with_shape and "shape" not in selected:
+        selected += ("shape",)
     write_run_manifest(context, selected)
     selected_days = dates(start, end)
     if "surface-inputs" in selected:
@@ -412,6 +496,10 @@ def main() -> None:
         run_days_parallel(lambda current: stage_vertical(context, current, args.resume), selected_days, profile.vertical_workers)
     if "section-bipolar" in selected:
         run_days_parallel(lambda current: stage_section_bipolar(context, current, args.resume), selected_days, profile.vertical_workers)
+    if "tracking" in selected:
+        stage_tracking(context, args.resume)
+    if "shape" in selected:
+        stage_shape(context, args.resume, "tracking" in selected)
     if "native-w" in selected:
         stage_native_w(context, args.resume, args.stage_raw)
     if "report" in selected:

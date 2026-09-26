@@ -12,7 +12,7 @@ $env:PYTHONNOUSERSITE = '1'
 function Start-DownloadWorker([string]$Name, [int]$StartYear, [int]$EndYear) {
   $stdout = Join-Path $logDir "ofes2_monthly_climatology_$Name.stdout.log"
   $stderr = Join-Path $logDir "ofes2_monthly_climatology_$Name.stderr.log"
-  $arguments = @('-m', 'Detection_for_OFES.tools.download_ofes2_monthly_climatology', '--output-root', $OutputRoot,
+  $arguments = @('-m', 'Detection_for_OFES.datasets.download_ofes2_monthly_climatology', '--output-root', $OutputRoot,
     '--start-year', $StartYear, '--end-year', $EndYear, '--worker-name', $Name, '--download-only')
   Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
@@ -27,7 +27,7 @@ if ($first.ExitCode -ne 0 -or $second.ExitCode -ne 0) {
 
 $stdout = Join-Path $logDir 'ofes2_monthly_climatology_aggregate.stdout.log'
 $stderr = Join-Path $logDir 'ofes2_monthly_climatology_aggregate.stderr.log'
-$arguments = @('-m', 'Detection_for_OFES.tools.download_ofes2_monthly_climatology', '--output-root', $OutputRoot,
+$arguments = @('-m', 'Detection_for_OFES.datasets.download_ofes2_monthly_climatology', '--output-root', $OutputRoot,
   '--start-year', 1993, '--end-year', 2012, '--worker-name', 'aggregate', '--build-only', '--preview')
 $aggregate = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repoRoot `
   -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru

@@ -1,0 +1,4245 @@
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from multiprocessing.shared_memory import SharedMemory
+import json
+import math
+import os
+import uuid
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+
+_SHARED_SURFACE_ARRAYS: dict[str, np.ndarray] = {}
+_SHARED_SURFACE_HANDLES: list[SharedMemory] = []
+
+
+def _init_shared_surface_arrays(specs: dict[str, tuple[str, tuple[int, ...], str]], lon: np.ndarray, lat: np.ndarray) -> None:
+    global _SHARED_SURFACE_ARRAYS, _SHARED_SURFACE_HANDLES
+    _SHARED_SURFACE_ARRAYS = {"lon": np.asarray(lon), "lat": np.asarray(lat)}
+    _SHARED_SURFACE_HANDLES = []
+    for key, (name, shape, dtype_text) in specs.items():
+        handle = SharedMemory(name=name)
+        _SHARED_SURFACE_HANDLES.append(handle)
+        _SHARED_SURFACE_ARRAYS[key] = np.ndarray(shape, dtype=np.dtype(dtype_text), buffer=handle.buf)
+
+
+def _prepare_surface_seed_shared(payload: tuple[int, dict[str, object], float, float, DetectionParams, argparse.Namespace]) -> tuple[int, dict[str, object]]:
+    seed_order, seed_dict, dx_km, dy_km, params, args = payload
+    seed = pd.Series(seed_dict)
+    arrays = _SHARED_SURFACE_ARRAYS
+    return _prepare_surface_seed_parallel(
+        seed_order,
+        seed,
+        arrays["speed0"],
+        arrays["u0"],
+        arrays["v0"],
+        arrays["zos"],
+        arrays["lon"],
+        arrays["lat"],
+        dx_km,
+        dy_km,
+        params,
+        args,
+    )
+
+
+import numpy as np
+import pandas as pd
+from netCDF4 import Dataset, num2date
+
+try:
+    from scipy import ndimage
+except Exception:
+    class _NumpyNdimageFallback:
+        @staticmethod
+        def maximum_filter(arr: np.ndarray, size: int, mode: str = "nearest") -> np.ndarray:
+            pad = int(size) // 2
+            padded = np.pad(np.asarray(arr), pad, mode="edge")
+            out = np.full_like(arr, -np.inf, dtype=np.asarray(arr).dtype)
+            for dy in range(size):
+                for dx in range(size):
+                    out = np.maximum(out, padded[dy : dy + arr.shape[0], dx : dx + arr.shape[1]])
+            return out
+
+        @staticmethod
+        def minimum_filter(arr: np.ndarray, size: int, mode: str = "nearest") -> np.ndarray:
+            pad = int(size) // 2
+            padded = np.pad(np.asarray(arr), pad, mode="edge")
+            out = np.full_like(arr, np.inf, dtype=np.asarray(arr).dtype)
+            for dy in range(size):
+                for dx in range(size):
+                    out = np.minimum(out, padded[dy : dy + arr.shape[0], dx : dx + arr.shape[1]])
+            return out
+
+        @staticmethod
+        def label(mask: np.ndarray, structure: np.ndarray | None = None) -> tuple[np.ndarray, int]:
+            mask_bool = np.asarray(mask, dtype=bool)
+            labels = np.zeros(mask_bool.shape, dtype=np.int32)
+            ys, xs = np.where(mask_bool)
+            true_points = set(zip(ys.tolist(), xs.tolist()))
+            current = 0
+            neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+            ny, nx = mask_bool.shape
+            while true_points:
+                current += 1
+                start = true_points.pop()
+                stack = [start]
+                labels[start] = current
+                while stack:
+                    y, x = stack.pop()
+                    for dy, dx in neighbors:
+                        yy, xx = y + dy, x + dx
+                        if 0 <= yy < ny and 0 <= xx < nx and (yy, xx) in true_points:
+                            true_points.remove((yy, xx))
+                            labels[yy, xx] = current
+                            stack.append((yy, xx))
+            return labels, current
+
+        @staticmethod
+        def gaussian_filter1d(arr: np.ndarray, sigma: float, mode: str = "wrap") -> np.ndarray:
+            values = np.asarray(arr, dtype="float64")
+            if sigma <= 0:
+                return values.copy()
+            radius = max(1, int(round(3.0 * float(sigma))))
+            x = np.arange(-radius, radius + 1, dtype="float64")
+            kernel = np.exp(-0.5 * (x / float(sigma)) ** 2)
+            kernel /= kernel.sum()
+            padded = np.pad(values, radius, mode="wrap" if mode == "wrap" else "edge")
+            return np.convolve(padded, kernel, mode="valid")
+
+        @staticmethod
+        def distance_transform_edt(*_args, **_kwargs):
+            raise RuntimeError("SciPy ndimage is unavailable; disable subgrid refinement for this runtime.")
+
+        @staticmethod
+        def map_coordinates(*_args, **_kwargs):
+            raise RuntimeError("SciPy ndimage is unavailable; disable subgrid refinement for this runtime.")
+
+    ndimage = _NumpyNdimageFallback()
+
+from Detection_for_OFES.io.tables import DEFAULT_PARQUET_ENGINE
+
+
+EARTH_RADIUS_M = 6_371_000.0
+FAILURE_LABELS = {
+    0: "invalid_velocity",
+    1: "velocity_ratio",
+    2: "angle_jump",
+    3: "rotation_direction",
+    4: "too_many_direction_exceptions",
+    5: "dead_zone",
+    6: "symmetry",
+    7: "tangent_alignment",
+    8: "opposite_reversal",
+    9: "boundary_monotonic_rotation",
+    10: "no_closed_streamline",
+    11: "ssh_consensus_missing",
+    12: "jet_core_overlap",
+    13: "no_closed_streamline_no_ssh_fallback",
+    14: "ssh_primary_no_closed_contour",
+    15: "ssh_primary_touches_boundary",
+    16: "ssh_primary_radius_out_of_range",
+    17: "ssh_primary_amplitude_below_min",
+    18: "ssh_primary_multiple_extrema",
+    19: "ssh_primary_shape_error_high",
+}
+OBJECT_VOXEL_COLUMNS = [
+    "date",
+    "hua_object_id",
+    "depth_index",
+    "i",
+    "j",
+    "lon",
+    "lat",
+    "depth_m",
+    "polarity",
+    "accepted_radius_cells",
+    "node_key_3d",
+    "node_key_2d",
+]
+
+HARD_FAILURE_ORDER = (
+    (0, "invalid_velocity"),
+    (1, "velocity_ratio"),
+    (2, "angle_jump"),
+    (4, "too_many_direction_exceptions"),
+    (9, "boundary_monotonic_rotation"),
+    (7, "tangent_alignment"),
+    (8, "opposite_reversal"),
+)
+
+
+def _get_pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+@dataclass(frozen=True)
+class DetectionParams:
+    ssh_window_cells: int
+    start_radius_cells: int
+    max_radius_cells: int
+    speed_ratio_max: float
+    angle_jump_max_deg: float
+    tangent_tolerance_deg: float
+    symmetry_tolerance_deg: float
+    min_tangent_fraction: float
+    min_reversal_fraction: float
+    min_finite_fraction: float
+    direction_exception_extra: int
+    surface_search_cells: int
+    deep_search_cells: int
+    enforce_velocity_ratio_hard_gate: bool = True
+    enforce_tangent_alignment_hard_gate: bool = True
+    enforce_angle_jump_hard_gate: bool = True
+    direction_exception_multiplier: float = 1.0
+    enforce_direction_exception_hard_gate: bool = True
+    enforce_opposite_reversal_hard_gate: bool = True
+    deep_hua_mode: str = "full"
+    require_boundary_monotonic_rotation: bool = False
+    boundary_monotonic_exception_limit: int = 0
+    boundary_mode: str = "ssh_primary_velocity_streamline_effective"
+    streamline_direction_exception_fraction: float = 0.10
+    streamline_step_cells: float = 0.5
+    streamline_max_steps: int = 180
+    streamline_start_angles: int = 4
+    streamline_closure_tolerance_cells: float = 1.75
+    streamline_min_winding_turns: float = 0.75
+    streamline_min_points: int = 16
+    ssh_consensus_min_finite_fraction: float = 0.70
+    ssh_primary_level_count: int = 16
+    ssh_primary_window_factor: float = 4.0
+    ssh_primary_max_radius_factor: float = 2.0
+    ssh_primary_min_amplitude_cm: float = 0.0
+    ssh_primary_open_ocean_min_amplitude_cm: float = 0.4
+    ssh_primary_open_ocean_low_lat_amplitude_cm: float = 0.8
+    ssh_primary_open_ocean_high_lat_amplitude_cm: float = 0.25
+    ssh_primary_open_ocean_window_factor: float = 4.0
+    ssh_primary_open_ocean_max_radius_factor: float = 3.5
+    ssh_open_ocean_seed_window_cells: int = 3
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (
+        (190.0, 245.0, 25.0, 55.0, "north_pacific"),
+        (190.0, 280.0, -50.0, -30.0, "south_pacific"),
+        (320.0, 330.0, 25.0, 45.0, "north_atlantic"),
+        (335.0, 355.0, -45.0, -20.0, "south_atlantic"),
+    )
+    target_open_ocean_tile_top_n: int = 60
+    target_open_ocean_min_amplitude_cm: float = 0.10
+    target_open_ocean_window_factor: float = 8.0
+    target_open_ocean_max_radius_factor: float = 6.0
+    regional_amplitude_profile: dict[str, object] | None = None
+    ssh_primary_max_shape_error_percent: float = 70.0
+    ssh_primary_acc_max_shape_error_percent: float = 55.0
+    jet_core_speed_percentile: float = 80.0
+    jet_core_overlap_max: float = 0.50
+    skip_open_ocean_streamline_diagnostic: bool = False
+    hua_backend: str = "python"
+
+
+def _parse_date(value: str) -> date:
+    return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+
+
+def _date_range(start: date, end: date) -> list[date]:
+    days: list[date] = []
+    current = start
+    while current <= end:
+        days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _wrap_lon_delta_deg(lon: np.ndarray, lon0: float) -> np.ndarray:
+    return (lon - lon0 + 180.0) % 360.0 - 180.0
+
+
+def _time_lookup(ds: Dataset) -> dict[date, int]:
+    if hasattr(ds, "time_lookup"):
+        return ds.time_lookup()  # type: ignore[no-any-return]
+    tvar = ds.variables["time"]
+    times = num2date(tvar[:], units=tvar.units, calendar=getattr(tvar, "calendar", "standard"))
+    return {date(int(t.year), int(t.month), int(t.day)): i for i, t in enumerate(times)}
+
+
+def _candidate_cache_path(cache_dir: Path, day: date) -> Path:
+    return cache_dir / f"candidates_{day:%Y%m%d}.csv"
+
+
+def _load_cached_extrema(cache_dir: str | Path | None, day: date, max_candidates: int) -> pd.DataFrame | None:
+    if not cache_dir:
+        return None
+    path = _candidate_cache_path(Path(cache_dir), day)
+    if not path.exists():
+        return None
+    out = pd.read_csv(path)
+    if out.empty:
+        return out
+    required = {"ssh_extremum_type", "seed_i", "seed_j", "ssh_value_m"}
+    missing = required.difference(out.columns)
+    if missing:
+        raise ValueError(f"Candidate cache {path} is missing columns: {sorted(missing)}")
+    out["seed_i"] = out["seed_i"].astype("int64")
+    out["seed_j"] = out["seed_j"].astype("int64")
+    out["ssh_value_m"] = out["ssh_value_m"].astype("float64")
+    if "component_pixels" not in out.columns:
+        out["component_pixels"] = 1
+    if "abs_ssh_value_m" not in out.columns:
+        out["abs_ssh_value_m"] = out["ssh_value_m"].abs()
+    out = out.sort_values("abs_ssh_value_m", ascending=False).reset_index(drop=True)
+    out["candidate_selection"] = "candidate_cache"
+    out["tile_lon_min"] = np.nan
+    out["tile_lon_max"] = np.nan
+    out["tile_lat_min"] = np.nan
+    out["tile_lat_max"] = np.nan
+    out["tile_rank"] = np.arange(1, len(out) + 1, dtype=int)
+    if max_candidates > 0:
+        out = out.head(max_candidates).copy()
+    return out
+
+
+def _grid_spacing_km(lon: np.ndarray, lat: np.ndarray) -> tuple[float, float]:
+    mid_lat = float(np.nanmedian(lat))
+    dx = np.deg2rad(float(np.nanmedian(np.abs(np.diff(lon))))) * EARTH_RADIUS_M * math.cos(math.radians(mid_lat)) / 1000.0
+    dy = np.deg2rad(float(np.nanmedian(np.abs(np.diff(lat))))) * EARTH_RADIUS_M / 1000.0
+    return abs(dx), abs(dy)
+
+
+def _in_target_open_ocean_box(
+    lon_value: float,
+    lat_value: float,
+    boxes: tuple[tuple[float, float, float, float, str], ...],
+) -> bool:
+    return any(
+        lon_min <= lon_value <= lon_max and lat_min <= lat_value <= lat_max
+        for lon_min, lon_max, lat_min, lat_max, _ in boxes
+    )
+
+
+def _select_extrema_candidates(
+    extrema: pd.DataFrame,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    *,
+    selection: str,
+    max_candidates: int,
+    tile_lon_deg: float,
+    tile_lat_deg: float,
+    tile_top_n: int,
+    open_ocean_tile_top_n: int,
+    open_ocean_low_lat_tile_top_n: int,
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (),
+    target_open_ocean_tile_top_n: int = 60,
+) -> pd.DataFrame:
+    if extrema.empty:
+        return extrema
+    selection = str(selection).lower().strip()
+    out = extrema.sort_values("abs_ssh_value_m", ascending=False).reset_index(drop=True)
+    if selection == "global_topn":
+        out["candidate_selection"] = "global_topn"
+        out["tile_lon_min"] = np.nan
+        out["tile_lon_max"] = np.nan
+        out["tile_lat_min"] = np.nan
+        out["tile_lat_max"] = np.nan
+        out["tile_rank"] = np.arange(1, len(out) + 1, dtype=int)
+        if max_candidates > 0:
+            out = out.head(max_candidates).copy()
+        return out.reset_index(drop=True)
+    if selection != "tile_topn":
+        raise ValueError(f"Unsupported candidate selection mode: {selection}")
+    if tile_lon_deg <= 0 or tile_lat_deg <= 0 or tile_top_n <= 0:
+        raise ValueError("tile_topn requires positive tile_lon_deg, tile_lat_deg, and tile_top_n")
+
+    seed_i = out["seed_i"].astype(int).to_numpy()
+    seed_j = out["seed_j"].astype(int).to_numpy()
+    seed_lon = np.asarray(lon[seed_i], dtype="float64")
+    seed_lat = np.asarray(lat[seed_j], dtype="float64")
+    tile_lon_min = np.floor(seed_lon / float(tile_lon_deg)) * float(tile_lon_deg)
+    tile_lat_min = np.floor(seed_lat / float(tile_lat_deg)) * float(tile_lat_deg)
+    out["tile_lon_min"] = tile_lon_min
+    out["tile_lon_max"] = tile_lon_min + float(tile_lon_deg)
+    out["tile_lat_min"] = tile_lat_min
+    out["tile_lat_max"] = tile_lat_min + float(tile_lat_deg)
+    out["candidate_selection"] = "tile_topn"
+    selected_parts = []
+    group_cols = ["tile_lon_min", "tile_lat_min"]
+    for _, part in out.groupby(group_cols, sort=True, dropna=False):
+        part = part.assign(
+            _tile_open_ocean=[
+                bool(_is_open_ocean_detection_location(lon, lat, int(ii), int(jj)))
+                for ii, jj in zip(part["seed_i"], part["seed_j"])
+            ]
+        )
+        part["_tile_target_open_ocean"] = [
+            _in_target_open_ocean_box(float(seed_lon[pos]), float(seed_lat[pos]), target_open_ocean_boxes)
+            for pos in part.index
+        ]
+        part["_tile_low_lat_open"] = part["_tile_open_ocean"] & (np.abs(seed_lat[part.index]) < 20.0)
+        kept = []
+        # Separate caps prevent the larger open-ocean allowance from spilling
+        # into low-latitude or boundary-current candidates in the same tile.
+        for (is_open, low_lat, is_target), cap_part in part.groupby(
+            ["_tile_open_ocean", "_tile_low_lat_open", "_tile_target_open_ocean"], sort=False
+        ):
+            cap = (
+                target_open_ocean_tile_top_n
+                if bool(is_target)
+                else
+                open_ocean_low_lat_tile_top_n
+                if bool(is_open) and bool(low_lat)
+                else open_ocean_tile_top_n
+                if bool(is_open)
+                else tile_top_n
+            )
+            kept.append(cap_part.sort_values("abs_ssh_value_m", ascending=False).head(int(cap)))
+        part = pd.concat(kept, ignore_index=False).sort_values("abs_ssh_value_m", ascending=False)
+        part = part.drop(columns=["_tile_open_ocean", "_tile_low_lat_open", "_tile_target_open_ocean"])
+        part["tile_rank"] = np.arange(1, len(part) + 1, dtype=int)
+        selected_parts.append(part)
+    if not selected_parts:
+        return out.iloc[0:0].copy()
+    selected = pd.concat(selected_parts, ignore_index=True)
+    selected = selected.sort_values(["tile_lon_min", "tile_lat_min", "tile_rank", "abs_ssh_value_m"], ascending=[True, True, True, False])
+    return selected.reset_index(drop=True)
+
+
+def _local_extrema(
+    zos: np.ndarray,
+    window: int,
+    *,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    selection: str,
+    max_candidates: int,
+    tile_lon_deg: float,
+    tile_lat_deg: float,
+    tile_top_n: int,
+    open_ocean_tile_top_n: int = 30,
+    open_ocean_low_lat_tile_top_n: int = 15,
+    target_open_ocean_boxes: tuple[tuple[float, float, float, float, str], ...] = (),
+    target_open_ocean_tile_top_n: int = 60,
+    adaptive_window_min: int | None = None,
+    seed_windows_cells: tuple[int, ...] | None = None,
+) -> pd.DataFrame:
+    finite = np.isfinite(zos)
+    fill_max = np.where(finite, zos, -np.inf)
+    fill_min = np.where(finite, zos, np.inf)
+    windows = tuple(sorted({int(w) for w in (seed_windows_cells or (window,)) if int(w) >= 3}))
+    if not windows:
+        windows = (int(window),)
+    rows = []
+    structure = np.ones((3, 3), dtype=bool)
+    for current_window in windows:
+        max_mask = finite & (fill_max == ndimage.maximum_filter(fill_max, size=current_window, mode="nearest"))
+        min_mask = finite & (fill_min == ndimage.minimum_filter(fill_min, size=current_window, mode="nearest"))
+        if seed_windows_cells is None and adaptive_window_min is not None and int(adaptive_window_min) < int(current_window):
+            small = max(3, int(adaptive_window_min))
+            small_max = finite & (fill_max == ndimage.maximum_filter(fill_max, size=small, mode="nearest"))
+            small_min = finite & (fill_min == ndimage.minimum_filter(fill_min, size=small, mode="nearest"))
+            abs_lat = np.abs(np.asarray(lat, dtype="f8"))
+            use_small = np.clip((abs_lat - 20.0) / 40.0, 0.0, 1.0)[:, None] > 0.0
+            max_mask = np.where(use_small, small_max, max_mask) & finite
+            min_mask = np.where(use_small, small_min, min_mask) & finite
+        for kind, mask in (("ssh_max", max_mask), ("ssh_min", min_mask)):
+            # Labeling is fast in SciPy.  The former implementation then used
+            # ``np.where(labels == label)`` once per component, which rescanned
+            # the global field thousands of times.  Sort the labeled pixels once
+            # instead and take one extremum from each acceptable plateau.
+            labels, count = ndimage.label(mask, structure=structure)
+            if count == 0:
+                continue
+            flat = np.flatnonzero(mask)
+            label_values = labels.ravel()[flat]
+            component_sizes = np.bincount(label_values, minlength=count + 1)
+            keep_component = component_sizes[label_values] <= 100
+            flat = flat[keep_component]
+            label_values = label_values[keep_component]
+            if flat.size == 0:
+                continue
+            values = np.asarray(zos, dtype="float64").ravel()[flat]
+            value_key = -values if kind == "ssh_max" else values
+            order = np.lexsort((value_key, label_values))
+            ordered_labels = label_values[order]
+            first = np.r_[True, ordered_labels[1:] != ordered_labels[:-1]]
+            selected_flat = flat[order[first]]
+            selected_labels = ordered_labels[first]
+            selected_values = np.asarray(zos, dtype="float64").ravel()[selected_flat]
+            yy, xx = np.divmod(selected_flat, zos.shape[1])
+            rows.extend(
+                {
+                    "ssh_extremum_type": kind,
+                    "seed_i": int(i),
+                    "seed_j": int(j),
+                    "ssh_value_m": float(value),
+                    "component_pixels": int(component_sizes[label]),
+                    "seed_scale_cells": int(current_window),
+                    "seed_pool_source": "multiscale_local_extrema" if seed_windows_cells else "local_extrema",
+                }
+                for i, j, value, label in zip(xx, yy, selected_values, selected_labels, strict=True)
+            )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    if seed_windows_cells and len(windows) > 1:
+        kept = []
+        height, width = zos.shape
+        for _, part in out.groupby("ssh_extremum_type", sort=False):
+            ordered = part.assign(abs_ssh_value_m=part["ssh_value_m"].abs()).sort_values(
+                "abs_ssh_value_m", ascending=False
+            )
+            occupied = np.zeros((height, width), dtype=bool)
+            for row in ordered.to_dict("records"):
+                i, j = int(row["seed_i"]), int(row["seed_j"])
+                y0, y1 = max(0, j - 2), min(height, j + 3)
+                x0, x1 = max(0, i - 2), min(width, i + 3)
+                local = occupied[y0:y1, x0:x1]
+                yy, xx = np.ogrid[y0:y1, x0:x1]
+                within_two_cells = (xx - i) ** 2 + (yy - j) ** 2 <= 4
+                if np.any(local & within_two_cells):
+                    continue
+                row["seed_merge_group"] = len(kept) + 1
+                kept.append(row)
+                occupied[y0:y1, x0:x1][within_two_cells] = True
+        out = pd.DataFrame(kept)
+    out["abs_ssh_value_m"] = out["ssh_value_m"].abs()
+    return _select_extrema_candidates(
+        out,
+        lon,
+        lat,
+        selection=selection,
+        max_candidates=max_candidates,
+        tile_lon_deg=tile_lon_deg,
+        tile_lat_deg=tile_lat_deg,
+        tile_top_n=tile_top_n,
+        open_ocean_tile_top_n=open_ocean_tile_top_n,
+        open_ocean_low_lat_tile_top_n=open_ocean_low_lat_tile_top_n,
+        target_open_ocean_boxes=target_open_ocean_boxes,
+        target_open_ocean_tile_top_n=target_open_ocean_tile_top_n,
+    )
+
+
+def _circle_offsets(radius_cells: int) -> list[tuple[int, int]]:
+    points: list[tuple[int, int]] = []
+    n = max(16, int(round(8 * radius_cells)))
+    for theta in np.linspace(-math.pi / 2.0, 3.0 * math.pi / 2.0, n, endpoint=False):
+        point = (int(round(radius_cells * math.cos(theta))), int(round(radius_cells * math.sin(theta))))
+        if not points or points[-1] != point:
+            points.append(point)
+    if len(points) > 1 and points[0] == points[-1]:
+        points.pop()
+    return points
+
+
+def _angle_diff(a: np.ndarray | float, b: np.ndarray | float) -> np.ndarray | float:
+    return (np.asarray(a) - np.asarray(b) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _iterative_speed_min(
+    speed: np.ndarray,
+    start_i: int,
+    start_j: int,
+    *,
+    max_steps: int = 40,
+    anchor_i: int | None = None,
+    anchor_j: int | None = None,
+    max_radius_cells: int | None = None,
+) -> tuple[int, int, float, int]:
+    """Descend to a local speed minimum without leaving an optional seed disk."""
+    ii = int(np.clip(start_i, 0, speed.shape[1] - 1))
+    jj = int(np.clip(start_j, 0, speed.shape[0] - 1))
+    last = (-1, -1)
+    steps = 0
+    while (ii, jj) != last and steps < max_steps:
+        last = (ii, jj)
+        x0, x1 = max(0, ii - 2), min(speed.shape[1], ii + 3)
+        y0, y1 = max(0, jj - 2), min(speed.shape[0], jj + 3)
+        window = np.asarray(speed[y0:y1, x0:x1], dtype="float64")
+        valid = np.isfinite(window)
+        if anchor_i is not None and anchor_j is not None and max_radius_cells is not None:
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            valid &= (xx - int(anchor_i)) ** 2 + (yy - int(anchor_j)) ** 2 <= int(max_radius_cells) ** 2
+        if not np.any(valid):
+            break
+        local = int(np.nanargmin(np.where(valid, window, np.nan)))
+        wy, wx = np.unravel_index(local, window.shape)
+        ii = x0 + wx
+        jj = y0 + wy
+        steps += 1
+    val = float(speed[jj, ii]) if np.isfinite(speed[jj, ii]) else np.nan
+    return ii, jj, val, steps
+
+
+def _seeded_speed_min(speed: np.ndarray, seed_i: int, seed_j: int, radius_cells: int) -> tuple[int, int, float, int]:
+    radius = max(0, int(radius_cells))
+    x0 = max(0, int(seed_i) - radius)
+    x1 = min(speed.shape[1] - 1, int(seed_i) + radius)
+    y0 = max(0, int(seed_j) - radius)
+    y1 = min(speed.shape[0] - 1, int(seed_j) + radius)
+    if x1 < x0 or y1 < y0:
+        value = float(speed[seed_j, seed_i]) if np.isfinite(speed[seed_j, seed_i]) else np.nan
+        return int(seed_i), int(seed_j), value, 0
+    window = speed[y0 : y1 + 1, x0 : x1 + 1]
+    yy, xx = np.ogrid[y0 : y1 + 1, x0 : x1 + 1]
+    mask = (xx - int(seed_i)) ** 2 + (yy - int(seed_j)) ** 2 <= radius**2
+    mask &= np.isfinite(window)
+    if not np.any(mask):
+        value = float(speed[seed_j, seed_i]) if np.isfinite(speed[seed_j, seed_i]) else np.nan
+        return int(seed_i), int(seed_j), value, 0
+    flat = np.where(mask.ravel())[0]
+    pick = int(flat[np.nanargmin(window.ravel()[flat])])
+    local_j, local_i = np.unravel_index(pick, window.shape)
+    ii = x0 + int(local_i)
+    jj = y0 + int(local_j)
+    return _iterative_speed_min(
+        speed,
+        int(ii),
+        int(jj),
+        anchor_i=int(seed_i),
+        anchor_j=int(seed_j),
+        max_radius_cells=radius,
+    )
+
+
+def _fill_nearest_finite(field: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    finite = np.isfinite(field)
+    if not finite.any():
+        return np.asarray(field, dtype="float64"), finite
+    if finite.all():
+        return np.asarray(field, dtype="float64"), finite
+    _, indices = ndimage.distance_transform_edt(~finite, return_indices=True)
+    filled = np.asarray(field, dtype="float64")[tuple(indices)]
+    return filled, finite
+
+
+def _interp_1d_from_fraction(coord: np.ndarray, index_fraction: float) -> float:
+    grid = np.arange(coord.size, dtype="float64")
+    return float(np.interp(float(index_fraction), grid, np.asarray(coord, dtype="float64")))
+
+
+def _quadratic_speed_surface(
+    speed_window: np.ndarray,
+    finite: np.ndarray,
+    xi: np.ndarray,
+    yj: np.ndarray,
+) -> tuple[np.ndarray | None, str]:
+    yy0, xx0 = np.indices(speed_window.shape, dtype="float64")
+    x = xx0[finite].ravel()
+    y = yy0[finite].ravel()
+    z = np.square(np.asarray(speed_window, dtype="float64")[finite].ravel())
+    if z.size < 9:
+        return None, "quadratic_insufficient_points"
+    normal = np.zeros((6, 6), dtype="float64")
+    rhs = np.zeros(6, dtype="float64")
+    for xx, yy, zz in zip(x, y, z):
+        row = (xx * xx, yy * yy, xx * yy, xx, yy, 1.0)
+        for ii in range(6):
+            rhs[ii] += row[ii] * zz
+            for jj in range(ii, 6):
+                normal[ii, jj] += row[ii] * row[jj]
+    for ii in range(6):
+        for jj in range(ii):
+            normal[ii, jj] = normal[jj, ii]
+    scale = float(np.nanmax(np.abs(np.diag(normal)))) if normal.size else 1.0
+    normal = normal + np.eye(normal.shape[0], dtype="float64") * max(scale, 1.0) * 1.0e-10
+    coeff = _solve_small_linear_system(normal, rhs)
+    if coeff is None:
+        return None, "quadratic_lstsq_failed"
+    a, b, c, *_ = coeff
+    h00 = 2.0 * float(a)
+    h11 = 2.0 * float(b)
+    det = h00 * h11 - float(c) * float(c)
+    if not np.all(np.isfinite([h00, h11, det])) or h00 <= 0.0 or det <= 0.0:
+        return None, "quadratic_not_convex"
+    yy, xx = np.meshgrid(yj, xi, indexing="ij")
+    dense_sq = (
+        coeff[0] * xx * xx
+        + coeff[1] * yy * yy
+        + coeff[2] * xx * yy
+        + coeff[3] * xx
+        + coeff[4] * yy
+        + coeff[5]
+    )
+    if not np.isfinite(dense_sq).any():
+        return None, "quadratic_no_finite"
+    return np.sqrt(np.maximum(dense_sq, 0.0)), "quadratic_speed2_1_24deg"
+
+
+def _solve_small_linear_system(a: np.ndarray, b: np.ndarray) -> np.ndarray | None:
+    """Solve a tiny dense system without calling platform LAPACK.
+
+    The refined-center fit is called many times on 6x6 normal equations. Using
+    a local Gaussian elimination avoids recurring `np.linalg.lstsq` overhead and
+    sidesteps fragile Windows BLAS/LAPACK crashes seen in this environment.
+    """
+    mat = np.asarray(a, dtype="float64").copy()
+    rhs = np.asarray(b, dtype="float64").copy()
+    n = int(rhs.size)
+    if mat.shape != (n, n) or not (np.isfinite(mat).all() and np.isfinite(rhs).all()):
+        return None
+    for col in range(n):
+        pivot = col + int(np.argmax(np.abs(mat[col:, col])))
+        pivot_value = float(mat[pivot, col])
+        if not np.isfinite(pivot_value) or abs(pivot_value) < 1.0e-14:
+            return None
+        if pivot != col:
+            mat[[col, pivot], :] = mat[[pivot, col], :]
+            rhs[[col, pivot]] = rhs[[pivot, col]]
+        for row in range(col + 1, n):
+            factor = mat[row, col] / mat[col, col]
+            if factor == 0.0:
+                continue
+            mat[row, col:] -= factor * mat[col, col:]
+            rhs[row] -= factor * rhs[col]
+    out = np.zeros(n, dtype="float64")
+    for row in range(n - 1, -1, -1):
+        denom = float(mat[row, row])
+        if not np.isfinite(denom) or abs(denom) < 1.0e-14:
+            return None
+        accum = 0.0
+        for col in range(row + 1, n):
+            accum += float(mat[row, col]) * float(out[col])
+        out[row] = (rhs[row] - accum) / denom
+    return out
+
+
+def _refine_speed_min_subgrid(
+    speed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    center_i: int,
+    center_j: int,
+    *,
+    target_degree: float,
+    window_radius_cells: int,
+    min_finite_fraction: float,
+) -> dict[str, object]:
+    grid_lon = float(lon[center_i])
+    grid_lat = float(lat[center_j])
+    grid_speed = float(speed[center_j, center_i]) if np.isfinite(speed[center_j, center_i]) else np.nan
+    fallback = {
+        "center_i_refined": float(center_i),
+        "center_j_refined": float(center_j),
+        "center_lon_refined": grid_lon,
+        "center_lat_refined": grid_lat,
+        "refined_speed_ms": grid_speed,
+        "refined_offset_km": 0.0,
+        "refined_ok": False,
+        "subgrid_fit_quality": "fallback_grid",
+    }
+    if target_degree <= 0 or window_radius_cells < 1:
+        return fallback | {"subgrid_fit_quality": "disabled"}
+    x0 = max(0, int(center_i) - int(window_radius_cells))
+    x1 = min(speed.shape[1] - 1, int(center_i) + int(window_radius_cells))
+    y0 = max(0, int(center_j) - int(window_radius_cells))
+    y1 = min(speed.shape[0] - 1, int(center_j) + int(window_radius_cells))
+    if x1 <= x0 or y1 <= y0:
+        return fallback | {"subgrid_fit_quality": "window_too_small"}
+    speed_window = np.asarray(speed[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    u_window = np.asarray(u[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    v_window = np.asarray(v[y0 : y1 + 1, x0 : x1 + 1], dtype="float64")
+    finite = np.isfinite(speed_window) & np.isfinite(u_window) & np.isfinite(v_window)
+    if float(finite.mean()) < float(min_finite_fraction):
+        return fallback | {"subgrid_fit_quality": "insufficient_finite"}
+
+    filled_u, finite_u = _fill_nearest_finite(u_window)
+    filled_v, finite_v = _fill_nearest_finite(v_window)
+    finite_mask = finite & finite_u & finite_v
+    dlon = float(np.nanmedian(np.abs(np.diff(lon)))) if lon.size > 1 else 0.0
+    dlat = float(np.nanmedian(np.abs(np.diff(lat)))) if lat.size > 1 else 0.0
+    if dlon <= 0 or dlat <= 0:
+        return fallback | {"subgrid_fit_quality": "invalid_grid_spacing"}
+    step_i = max(float(target_degree) / dlon, 1.0e-3)
+    step_j = max(float(target_degree) / dlat, 1.0e-3)
+    xi = np.arange(0.0, float(x1 - x0) + 0.5 * step_i, step_i, dtype="float64")
+    yj = np.arange(0.0, float(y1 - y0) + 0.5 * step_j, step_j, dtype="float64")
+    if xi.size < 3 or yj.size < 3:
+        return fallback | {"subgrid_fit_quality": "refined_grid_too_small"}
+    yy, xx = np.meshgrid(yj, xi, indexing="ij")
+    coords = np.vstack([yy.ravel(), xx.ravel()])
+    dense_u = ndimage.map_coordinates(filled_u, coords, order=1, mode="nearest").reshape(yy.shape)
+    dense_v = ndimage.map_coordinates(filled_v, coords, order=1, mode="nearest").reshape(yy.shape)
+    dense = np.hypot(dense_u, dense_v)
+    valid_weight = ndimage.map_coordinates(finite_mask.astype("float64"), coords, order=1, mode="nearest").reshape(yy.shape)
+    dense = np.where(valid_weight >= 0.999, dense, np.nan)
+    quadratic_dense, quadratic_quality = _quadratic_speed_surface(speed_window, finite, xi, yj)
+    if quadratic_dense is not None:
+        dense = np.where(np.isfinite(dense), quadratic_dense, np.nan)
+        fit_quality = quadratic_quality
+    else:
+        fit_quality = "uv_vector_linear_interp_1_24deg"
+    if not np.isfinite(dense).any():
+        return fallback | {"subgrid_fit_quality": "no_refined_finite"}
+    local_pick = int(np.nanargmin(dense))
+    pick_j, pick_i = np.unravel_index(local_pick, dense.shape)
+    if pick_i in (0, dense.shape[1] - 1) or pick_j in (0, dense.shape[0] - 1):
+        return fallback | {"subgrid_fit_quality": "minimum_on_refined_boundary"}
+
+    refined_i = float(x0 + xi[pick_i])
+    refined_j = float(y0 + yj[pick_j])
+    refined_lon = _interp_1d_from_fraction(lon, refined_i)
+    refined_lat = _interp_1d_from_fraction(lat, refined_j)
+    dx_km, dy_km = _grid_spacing_km(lon, lat)
+    offset_km = math.hypot((refined_i - center_i) * dx_km, (refined_j - center_j) * dy_km)
+    return {
+        "center_i_refined": refined_i,
+        "center_j_refined": refined_j,
+        "center_lon_refined": refined_lon,
+        "center_lat_refined": refined_lat,
+        "refined_speed_ms": float(dense[pick_j, pick_i]),
+        "refined_offset_km": float(offset_km),
+        "refined_ok": True,
+        "subgrid_fit_quality": fit_quality,
+    }
+
+
+def _circle_check(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    params: DetectionParams,
+) -> dict[str, float | bool | str]:
+    offsets = _circle_offsets(radius_cells)
+    uu = np.full(len(offsets), np.nan, dtype="float64")
+    vv = np.full(len(offsets), np.nan, dtype="float64")
+    use_grid_sampling = abs(float(center_i) - round(float(center_i))) < 1.0e-9 and abs(float(center_j) - round(float(center_j))) < 1.0e-9
+    if use_grid_sampling:
+        ii = np.asarray([int(round(float(center_i))) + dx for dx, _ in offsets], dtype=int)
+        jj = np.asarray([int(round(float(center_j))) + dy for _, dy in offsets], dtype=int)
+        inside = (ii >= 0) & (ii < u.shape[1]) & (jj >= 0) & (jj < u.shape[0])
+        uu[inside] = u[jj[inside], ii[inside]]
+        vv[inside] = v[jj[inside], ii[inside]]
+    else:
+        for idx, (dx, dy) in enumerate(offsets):
+            uu[idx], vv[idx] = _sample_uv_at(u, v, float(center_i) + float(dx), float(center_j) + float(dy))
+    sp = np.hypot(uu, vv)
+    finite = np.isfinite(sp) & (sp > 1e-10)
+    failure_counts = {k: 0 for k in FAILURE_LABELS}
+    minimal_reversal_only = params.deep_hua_mode == "minimal_reversal_only"
+    minimal_finite_only = params.deep_hua_mode == "minimal_finite_only"
+    minimal_speed_kernel = minimal_reversal_only or minimal_finite_only
+    finite_failed = finite.mean() < params.min_finite_fraction
+    if finite_failed:
+        failure_counts[0] += int((~finite).sum())
+
+    angles = None if minimal_speed_kernel else np.arctan2(vv, uu)
+    angle_diffs: list[float] = []
+    max_ratio = 0.0
+    max_angle = 0.0
+    positive_diffs = 0
+    negative_diffs = 0
+    rotation_failed = finite_failed
+    for n in range(len(offsets)):
+        m = (n + 1) % len(offsets)
+        if not (finite[n] and finite[m]):
+            if not minimal_speed_kernel:
+                rotation_failed = True
+            failure_counts[0] += 1
+            continue
+        if not minimal_speed_kernel:
+            ratio = float(sp[m] / sp[n])
+            max_ratio = max(max_ratio, ratio, 1.0 / ratio if ratio > 0 else np.inf)
+            if ratio > params.speed_ratio_max or ratio < 1.0 / params.speed_ratio_max:
+                if params.enforce_velocity_ratio_hard_gate:
+                    rotation_failed = True
+                failure_counts[1] += 1
+            dtheta = float(_angle_diff(angles[n], angles[m]))
+            angle_diffs.append(dtheta)
+            max_angle = max(max_angle, abs(math.degrees(dtheta)))
+            if abs(math.degrees(dtheta)) > params.angle_jump_max_deg:
+                if params.enforce_angle_jump_hard_gate:
+                    rotation_failed = True
+                failure_counts[2] += 1
+            if dtheta > 0:
+                positive_diffs += 1
+            elif dtheta < 0:
+                negative_diffs += 1
+    base_exceptions = int(math.floor(radius_cells / 5.0) + 1)
+    max_exceptions = int(math.floor(base_exceptions * max(0.0, params.direction_exception_multiplier))) + params.direction_exception_extra
+    direction_exceptions = min(positive_diffs, negative_diffs)
+    monotonic_exception_limit = (
+        int(params.boundary_monotonic_exception_limit)
+        if params.require_boundary_monotonic_rotation
+        else max_exceptions
+    )
+    boundary_monotonic_passed = direction_exceptions <= monotonic_exception_limit
+    if not minimal_speed_kernel and direction_exceptions > max_exceptions:
+        if params.enforce_direction_exception_hard_gate:
+            rotation_failed = True
+        failure_counts[4] += int(direction_exceptions - max_exceptions)
+    if not minimal_speed_kernel and params.require_boundary_monotonic_rotation and not boundary_monotonic_passed:
+        rotation_failed = True
+        failure_counts[9] += int(direction_exceptions - monotonic_exception_limit)
+
+    tangent_fraction = np.nan
+    if not minimal_speed_kernel:
+        dx = np.asarray([p[0] for p in offsets], dtype="float64")
+        dy = np.asarray([p[1] for p in offsets], dtype="float64")
+        th = np.arctan2(dy, dx)
+        tx = -np.sin(th)
+        ty = np.cos(th)
+        tangent_cos = np.abs((uu * tx + vv * ty) / np.maximum(sp, 1e-12))
+        tangent_ok = finite & (tangent_cos >= math.cos(math.radians(params.tangent_tolerance_deg)))
+        tangent_fraction = float(tangent_ok.sum() / finite.sum()) if finite.any() else 0.0
+        if tangent_fraction < params.min_tangent_fraction:
+            if params.enforce_tangent_alignment_hard_gate:
+                rotation_failed = True
+            failure_counts[7] += int(max(1, round((params.min_tangent_fraction - tangent_fraction) * len(offsets))))
+
+    symmetry_ok = 0
+    symmetry_total = 0
+    reversal_ok = 0
+    reversal_total = 0
+    if not minimal_finite_only:
+        half = len(offsets) // 2
+        for n in range(half):
+            m = (n + half) % len(offsets)
+            if not (finite[n] and finite[m]):
+                continue
+            symmetry_total += 1
+            if not minimal_speed_kernel:
+                diff = abs(float(_angle_diff(angles[n], angles[m])))
+                if abs(diff - math.pi) <= math.radians(params.symmetry_tolerance_deg):
+                    symmetry_ok += 1
+            reversal_total += 1
+            if uu[n] * uu[m] + vv[n] * vv[m] < 0:
+                reversal_ok += 1
+    symmetry_fraction = np.nan if minimal_speed_kernel else (float(symmetry_ok / symmetry_total) if symmetry_total else 0.0)
+    reversal_fraction = np.nan if minimal_finite_only else (float(reversal_ok / reversal_total) if reversal_total else 0.0)
+    if not minimal_speed_kernel and symmetry_total and symmetry_ok < symmetry_total:
+        failure_counts[6] += int(symmetry_total - symmetry_ok)
+    if not minimal_finite_only and reversal_fraction < params.min_reversal_fraction:
+        if params.enforce_opposite_reversal_hard_gate:
+            rotation_failed = True
+        failure_counts[8] += int(max(1, round((params.min_reversal_fraction - reversal_fraction) * max(reversal_total, 1))))
+
+    circulation_sign = np.nan
+    if not minimal_speed_kernel:
+        tangential = uu * tx + vv * ty
+        circulation_sign = float(np.sign(np.nanmedian(tangential[finite]))) if finite.any() else np.nan
+    dominant = max(failure_counts.items(), key=lambda kv: kv[1])[0] if sum(failure_counts.values()) else -1
+    first_hard_code = -1
+    hard_failures = {
+        0: finite_failed,
+        1: bool(not minimal_speed_kernel and params.enforce_velocity_ratio_hard_gate and failure_counts[1] > 0),
+        2: bool(not minimal_speed_kernel and params.enforce_angle_jump_hard_gate and failure_counts[2] > 0),
+        4: bool(not minimal_speed_kernel and params.enforce_direction_exception_hard_gate and direction_exceptions > max_exceptions),
+        9: bool(not minimal_speed_kernel and params.require_boundary_monotonic_rotation and not boundary_monotonic_passed),
+        7: bool(not minimal_speed_kernel and params.enforce_tangent_alignment_hard_gate and tangent_fraction < params.min_tangent_fraction),
+        8: bool(not minimal_finite_only and params.enforce_opposite_reversal_hard_gate and reversal_fraction < params.min_reversal_fraction),
+    }
+    for code, _label in HARD_FAILURE_ORDER:
+        if hard_failures.get(code, False):
+            first_hard_code = code
+            break
+    return {
+        "circle_passed": bool(not rotation_failed),
+        "radius_cells": float(radius_cells),
+        "finite_fraction": float(finite.mean()),
+        "mean_circle_speed_ms": float(np.nanmean(sp[finite])) if finite.any() else np.nan,
+        "max_velocity_ratio": np.nan if minimal_speed_kernel else float(max_ratio),
+        "velocity_ratio_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(failure_counts[1] > 0),
+        "max_angle_jump_deg": np.nan if minimal_speed_kernel else float(max_angle),
+        "angle_jump_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(failure_counts[2] > 0),
+        "direction_exception_count": np.nan if minimal_speed_kernel else float(direction_exceptions),
+        "direction_exception_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(direction_exceptions > max_exceptions),
+        "positive_angle_diff_count": np.nan if minimal_speed_kernel else float(positive_diffs),
+        "negative_angle_diff_count": np.nan if minimal_speed_kernel else float(negative_diffs),
+        "direction_exception_limit": np.nan if minimal_speed_kernel else float(max_exceptions),
+        "boundary_monotonic_required": bool(params.require_boundary_monotonic_rotation),
+        "boundary_monotonic_passed": bool(boundary_monotonic_passed),
+        "boundary_monotonic_exception_limit": float(monotonic_exception_limit),
+        "tangent_pass_fraction": tangent_fraction,
+        "tangent_alignment_soft_warning": "not_evaluated" if minimal_speed_kernel else bool(tangent_fraction < params.min_tangent_fraction),
+        "symmetry_pass_fraction": symmetry_fraction,
+        "opposite_reversal_fraction": reversal_fraction,
+        "circulation_sign": circulation_sign,
+        "dominant_failure_code": float(dominant),
+        "dominant_failure": FAILURE_LABELS.get(int(dominant), "none") if dominant >= 0 else "none",
+        "first_hard_failure_code": float(first_hard_code),
+        "first_hard_failure": FAILURE_LABELS.get(int(first_hard_code), "none") if first_hard_code >= 0 else "none",
+        "hard_failure_order": "finite" if minimal_finite_only else ("finite->opposite_reversal" if minimal_reversal_only else "finite->velocity_ratio->angle_jump->direction_exceptions->boundary_monotonic->tangent->opposite_reversal"),
+        **{f"failure_{k}_{label}_count": float(failure_counts[k]) for k, label in FAILURE_LABELS.items()},
+    }
+
+
+def _sample_uv_at(u: np.ndarray, v: np.ndarray, x: float, y: float) -> tuple[float, float]:
+    if x < 0.0 or y < 0.0 or x >= u.shape[1] - 1 or y >= u.shape[0] - 1:
+        return np.nan, np.nan
+    x0 = int(math.floor(float(x)))
+    y0 = int(math.floor(float(y)))
+    wx = float(x) - float(x0)
+    wy = float(y) - float(y0)
+    weights = (
+        (1.0 - wx) * (1.0 - wy),
+        wx * (1.0 - wy),
+        (1.0 - wx) * wy,
+        wx * wy,
+    )
+    u00, u10, u01, u11 = float(u[y0, x0]), float(u[y0, x0 + 1]), float(u[y0 + 1, x0]), float(u[y0 + 1, x0 + 1])
+    v00, v10, v01, v11 = float(v[y0, x0]), float(v[y0, x0 + 1]), float(v[y0 + 1, x0]), float(v[y0 + 1, x0 + 1])
+    vals = (u00, u10, u01, u11, v00, v10, v01, v11)
+    if not all(np.isfinite(value) for value in vals):
+        return np.nan, np.nan
+    uu = weights[0] * u00 + weights[1] * u10 + weights[2] * u01 + weights[3] * u11
+    vv = weights[0] * v00 + weights[1] * v10 + weights[2] * v01 + weights[3] * v11
+    return float(uu), float(vv)
+
+
+def _sample_scalar_at(field: np.ndarray, x: float, y: float) -> float:
+    if x < 0.0 or y < 0.0 or x >= field.shape[1] - 1 or y >= field.shape[0] - 1:
+        return np.nan
+    x0 = int(math.floor(float(x)))
+    y0 = int(math.floor(float(y)))
+    wx = float(x) - float(x0)
+    wy = float(y) - float(y0)
+    vals = (
+        float(field[y0, x0]),
+        float(field[y0, x0 + 1]),
+        float(field[y0 + 1, x0]),
+        float(field[y0 + 1, x0 + 1]),
+    )
+    if not all(np.isfinite(value) for value in vals):
+        return np.nan
+    return float(
+        (1.0 - wx) * (1.0 - wy) * vals[0]
+        + wx * (1.0 - wy) * vals[1]
+        + (1.0 - wx) * wy * vals[2]
+        + wx * wy * vals[3]
+    )
+
+
+def _trace_streamline_candidate(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    start_angle: float,
+    direction: float,
+    params: DetectionParams,
+) -> dict[str, object]:
+    start_x = float(center_i) + float(radius_cells) * math.cos(float(start_angle))
+    start_y = float(center_j) + float(radius_cells) * math.sin(float(start_angle))
+    points: list[tuple[float, float]] = [(start_x, start_y)]
+    prev_angle = math.atan2(start_y - float(center_j), start_x - float(center_i))
+    winding = 0.0
+    closed = False
+    failed_finite = False
+    left_domain = False
+    step = max(float(params.streamline_step_cells), 0.05)
+    for _ in range(max(8, int(params.streamline_max_steps))):
+        x, y = points[-1]
+        # Bilinear sampling has no valid stencil on the outermost grid edge.
+        # Reaching it is an open-path/domain exit, not a missing-velocity
+        # failure in the interior flow field.
+        if x <= 0.0 or y <= 0.0 or x >= u.shape[1] - 1 or y >= u.shape[0] - 1:
+            left_domain = True
+            break
+        uu, vv = _sample_uv_at(u, v, x, y)
+        sp = math.hypot(uu, vv) if np.isfinite(uu) and np.isfinite(vv) else np.nan
+        if not np.isfinite(sp) or sp <= 1.0e-10:
+            failed_finite = True
+            break
+        ux = float(direction) * uu / sp
+        uy = float(direction) * vv / sp
+        mid_x = x + 0.5 * step * ux
+        mid_y = y + 0.5 * step * uy
+        mu, mv = _sample_uv_at(u, v, mid_x, mid_y)
+        msp = math.hypot(mu, mv) if np.isfinite(mu) and np.isfinite(mv) else np.nan
+        if np.isfinite(msp) and msp > 1.0e-10:
+            ux = float(direction) * mu / msp
+            uy = float(direction) * mv / msp
+        new_x = x + step * ux
+        new_y = y + step * uy
+        if new_x < 0.0 or new_y < 0.0 or new_x > u.shape[1] - 1 or new_y > u.shape[0] - 1:
+            left_domain = True
+            break
+        new_angle = math.atan2(new_y - float(center_j), new_x - float(center_i))
+        winding += float(_angle_diff(new_angle, prev_angle))
+        prev_angle = new_angle
+        points.append((new_x, new_y))
+        closure = math.hypot(new_x - start_x, new_y - start_y)
+        if (
+            len(points) >= int(params.streamline_min_points)
+            and abs(winding) >= 2.0 * math.pi * float(params.streamline_min_winding_turns)
+            and closure <= float(params.streamline_closure_tolerance_cells)
+        ):
+            closed = True
+            break
+    arr = np.asarray(points, dtype="float64")
+    if arr.size == 0:
+        arr = np.empty((0, 2), dtype="float64")
+    closure_error = float(math.hypot(arr[-1, 0] - start_x, arr[-1, 1] - start_y)) if len(arr) else np.inf
+    radial = np.hypot(arr[:, 0] - float(center_i), arr[:, 1] - float(center_j)) if len(arr) else np.asarray([], dtype="float64")
+    radial_cv = float(np.nanstd(radial) / max(np.nanmean(radial), 1.0e-6)) if radial.size else np.inf
+    winding_turns = float(abs(winding) / (2.0 * math.pi))
+    score = closure_error + 2.0 * abs(1.0 - min(winding_turns, 1.5)) + radial_cv
+    if failed_finite:
+        score += 5.0
+    return {
+        "points": arr,
+        "closed": bool(closed),
+        "failed_finite": bool(failed_finite),
+        "left_domain": bool(left_domain),
+        "closure_error_cells": closure_error,
+        "winding_turns": winding_turns,
+        "radial_cv": radial_cv,
+        "score": float(score),
+    }
+
+
+def _best_streamline_contour(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    params: DetectionParams,
+) -> dict[str, object] | None:
+    best: dict[str, object] | None = None
+    n_angles = max(1, int(params.streamline_start_angles))
+    for angle in np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False):
+        for direction in (1.0, -1.0):
+            candidate = _trace_streamline_candidate(u, v, center_i, center_j, radius_cells, float(angle), direction, params)
+            if best is None or float(candidate["score"]) < float(best["score"]):
+                best = candidate
+    if best is None or not bool(best["closed"]):
+        return None
+    return best
+
+
+def _sample_uv_many(
+    u: np.ndarray, v: np.ndarray, x: np.ndarray, y: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized counterpart of ``_sample_uv_at`` for independent traces."""
+    uu = np.full(x.shape, np.nan, dtype="float64")
+    vv = np.full(x.shape, np.nan, dtype="float64")
+    valid = (x >= 0.0) & (y >= 0.0) & (x < u.shape[1] - 1) & (y < u.shape[0] - 1)
+    if not np.any(valid):
+        return uu, vv
+    x0 = np.floor(x[valid]).astype(int)
+    y0 = np.floor(y[valid]).astype(int)
+    wx = x[valid] - x0
+    wy = y[valid] - y0
+    u00, u10, u01, u11 = u[y0, x0], u[y0, x0 + 1], u[y0 + 1, x0], u[y0 + 1, x0 + 1]
+    v00, v10, v01, v11 = v[y0, x0], v[y0, x0 + 1], v[y0 + 1, x0], v[y0 + 1, x0 + 1]
+    u_finite = np.isfinite(u00) & np.isfinite(u10) & np.isfinite(u01) & np.isfinite(u11)
+    v_finite = np.isfinite(v00) & np.isfinite(v10) & np.isfinite(v01) & np.isfinite(v11)
+    values_u = (1.0 - wx) * (1.0 - wy) * u00 + wx * (1.0 - wy) * u10 + (1.0 - wx) * wy * u01 + wx * wy * u11
+    values_v = (1.0 - wx) * (1.0 - wy) * v00 + wx * (1.0 - wy) * v10 + (1.0 - wx) * wy * v01 + wx * wy * v11
+    selected = np.flatnonzero(valid)
+    uu[selected[u_finite]] = values_u[u_finite]
+    vv[selected[v_finite]] = values_v[v_finite]
+    return uu, vv
+
+
+def _near_closed_streamline_traces(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+) -> tuple[list[tuple[int, dict[str, object]]], bool, bool]:
+    """Batch the independent near-closed streamline integrations.
+
+    The state update is identical to ``_trace_streamline_candidate``.  Only
+    the evaluation order changes: all radius/start-angle/direction trajectories
+    advance one integration step together, avoiding millions of Python calls.
+    """
+    specs: list[tuple[int, float, float]] = []
+    n_angles = max(1, int(params.streamline_start_angles))
+    for radius in range(int(params.start_radius_cells), int(params.max_radius_cells) + 1):
+        for angle in np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False):
+            specs.extend((radius, float(angle), direction) for direction in (1.0, -1.0))
+    radii = np.asarray([item[0] for item in specs], dtype="float64")
+    angles = np.asarray([item[1] for item in specs], dtype="float64")
+    directions = np.asarray([item[2] for item in specs], dtype="float64")
+    count = len(specs)
+    max_steps = max(8, int(params.streamline_max_steps))
+    paths = np.full((count, max_steps + 1, 2), np.nan, dtype="float64")
+    start_x = float(center_i) + radii * np.cos(angles)
+    start_y = float(center_j) + radii * np.sin(angles)
+    paths[:, 0, 0], paths[:, 0, 1] = start_x, start_y
+    x, y = start_x.copy(), start_y.copy()
+    previous_angle = np.arctan2(y - float(center_j), x - float(center_i))
+    winding = np.zeros(count, dtype="float64")
+    lengths = np.ones(count, dtype=int)
+    active = np.ones(count, dtype=bool)
+    closed = np.zeros(count, dtype=bool)
+    failed_finite = np.zeros(count, dtype=bool)
+    left_domain = np.zeros(count, dtype=bool)
+    step = max(float(params.streamline_step_cells), 0.05)
+
+    for _ in range(max_steps):
+        ids = np.flatnonzero(active)
+        if not ids.size:
+            break
+        at_edge = (x[ids] <= 0.0) | (y[ids] <= 0.0) | (x[ids] >= u.shape[1] - 1) | (y[ids] >= u.shape[0] - 1)
+        if np.any(at_edge):
+            edge_ids = ids[at_edge]
+            left_domain[edge_ids] = True
+            active[edge_ids] = False
+        ids = ids[~at_edge]
+        if not ids.size:
+            continue
+        uu, vv = _sample_uv_many(u, v, x[ids], y[ids])
+        speed = np.hypot(uu, vv)
+        finite = np.isfinite(speed) & (speed > 1.0e-10)
+        if np.any(~finite):
+            bad_ids = ids[~finite]
+            failed_finite[bad_ids] = True
+            active[bad_ids] = False
+        ids = ids[finite]
+        if not ids.size:
+            continue
+        uu, vv, speed = uu[finite], vv[finite], speed[finite]
+        ux = directions[ids] * uu / speed
+        uy = directions[ids] * vv / speed
+        mid_x = x[ids] + 0.5 * step * ux
+        mid_y = y[ids] + 0.5 * step * uy
+        mu, mv = _sample_uv_many(u, v, mid_x, mid_y)
+        mid_speed = np.hypot(mu, mv)
+        midpoint_valid = np.isfinite(mid_speed) & (mid_speed > 1.0e-10)
+        if np.any(midpoint_valid):
+            ux[midpoint_valid] = directions[ids[midpoint_valid]] * mu[midpoint_valid] / mid_speed[midpoint_valid]
+            uy[midpoint_valid] = directions[ids[midpoint_valid]] * mv[midpoint_valid] / mid_speed[midpoint_valid]
+        new_x = x[ids] + step * ux
+        new_y = y[ids] + step * uy
+        outside = (new_x < 0.0) | (new_y < 0.0) | (new_x > u.shape[1] - 1) | (new_y > u.shape[0] - 1)
+        if np.any(outside):
+            outside_ids = ids[outside]
+            left_domain[outside_ids] = True
+            active[outside_ids] = False
+        valid_ids = ids[~outside]
+        if not valid_ids.size:
+            continue
+        valid_x, valid_y = new_x[~outside], new_y[~outside]
+        x[valid_ids], y[valid_ids] = valid_x, valid_y
+        new_angle = np.arctan2(valid_y - float(center_j), valid_x - float(center_i))
+        winding[valid_ids] += np.asarray(_angle_diff(new_angle, previous_angle[valid_ids]), dtype="float64")
+        previous_angle[valid_ids] = new_angle
+        paths[valid_ids, lengths[valid_ids], 0] = valid_x
+        paths[valid_ids, lengths[valid_ids], 1] = valid_y
+        lengths[valid_ids] += 1
+        closure = np.hypot(valid_x - start_x[valid_ids], valid_y - start_y[valid_ids])
+        completed = (
+            (lengths[valid_ids] >= int(params.streamline_min_points))
+            & (np.abs(winding[valid_ids]) >= 2.0 * math.pi * float(params.streamline_min_winding_turns))
+            & (closure <= float(params.streamline_closure_tolerance_cells))
+        )
+        if np.any(completed):
+            completed_ids = valid_ids[completed]
+            closed[completed_ids] = True
+            active[completed_ids] = False
+
+    accepted: list[tuple[int, dict[str, object]]] = []
+    for idx in np.flatnonzero(closed):
+        points = paths[idx, : lengths[idx]].copy()
+        closure_error = float(np.hypot(points[-1, 0] - start_x[idx], points[-1, 1] - start_y[idx]))
+        radial = np.hypot(points[:, 0] - float(center_i), points[:, 1] - float(center_j))
+        radial_cv = float(np.nanstd(radial) / max(np.nanmean(radial), 1.0e-6))
+        winding_turns = float(abs(winding[idx]) / (2.0 * math.pi))
+        accepted.append((
+            int(radii[idx]),
+            {
+                "points": points,
+                "closed": True,
+                "failed_finite": bool(failed_finite[idx]),
+                "left_domain": bool(left_domain[idx]),
+                "closure_error_cells": closure_error,
+                "winding_turns": winding_turns,
+                "radial_cv": radial_cv,
+                "score": float(closure_error + 2.0 * abs(1.0 - min(winding_turns, 1.5)) + radial_cv),
+            },
+        ))
+    return accepted, bool(np.any(failed_finite)), bool(np.any(lengths > 1))
+
+
+def _near_closed_streamline_check(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+) -> dict[str, float | bool | str]:
+    """Accept a finite, near-closed streamline without a circular-flow test.
+
+    This deliberately scans every configured starting radius.  The historical
+    circle test stops at the first bad radius, which is unsuitable when an
+    irregular closed streamline exists outside a weak inner core.
+    """
+    failure_counts = {key: 0 for key in FAILURE_LABELS}
+    candidates: list[tuple[int, dict[str, object], float, float]] = []
+    traces, saw_nonfinite, saw_trace = _near_closed_streamline_traces(u, v, center_i, center_j, params)
+    for radius, trace in traces:
+                points = np.asarray(trace["points"], dtype="float64")
+                if points.size:
+                    uu = np.empty(len(points), dtype="float64")
+                    vv = np.empty(len(points), dtype="float64")
+                    for idx, (x, y) in enumerate(points):
+                        uu[idx], vv[idx] = _sample_uv_at(u, v, float(x), float(y))
+                    finite = np.isfinite(uu) & np.isfinite(vv) & (np.hypot(uu, vv) > 1.0e-10)
+                    finite_fraction = float(finite.mean()) if finite.size else 0.0
+                    mean_speed = float(np.nanmean(np.hypot(uu[finite], vv[finite]))) if finite.any() else np.nan
+                else:
+                    finite_fraction, mean_speed = 0.0, np.nan
+                if bool(trace["closed"]) and finite_fraction >= float(params.min_finite_fraction):
+                    candidates.append((radius, trace, finite_fraction, mean_speed))
+
+    if candidates:
+        # Prefer the largest enclosing streamline; use closure error only to
+        # break ties at one radius, then prefer more complete winding.
+        radius, trace, finite_fraction, mean_speed = sorted(
+            candidates,
+            key=lambda item: (
+                -item[0],
+                float(item[1]["closure_error_cells"]),
+                -float(item[1]["winding_turns"]),
+                float(item[1]["score"]),
+            ),
+        )[0]
+        boundary_i, boundary_j = _serialize_streamline_points(np.asarray(trace["points"], dtype="float64"))
+        return {
+            "circle_passed": True,
+            "hua_pass": True,
+            "radius_cells": float(radius),
+            "accepted_radius_cells": float(radius),
+            "finite_fraction": finite_fraction,
+            "mean_circle_speed_ms": mean_speed,
+            "max_velocity_ratio": np.nan,
+            "velocity_ratio_soft_warning": "not_evaluated",
+            "max_angle_jump_deg": np.nan,
+            "angle_jump_soft_warning": "not_evaluated",
+            "direction_exception_count": np.nan,
+            "direction_exception_soft_warning": "not_evaluated",
+            "positive_angle_diff_count": np.nan,
+            "negative_angle_diff_count": np.nan,
+            "direction_exception_limit": np.nan,
+            "boundary_monotonic_required": False,
+            "boundary_monotonic_passed": "not_evaluated",
+            "boundary_monotonic_exception_limit": np.nan,
+            "tangent_pass_fraction": np.nan,
+            "tangent_alignment_soft_warning": "not_evaluated",
+            "symmetry_pass_fraction": np.nan,
+            "opposite_reversal_fraction": np.nan,
+            "circulation_sign": np.nan,
+            "dominant_failure_code": -1.0,
+            "dominant_failure": "none",
+            "first_hard_failure_code": -1.0,
+            "first_hard_failure": "none",
+            "hard_failure_order": "finite->near_closed_streamline",
+            "boundary_mode": "near_closed_streamline",
+            "boundary_source": "near_closed_streamline",
+            "streamline_closed": True,
+            "streamline_points": float(len(np.asarray(trace["points"]))),
+            "streamline_boundary_i": boundary_i,
+            "streamline_boundary_j": boundary_j,
+            "streamline_closure_error_cells": float(trace["closure_error_cells"]),
+            "streamline_winding_turns": float(trace["winding_turns"]),
+            "streamline_direction_exception_fraction": np.nan,
+            "tangent_fraction_24deg": np.nan,
+            "tangent_fraction_30deg": np.nan,
+            "tangent_fraction_36deg": np.nan,
+            "tangent_fraction_45deg": np.nan,
+            **{f"failure_{key}_{label}_count": 0.0 for key, label in FAILURE_LABELS.items()},
+        }
+
+    failure_code = 0 if saw_nonfinite and saw_trace else 10
+    failure_counts[failure_code] = 1
+    return {
+        "circle_passed": False,
+        "hua_pass": False,
+        "radius_cells": np.nan,
+        "accepted_radius_cells": 0.0,
+        "finite_fraction": 0.0,
+        "mean_circle_speed_ms": np.nan,
+        "max_velocity_ratio": np.nan,
+        "velocity_ratio_soft_warning": "not_evaluated",
+        "max_angle_jump_deg": np.nan,
+        "angle_jump_soft_warning": "not_evaluated",
+        "direction_exception_count": np.nan,
+        "direction_exception_soft_warning": "not_evaluated",
+        "positive_angle_diff_count": np.nan,
+        "negative_angle_diff_count": np.nan,
+        "direction_exception_limit": np.nan,
+        "boundary_monotonic_required": False,
+        "boundary_monotonic_passed": "not_evaluated",
+        "boundary_monotonic_exception_limit": np.nan,
+        "tangent_pass_fraction": np.nan,
+        "tangent_alignment_soft_warning": "not_evaluated",
+        "symmetry_pass_fraction": np.nan,
+        "opposite_reversal_fraction": np.nan,
+        "circulation_sign": np.nan,
+        "dominant_failure_code": float(failure_code),
+        "dominant_failure": FAILURE_LABELS[failure_code],
+        "first_hard_failure_code": float(failure_code),
+        "first_hard_failure": FAILURE_LABELS[failure_code],
+        "hard_failure_order": "finite->near_closed_streamline",
+        "boundary_mode": "near_closed_streamline",
+        "boundary_source": "near_closed_streamline_rejected",
+        "streamline_closed": False,
+        "streamline_points": 0.0,
+        "streamline_boundary_i": "",
+        "streamline_boundary_j": "",
+        "streamline_closure_error_cells": np.nan,
+        "streamline_winding_turns": np.nan,
+        "streamline_direction_exception_fraction": np.nan,
+        "tangent_fraction_24deg": np.nan,
+        "tangent_fraction_30deg": np.nan,
+        "tangent_fraction_36deg": np.nan,
+        "tangent_fraction_45deg": np.nan,
+        **{f"failure_{key}_{label}_count": float(failure_counts[key]) for key, label in FAILURE_LABELS.items()},
+    }
+
+
+def _serialize_streamline_points(points: np.ndarray, limit: int = 720) -> tuple[str, str]:
+    arr = np.asarray(points, dtype="float64")
+    if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] < 3:
+        return "", ""
+    step = max(1, int(math.ceil(arr.shape[0] / max(3, int(limit)))))
+    sampled = arr[::step]
+    ii = np.rint(sampled[:, 0]).astype(int)
+    jj = np.rint(sampled[:, 1]).astype(int)
+    return ";".join(str(v) for v in ii), ";".join(str(v) for v in jj)
+
+
+def _streamline_contour_check(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    params: DetectionParams,
+) -> dict[str, float | bool | str]:
+    failure_counts = {k: 0 for k in FAILURE_LABELS}
+    contour = _best_streamline_contour(u, v, center_i, center_j, radius_cells, params)
+    if contour is None:
+        failure_counts[10] = 1
+        dominant = 10
+        return {
+            "circle_passed": False,
+            "radius_cells": float(radius_cells),
+            "finite_fraction": 0.0,
+            "mean_circle_speed_ms": np.nan,
+            "max_velocity_ratio": np.nan,
+            "max_angle_jump_deg": np.nan,
+            "direction_exception_count": np.nan,
+            "positive_angle_diff_count": np.nan,
+            "negative_angle_diff_count": np.nan,
+            "direction_exception_limit": np.nan,
+            "boundary_monotonic_required": True,
+            "boundary_monotonic_passed": False,
+            "boundary_monotonic_exception_limit": float(params.streamline_direction_exception_fraction),
+            "tangent_pass_fraction": 0.0,
+            "symmetry_pass_fraction": 0.0,
+            "opposite_reversal_fraction": 0.0,
+            "circulation_sign": np.nan,
+            "dominant_failure_code": float(dominant),
+            "dominant_failure": FAILURE_LABELS[dominant],
+            "first_hard_failure_code": float(dominant),
+            "first_hard_failure": FAILURE_LABELS[dominant],
+            "hard_failure_order": "no_closed_streamline->finite->velocity_ratio->angle_jump->boundary_monotonic->tangent->opposite_reversal",
+            "boundary_mode": "velocity_streamline_contour",
+            "streamline_closed": False,
+            "streamline_points": 0.0,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
+            "streamline_closure_error_cells": np.nan,
+            "streamline_winding_turns": 0.0,
+            "streamline_direction_exception_fraction": 1.0,
+            "tangent_fraction_24deg": 0.0,
+            "tangent_fraction_30deg": 0.0,
+            "tangent_fraction_36deg": 0.0,
+            "tangent_fraction_45deg": 0.0,
+            **{f"failure_{k}_{label}_count": float(failure_counts[k]) for k, label in FAILURE_LABELS.items()},
+        }
+
+    points = np.asarray(contour["points"], dtype="float64")
+    streamline_boundary_i, streamline_boundary_j = _serialize_streamline_points(points)
+    uu = np.empty(len(points), dtype="float64")
+    vv = np.empty(len(points), dtype="float64")
+    for idx, (x, y) in enumerate(points):
+        uu[idx], vv[idx] = _sample_uv_at(u, v, float(x), float(y))
+    sp = np.hypot(uu, vv)
+    finite = np.isfinite(sp) & (sp > 1e-10)
+    if finite.mean() < params.min_finite_fraction:
+        failure_counts[0] += int((~finite).sum())
+
+    x_s = ndimage.gaussian_filter1d(points[:, 0], sigma=1.0, mode="wrap")
+    y_s = ndimage.gaussian_filter1d(points[:, 1], sigma=1.0, mode="wrap")
+    tx = np.gradient(x_s)
+    ty = np.gradient(y_s)
+    tnorm = np.hypot(tx, ty)
+    tx = tx / np.maximum(tnorm, 1.0e-12)
+    ty = ty / np.maximum(tnorm, 1.0e-12)
+    tangent_cos = np.abs((uu * tx + vv * ty) / np.maximum(sp, 1.0e-12))
+    tangent_ok = finite & (tangent_cos >= math.cos(math.radians(params.tangent_tolerance_deg)))
+    tangent_fraction = float(tangent_ok.sum() / finite.sum()) if finite.any() else 0.0
+    tangent_fraction_by_tolerance = {
+        int(tol): float((finite & (tangent_cos >= math.cos(math.radians(float(tol))))).sum() / finite.sum()) if finite.any() else 0.0
+        for tol in (24, 30, 36, 45)
+    }
+    if tangent_fraction < params.min_tangent_fraction:
+        failure_counts[7] += int(max(1, round((params.min_tangent_fraction - tangent_fraction) * len(points))))
+
+    polar = np.unwrap(np.arctan2(points[:, 1] - float(center_j), points[:, 0] - float(center_i)))
+    dpolar = np.diff(polar)
+    positive_diffs = int(np.sum(dpolar > 1.0e-9))
+    negative_diffs = int(np.sum(dpolar < -1.0e-9))
+    direction_exceptions = min(positive_diffs, negative_diffs)
+    direction_total = max(1, positive_diffs + negative_diffs)
+    direction_exception_fraction = float(direction_exceptions / direction_total)
+    boundary_monotonic_passed = direction_exception_fraction <= float(params.streamline_direction_exception_fraction)
+    if not boundary_monotonic_passed:
+        failure_counts[9] += int(max(1, round((direction_exception_fraction - float(params.streamline_direction_exception_fraction)) * len(points))))
+
+    angles = np.arctan2(vv, uu)
+    max_ratio = 0.0
+    max_angle = 0.0
+    for n in range(len(points)):
+        m = (n + 1) % len(points)
+        if not (finite[n] and finite[m]):
+            failure_counts[0] += 1
+            continue
+        ratio = float(sp[m] / sp[n])
+        max_ratio = max(max_ratio, ratio, 1.0 / ratio if ratio > 0 else np.inf)
+        if ratio > params.speed_ratio_max or ratio < 1.0 / params.speed_ratio_max:
+            failure_counts[1] += 1
+        dtheta = float(_angle_diff(angles[n], angles[m]))
+        max_angle = max(max_angle, abs(math.degrees(dtheta)))
+        if abs(math.degrees(dtheta)) > params.angle_jump_max_deg:
+            failure_counts[2] += 1
+
+    half = len(points) // 2
+    symmetry_ok = 0
+    symmetry_total = 0
+    reversal_ok = 0
+    reversal_total = 0
+    for n in range(half):
+        m = (n + half) % len(points)
+        if not (finite[n] and finite[m]):
+            continue
+        diff = abs(float(_angle_diff(angles[n], angles[m])))
+        symmetry_total += 1
+        if abs(diff - math.pi) <= math.radians(params.symmetry_tolerance_deg):
+            symmetry_ok += 1
+        reversal_total += 1
+        if uu[n] * uu[m] + vv[n] * vv[m] < 0:
+            reversal_ok += 1
+    symmetry_fraction = float(symmetry_ok / symmetry_total) if symmetry_total else 0.0
+    reversal_fraction = float(reversal_ok / reversal_total) if reversal_total else 0.0
+    if symmetry_total and symmetry_ok < symmetry_total:
+        failure_counts[6] += int(symmetry_total - symmetry_ok)
+    if reversal_fraction < params.min_reversal_fraction:
+        failure_counts[8] += int(max(1, round((params.min_reversal_fraction - reversal_fraction) * max(reversal_total, 1))))
+
+    rotation_failed = False
+    if finite.mean() < params.min_finite_fraction:
+        rotation_failed = True
+    if failure_counts[1] or failure_counts[2] or failure_counts[8]:
+        rotation_failed = True
+    if not boundary_monotonic_passed:
+        rotation_failed = True
+    if tangent_fraction < params.min_tangent_fraction:
+        rotation_failed = True
+
+    tangential = uu * tx + vv * ty
+    circulation_sign = float(np.sign(np.nanmedian(tangential[finite]))) if finite.any() else np.nan
+    dominant = max(failure_counts.items(), key=lambda kv: kv[1])[0] if sum(failure_counts.values()) else -1
+    first_hard_code = -1
+    hard_failures = {
+        0: finite.mean() < params.min_finite_fraction,
+        1: failure_counts[1] > 0,
+        2: failure_counts[2] > 0,
+        9: not boundary_monotonic_passed,
+        7: tangent_fraction < params.min_tangent_fraction,
+        8: reversal_fraction < params.min_reversal_fraction,
+    }
+    for code, _label in HARD_FAILURE_ORDER:
+        if hard_failures.get(code, False):
+            first_hard_code = code
+            break
+    return {
+        "circle_passed": bool(not rotation_failed),
+        "radius_cells": float(radius_cells),
+        "finite_fraction": float(finite.mean()),
+        "mean_circle_speed_ms": float(np.nanmean(sp[finite])) if finite.any() else np.nan,
+        "max_velocity_ratio": float(max_ratio),
+        "max_angle_jump_deg": float(max_angle),
+        "direction_exception_count": float(direction_exceptions),
+        "positive_angle_diff_count": float(positive_diffs),
+        "negative_angle_diff_count": float(negative_diffs),
+        "direction_exception_limit": float(params.streamline_direction_exception_fraction),
+        "boundary_monotonic_required": True,
+        "boundary_monotonic_passed": bool(boundary_monotonic_passed),
+        "boundary_monotonic_exception_limit": float(params.streamline_direction_exception_fraction),
+        "tangent_pass_fraction": tangent_fraction,
+        "symmetry_pass_fraction": symmetry_fraction,
+        "opposite_reversal_fraction": reversal_fraction,
+        "circulation_sign": circulation_sign,
+        "dominant_failure_code": float(dominant),
+        "dominant_failure": FAILURE_LABELS.get(int(dominant), "none") if dominant >= 0 else "none",
+        "first_hard_failure_code": float(first_hard_code),
+        "first_hard_failure": FAILURE_LABELS.get(int(first_hard_code), "none") if first_hard_code >= 0 else "none",
+        "hard_failure_order": "finite->velocity_ratio->angle_jump->boundary_monotonic->tangent->opposite_reversal",
+        "boundary_mode": "velocity_streamline_contour",
+        "streamline_closed": True,
+        "streamline_points": float(len(points)),
+        "streamline_boundary_i": streamline_boundary_i,
+        "streamline_boundary_j": streamline_boundary_j,
+        "streamline_closure_error_cells": float(contour["closure_error_cells"]),
+        "streamline_winding_turns": float(contour["winding_turns"]),
+        "streamline_direction_exception_fraction": direction_exception_fraction,
+        "tangent_fraction_24deg": tangent_fraction_by_tolerance[24],
+        "tangent_fraction_30deg": tangent_fraction_by_tolerance[30],
+        "tangent_fraction_36deg": tangent_fraction_by_tolerance[36],
+        "tangent_fraction_45deg": tangent_fraction_by_tolerance[45],
+        **{f"failure_{k}_{label}_count": float(failure_counts[k]) for k, label in FAILURE_LABELS.items()},
+    }
+
+
+def _empty_consensus_fields() -> dict[str, float | bool | str]:
+    return {
+        "ssh_contour_closed": False,
+        "ssh_contour_radius_cells": np.nan,
+        "ssh_contour_area_cells": 0.0,
+        "ssh_consensus_pass": False,
+        "jet_core_overlap_fraction": np.nan,
+        "jet_core_speed_percentile": np.nan,
+        "jet_meander_flag": False,
+        "boundary_source": "not_evaluated",
+        "catalog_acceptance_reason": "not_evaluated",
+    }
+
+
+def _ssh_effective_contour_check(
+    ssh: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    params: DetectionParams,
+    extremum_type: str,
+) -> dict[str, float | bool | str]:
+    """Lightweight SSH/effective-contour proxy around a candidate center."""
+    ci = int(np.clip(round(float(center_i)), 0, ssh.shape[1] - 1))
+    cj = int(np.clip(round(float(center_j)), 0, ssh.shape[0] - 1))
+    radius = max(int(radius_cells), int(params.start_radius_cells))
+    half = max(int(params.max_radius_cells) + 3, radius + 3)
+    x0, x1 = max(0, ci - half), min(ssh.shape[1], ci + half + 1)
+    y0, y1 = max(0, cj - half), min(ssh.shape[0], cj + half + 1)
+    window = np.asarray(ssh[y0:y1, x0:x1], dtype="float64")
+    finite = np.isfinite(window)
+    if window.size == 0 or float(finite.mean()) < float(params.ssh_consensus_min_finite_fraction):
+        return {
+            "ssh_contour_closed": False,
+            "ssh_contour_radius_cells": np.nan,
+            "ssh_contour_area_cells": 0.0,
+            "ssh_consensus_pass": False,
+        }
+    local_cj = cj - y0
+    local_ci = ci - x0
+    if local_cj < 0 or local_cj >= window.shape[0] or local_ci < 0 or local_ci >= window.shape[1]:
+        return {
+            "ssh_contour_closed": False,
+            "ssh_contour_radius_cells": np.nan,
+            "ssh_contour_area_cells": 0.0,
+            "ssh_consensus_pass": False,
+        }
+    center_value = float(window[local_cj, local_ci])
+    if not np.isfinite(center_value):
+        return {
+            "ssh_contour_closed": False,
+            "ssh_contour_radius_cells": np.nan,
+            "ssh_contour_area_cells": 0.0,
+            "ssh_consensus_pass": False,
+        }
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    rr = np.hypot(xx - float(center_i), yy - float(center_j))
+    ring = finite & (rr >= float(params.start_radius_cells)) & (rr <= float(params.max_radius_cells) + 1.0)
+    ring_value = float(np.nanmedian(window[ring])) if np.any(ring) else float(np.nanmedian(window[finite]))
+    if not np.isfinite(ring_value) or abs(center_value - ring_value) < 1.0e-12:
+        return {
+            "ssh_contour_closed": False,
+            "ssh_contour_radius_cells": np.nan,
+            "ssh_contour_area_cells": 0.0,
+            "ssh_consensus_pass": False,
+        }
+    is_max = str(extremum_type) == "ssh_max" or center_value > ring_value
+    level = 0.5 * (center_value + ring_value)
+    mask = finite & ((window >= level) if is_max else (window <= level))
+    labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    component = int(labels[local_cj, local_ci])
+    if component <= 0:
+        return {
+            "ssh_contour_closed": False,
+            "ssh_contour_radius_cells": np.nan,
+            "ssh_contour_area_cells": 0.0,
+            "ssh_consensus_pass": False,
+        }
+    comp = labels == component
+    touches_boundary = bool(comp[0, :].any() or comp[-1, :].any() or comp[:, 0].any() or comp[:, -1].any())
+    area = float(comp.sum())
+    eq_radius = float(math.sqrt(max(area, 0.0) / math.pi))
+    radius_ok = float(params.start_radius_cells) <= eq_radius <= float(params.max_radius_cells) + 1.5
+    passed = bool((not touches_boundary) and radius_ok)
+    return {
+        "ssh_contour_closed": passed,
+        "ssh_contour_radius_cells": eq_radius,
+        "ssh_contour_area_cells": area,
+        "ssh_consensus_pass": passed,
+    }
+
+
+def _component_boundary_points(comp: np.ndarray, x0: int, y0: int, *, max_points: int = 96) -> tuple[str, str]:
+    if not np.any(comp):
+        return "", ""
+    up = np.zeros_like(comp, dtype=bool)
+    down = np.zeros_like(comp, dtype=bool)
+    left = np.zeros_like(comp, dtype=bool)
+    right = np.zeros_like(comp, dtype=bool)
+    up[1:, :] = comp[:-1, :]
+    down[:-1, :] = comp[1:, :]
+    left[:, 1:] = comp[:, :-1]
+    right[:, :-1] = comp[:, 1:]
+    boundary = comp & ~(up & down & left & right)
+    yy, xx = np.where(boundary)
+    if len(xx) == 0:
+        return "", ""
+    cx = float(np.nanmean(xx))
+    cy = float(np.nanmean(yy))
+    order = np.argsort(np.arctan2(yy.astype("float64") - cy, xx.astype("float64") - cx))
+    if len(order) > max_points:
+        take = np.linspace(0, len(order) - 1, int(max_points), dtype=int)
+        order = order[take]
+    bx = (xx[order] + int(x0)).astype(int)
+    by = (yy[order] + int(y0)).astype(int)
+    return ";".join(map(str, bx.tolist())), ";".join(map(str, by.tolist()))
+
+
+def _count_same_sign_extrema_in_component(window: np.ndarray, comp: np.ndarray, is_max: bool) -> int:
+    finite = np.isfinite(window)
+    if not np.any(comp & finite):
+        return 0
+    if is_max:
+        filled = np.where(finite, window, -np.inf)
+        local = finite & (filled == ndimage.maximum_filter(filled, size=3, mode="nearest"))
+    else:
+        filled = np.where(finite, window, np.inf)
+        local = finite & (filled == ndimage.minimum_filter(filled, size=3, mode="nearest"))
+    local = local & comp
+    labels, count = ndimage.label(local, structure=np.ones((3, 3), dtype=bool))
+    return int(count)
+
+
+def _component_shape_metrics(comp: np.ndarray) -> tuple[float, float, int]:
+    """Return PET-style shape error percent, compactness, and boundary points.
+
+    The shape error follows py_eddy_tracker's ``fit_circle_`` / ``shape_error``
+    convention: fit the best circle to the contour boundary, then compare the
+    polygon area with the fitted-circle area.  This is more sensitive to
+    irregular contours than a simple std(radius)/mean(radius) metric.
+    """
+    up = np.zeros_like(comp, dtype=bool)
+    down = np.zeros_like(comp, dtype=bool)
+    left = np.zeros_like(comp, dtype=bool)
+    right = np.zeros_like(comp, dtype=bool)
+    up[1:, :] = comp[:-1, :]
+    down[:-1, :] = comp[1:, :]
+    left[:, 1:] = comp[:, :-1]
+    right[:, :-1] = comp[:, 1:]
+    boundary = comp & ~(up & down & left & right)
+    yy, xx = np.where(boundary)
+    if xx.size < 3:
+        return np.nan, np.nan, int(xx.size)
+    x = xx.astype("float64")
+    y = yy.astype("float64")
+
+    # Solve the linearized circle fit from py_eddy_tracker:
+    #   a*x_i + b*y_i + c = x_i^2 + y_i^2
+    # with x0 = a/2, y0 = b/2, r^2 = c + x0^2 + y0^2.
+    rhs = x * x + y * y
+    # Centering reduces cancellation in the normal equations.  This is the
+    # same linear least-squares circle fit as above, evaluated explicitly to
+    # avoid the platform LAPACK call that is unstable on this Windows host.
+    mean_x = float(np.mean(x))
+    mean_y = float(np.mean(y))
+    dx = x - mean_x
+    dy = y - mean_y
+    sxx = float(np.dot(dx, dx))
+    syy = float(np.dot(dy, dy))
+    sxy = float(np.dot(dx, dy))
+    determinant = sxx * syy - sxy * sxy
+    scale = max(sxx * syy, 1.0)
+    if not np.isfinite(determinant) or determinant <= np.finfo("f8").eps * scale:
+        return np.nan, np.nan, int(xx.size)
+    a = (syy * float(np.dot(dx, rhs)) - sxy * float(np.dot(dy, rhs))) / determinant
+    b = (sxx * float(np.dot(dy, rhs)) - sxy * float(np.dot(dx, rhs))) / determinant
+    c = float(np.mean(rhs)) - a * mean_x - b * mean_y
+    center_x = float(a) * 0.5
+    center_y = float(b) * 0.5
+    radius_sq = float(c) + center_x * center_x + center_y * center_y
+    if not np.isfinite(radius_sq) or radius_sq <= 0.0:
+        return np.nan, np.nan, int(xx.size)
+    radius = float(math.sqrt(radius_sq))
+
+    # The component and fitted circle are both represented on the same grid.
+    grid_y, grid_x = np.indices(comp.shape)
+    circle_mask = (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2 <= radius * radius
+    polygon_area = float(comp.sum())
+    circle_area = float(circle_mask.sum())
+    if circle_area <= 0.0:
+        return np.nan, np.nan, int(xx.size)
+    intersection_area = float((comp & circle_mask).sum())
+    shape_error = float((polygon_area + circle_area - 2.0 * intersection_area) / circle_area * 100.0)
+
+    order = np.argsort(np.arctan2(y - mean_y, x - mean_x))
+    x = xx[order].astype("float64")
+    y = yy[order].astype("float64")
+    if x[0] != x[-1] or y[0] != y[-1]:
+        x = np.r_[x, x[0]]
+        y = np.r_[y, y[0]]
+    area = 0.5 * abs(float(np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])))
+    perimeter = float(np.sum(np.hypot(np.diff(x), np.diff(y))))
+    compactness = float(4.0 * math.pi * area / max(perimeter * perimeter, 1.0e-12)) if perimeter > 0 else np.nan
+    return shape_error, compactness, int(xx.size)
+
+
+def _ssh_primary_contour_check(
+    ssh: np.ndarray,
+    seed_i: int,
+    seed_j: int,
+    params: DetectionParams,
+    extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+) -> dict[str, float | bool | str]:
+    ci = int(np.clip(int(seed_i), 0, ssh.shape[1] - 1))
+    cj = int(np.clip(int(seed_j), 0, ssh.shape[0] - 1))
+    seed_value = float(ssh[cj, ci]) if np.isfinite(ssh[cj, ci]) else np.nan
+    seed_lat = float(lat[cj]) if lat is not None and np.isfinite(lat[cj]) else np.nan
+    base = {
+        "circle_passed": False,
+        "hua_pass": False,
+        "radius_cells": 0.0,
+        "accepted_radius_cells": 0.0,
+        "finite_fraction": np.nan,
+        "mean_circle_speed_ms": np.nan,
+        "max_velocity_ratio": np.nan,
+        "max_angle_jump_deg": np.nan,
+        "direction_exception_count": np.nan,
+        "positive_angle_diff_count": np.nan,
+        "negative_angle_diff_count": np.nan,
+        "direction_exception_limit": np.nan,
+        "boundary_monotonic_required": False,
+        "boundary_monotonic_passed": False,
+        "boundary_monotonic_exception_limit": np.nan,
+        "tangent_pass_fraction": np.nan,
+        "symmetry_pass_fraction": np.nan,
+        "opposite_reversal_fraction": np.nan,
+        "circulation_sign": np.nan,
+        "boundary_mode": "ssh_effective_contour_primary",
+        "surface_definition": "ssh_effective_contour_primary",
+        "boundary_source": "ssh_primary_rejected",
+        "catalog_acceptance_reason": "ssh_primary_no_closed_contour",
+        "dynamical_core_class": "not_evaluated",
+        "streamline_boundary_quality": "not_evaluated",
+        "ssh_contour_closed": False,
+        "ssh_consensus_pass": False,
+        "ssh_contour_radius_cells": np.nan,
+        "ssh_contour_area_cells": 0.0,
+        "ssh_contour_center_i": np.nan,
+        "ssh_contour_center_j": np.nan,
+        "ssh_contour_center_lon": np.nan,
+        "ssh_contour_center_lat": np.nan,
+        "ssh_contour_level": np.nan,
+        "ssh_contour_amplitude_cm": np.nan,
+        "ssh_contour_same_extrema_count": np.nan,
+        "ssh_contour_shape_error_percent": np.nan,
+        "ssh_contour_compactness": np.nan,
+        "ssh_contour_boundary_point_count": 0.0,
+        "ssh_primary_requested_window_half_cells": np.nan,
+        "ssh_primary_effective_window_half_cells": np.nan,
+        "ssh_primary_valid_contour_count": 0.0,
+        "ssh_primary_rejected_multi_extrema_count": 0.0,
+        "ssh_primary_rejected_shape_error_count": 0.0,
+        "ssh_primary_min_amplitude_cm": float(params.ssh_primary_min_amplitude_cm),
+        "ssh_contour_boundary_i": "",
+        "ssh_contour_boundary_j": "",
+        "dominant_failure_code": 14.0,
+        "dominant_failure": FAILURE_LABELS[14],
+        "first_hard_failure_code": 14.0,
+        "first_hard_failure": FAILURE_LABELS[14],
+        **{f"failure_{k}_{label}_count": 0.0 for k, label in FAILURE_LABELS.items()},
+    }
+    if not np.isfinite(seed_value):
+        base["failure_14_ssh_primary_no_closed_contour_count"] = 1.0
+        return base
+    target_open_ocean = bool(
+        lon is not None
+        and lat is not None
+        and _in_target_open_ocean_box(
+            float(lon[ci]), float(lat[cj]), params.target_open_ocean_boxes
+        )
+    )
+    open_ocean = bool(
+        lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, ci, cj)
+    )
+    regional_policy = _regional_amplitude_policy(params.regional_amplitude_profile, lon, lat, ci, cj)
+    if regional_policy is not None:
+        min_amplitude_cm = float(regional_policy["threshold_cm"])
+    elif target_open_ocean:
+        min_amplitude_cm = float(params.target_open_ocean_min_amplitude_cm)
+    elif open_ocean:
+        # Re-read the one-dimensional latitude coordinate at the clipped seed
+        # index here so adaptive thresholds cannot depend on stale worker state.
+        seed_lat = float(lat[cj]) if lat is not None and np.isfinite(lat[cj]) else np.nan
+        abs_lat = abs(seed_lat)
+        if abs_lat <= 15.0:
+            min_amplitude_cm = float(params.ssh_primary_open_ocean_low_lat_amplitude_cm)
+        elif abs_lat >= 60.0:
+            min_amplitude_cm = float(params.ssh_primary_open_ocean_high_lat_amplitude_cm)
+        else:
+            # Preserve the existing mid-latitude open-ocean threshold while
+            # tapering it between the equatorial and high-latitude values.
+            if abs_lat <= 30.0:
+                weight = (abs_lat - 15.0) / 15.0
+                min_amplitude_cm = (1.0 - weight) * float(params.ssh_primary_open_ocean_low_lat_amplitude_cm) + weight * float(params.ssh_primary_open_ocean_min_amplitude_cm)
+            else:
+                weight = (abs_lat - 30.0) / 30.0
+                min_amplitude_cm = (1.0 - weight) * float(params.ssh_primary_open_ocean_min_amplitude_cm) + weight * float(params.ssh_primary_open_ocean_high_lat_amplitude_cm)
+    else:
+        min_amplitude_cm = float(params.ssh_primary_min_amplitude_cm)
+    window_factor = (
+        float(params.target_open_ocean_window_factor)
+        if target_open_ocean
+        else float(params.ssh_primary_open_ocean_window_factor)
+        if open_ocean
+        else float(params.ssh_primary_window_factor)
+    )
+    max_radius_factor = (
+        float(params.target_open_ocean_max_radius_factor)
+        if target_open_ocean
+        else float(params.ssh_primary_open_ocean_max_radius_factor)
+        if open_ocean
+        else float(params.ssh_primary_max_radius_factor)
+    )
+    base["ssh_primary_min_amplitude_cm"] = min_amplitude_cm
+    if regional_policy is not None:
+        base["regional_threshold_cm"] = min_amplitude_cm
+        base["threshold_region"] = str(regional_policy["region"])
+        base["threshold_lat_band"] = str(regional_policy["lat_band"])
+        base["threshold_iteration"] = int(regional_policy.get("iteration", 0))
+        base["threshold_source"] = str(regional_policy.get("source", "regional_amplitude_density_feedback"))
+        base["threshold_adjustment_reason"] = str(regional_policy.get("adjustment_reason", "profile"))
+        base["local_amplitude_percentile"] = float(regional_policy.get("local_amplitude_percentile", np.nan))
+        base["fragmentation_rate"] = float(regional_policy.get("fragmentation_rate", np.nan))
+        base["contour_quality_score"] = float(regional_policy.get("contour_quality_score", np.nan))
+    else:
+        base["regional_threshold_cm"] = np.nan
+        base["threshold_region"] = ""
+        base["threshold_lat_band"] = ""
+        base["threshold_iteration"] = np.nan
+        base["threshold_source"] = "latitude_initial_fallback"
+        base["threshold_adjustment_reason"] = "no_regional_profile"
+        base["local_amplitude_percentile"] = np.nan
+        base["fragmentation_rate"] = np.nan
+        base["contour_quality_score"] = np.nan
+    max_radius = float(params.max_radius_cells) * max_radius_factor
+    requested_half = int(math.ceil(max_radius * window_factor))
+    # A contour whose equivalent radius must be <= max_radius cannot need an
+    # 8R search window.  The previous multiplication of both recovery factors
+    # made target seeds label >1 million grid cells per contour level and also
+    # encouraged connections to distant background features.  A 1.5R window
+    # retains a generous boundary margin while bounding the local operation.
+    radius_bounded_half = max(int(math.ceil(max_radius * 1.5)), int(math.ceil(max_radius)) + 4)
+    half = min(max(requested_half, int(math.ceil(max_radius)) + 4), radius_bounded_half)
+    base["ssh_primary_requested_window_half_cells"] = float(requested_half)
+    base["ssh_primary_effective_window_half_cells"] = float(half)
+    x0, x1 = max(0, ci - half), min(ssh.shape[1], ci + half + 1)
+    y0, y1 = max(0, cj - half), min(ssh.shape[0], cj + half + 1)
+    window = np.asarray(ssh[y0:y1, x0:x1], dtype="float64")
+    finite = np.isfinite(window)
+    if window.size == 0 or float(finite.mean()) < float(params.ssh_consensus_min_finite_fraction):
+        base["failure_14_ssh_primary_no_closed_contour_count"] = 1.0
+        return base
+    local_cj = cj - y0
+    local_ci = ci - x0
+    is_max = str(extremum_type) == "ssh_max"
+    boundary_values = np.concatenate([window[0, :], window[-1, :], window[:, 0], window[:, -1]])
+    boundary_values = boundary_values[np.isfinite(boundary_values)]
+    bg_value = float(np.nanmedian(boundary_values)) if boundary_values.size else float(np.nanmedian(window[finite]))
+    if not np.isfinite(bg_value) or abs(seed_value - bg_value) < 1.0e-12:
+        base["failure_14_ssh_primary_no_closed_contour_count"] = 1.0
+        return base
+    if is_max and bg_value > seed_value:
+        bg_value = float(np.nanpercentile(window[finite], 30))
+    if (not is_max) and bg_value < seed_value:
+        bg_value = float(np.nanpercentile(window[finite], 70))
+    fractions = np.linspace(0.15, 0.90, max(3, int(params.ssh_primary_level_count)))
+    best: dict[str, float | bool | str] | None = None
+    saw_boundary = False
+    saw_radius_bad = False
+    saw_weak_amplitude = False
+    saw_multi_extrema = False
+    saw_shape_error = False
+    valid_contour_count = 0
+    rejected_multi_extrema_count = 0
+    rejected_shape_error_count = 0
+    for frac in fractions:
+        level = seed_value + float(frac) * (bg_value - seed_value)
+        # OFES Origin-compatible zos_glor is stored in centimetres.
+        amplitude_cm = abs(float(seed_value) - float(level))
+        if amplitude_cm < min_amplitude_cm:
+            saw_weak_amplitude = True
+            continue
+        mask = finite & ((window >= level) if is_max else (window <= level))
+        labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+        component = int(labels[local_cj, local_ci])
+        if component <= 0:
+            continue
+        comp = labels == component
+        touches_boundary = bool(comp[0, :].any() or comp[-1, :].any() or comp[:, 0].any() or comp[:, -1].any())
+        if touches_boundary:
+            saw_boundary = True
+            continue
+        area = float(comp.sum())
+        eq_radius = float(math.sqrt(max(area, 0.0) / math.pi))
+        radius_ok = float(params.start_radius_cells) <= eq_radius <= max_radius
+        if not radius_ok:
+            saw_radius_bad = True
+            continue
+        same_extrema_count = _count_same_sign_extrema_in_component(window, comp, is_max)
+        if same_extrema_count > 1:
+            saw_multi_extrema = True
+            rejected_multi_extrema_count += 1
+            continue
+        yy, xx = np.where(comp)
+        shape_error, compactness, boundary_points = _component_shape_metrics(comp)
+        contour_lon = np.nan
+        contour_lat = np.nan
+        if lon is not None and lat is not None:
+            contour_lon = float(lon[min(int(round(x0 + np.nanmean(xx))), len(lon) - 1)])
+            contour_lat = float(lat[min(int(round(y0 + np.nanmean(yy))), len(lat) - 1)])
+        in_acc = bool(
+            np.isfinite(contour_lon)
+            and np.isfinite(contour_lat)
+            and 0.0 <= contour_lon <= 360.0
+            and -62.0 <= contour_lat <= -40.0
+        )
+        max_shape_error = (
+            float(params.ssh_primary_acc_max_shape_error_percent)
+            if in_acc
+            else float(params.ssh_primary_max_shape_error_percent)
+        )
+        if np.isfinite(shape_error) and float(shape_error) > max_shape_error:
+            saw_shape_error = True
+            rejected_shape_error_count += 1
+            continue
+        valid_contour_count += 1
+        center_i = float(x0 + np.nanmean(xx))
+        center_j = float(y0 + np.nanmean(yy))
+        bi, bj = _component_boundary_points(comp, x0, y0)
+        row = {
+            **base,
+            "circle_passed": True,
+            "hua_pass": True,
+            "radius_cells": eq_radius,
+            "accepted_radius_cells": eq_radius,
+            "boundary_source": "ssh_effective_contour_primary",
+            "catalog_acceptance_reason": "ssh_effective_contour_primary",
+            "ssh_contour_closed": True,
+            "ssh_consensus_pass": True,
+            "ssh_contour_radius_cells": eq_radius,
+            "ssh_contour_area_cells": area,
+            "ssh_contour_center_i": center_i,
+            "ssh_contour_center_j": center_j,
+            "ssh_contour_center_lon": float(contour_lon) if np.isfinite(contour_lon) else np.nan,
+            "ssh_contour_center_lat": float(contour_lat) if np.isfinite(contour_lat) else np.nan,
+            "ssh_contour_level": float(level),
+            "ssh_contour_amplitude_cm": float(amplitude_cm),
+            "ssh_contour_same_extrema_count": float(same_extrema_count),
+            "ssh_contour_shape_error_percent": float(shape_error),
+            "ssh_contour_compactness": float(compactness),
+            "ssh_contour_boundary_point_count": float(boundary_points),
+            "ssh_primary_valid_contour_count": float(valid_contour_count),
+            "ssh_primary_rejected_multi_extrema_count": float(rejected_multi_extrema_count),
+            "ssh_contour_boundary_i": bi,
+            "ssh_contour_boundary_j": bj,
+            "dominant_failure_code": -1.0,
+            "dominant_failure": "none",
+            "first_hard_failure_code": -1.0,
+            "first_hard_failure": "none",
+        }
+        if best is None or float(row["ssh_contour_area_cells"]) > float(best["ssh_contour_area_cells"]):
+            best = row
+    if best is not None:
+        best["ssh_primary_valid_contour_count"] = float(valid_contour_count)
+        best["ssh_primary_rejected_multi_extrema_count"] = float(rejected_multi_extrema_count)
+        best["ssh_primary_rejected_shape_error_count"] = float(rejected_shape_error_count)
+        return best
+    if saw_boundary:
+        code = 15
+    elif saw_radius_bad:
+        code = 16
+    elif saw_weak_amplitude:
+        code = 17
+    elif saw_multi_extrema:
+        code = 18
+    elif saw_shape_error:
+        code = 19
+    else:
+        code = 14
+    base["dominant_failure_code"] = float(code)
+    base["first_hard_failure_code"] = float(code)
+    base["dominant_failure"] = FAILURE_LABELS[code]
+    base["first_hard_failure"] = FAILURE_LABELS[code]
+    base["catalog_acceptance_reason"] = FAILURE_LABELS[code]
+    base[f"failure_{code}_{FAILURE_LABELS[code]}_count"] = 1.0
+    return base
+
+
+def _regional_amplitude_policy(
+    profile: dict[str, object] | None,
+    lon: np.ndarray | None,
+    lat: np.ndarray | None,
+    ci: int,
+    cj: int,
+) -> dict[str, object] | None:
+    """Return a calibrated regional threshold for a surface seed, if covered."""
+    if not profile or lon is None or lat is None:
+        return None
+    try:
+        seed_lon = float(lon[ci])
+        seed_lat = float(lat[cj])
+    except (IndexError, TypeError, ValueError):
+        return None
+    for region in profile.get("regions", []):
+        if not isinstance(region, dict):
+            continue
+        lon_min, lon_max = float(region["lon_min"]), float(region["lon_max"])
+        lat_min, lat_max = float(region["lat_min"]), float(region["lat_max"])
+        if not (lon_min <= seed_lon <= lon_max and lat_min <= seed_lat <= lat_max):
+            continue
+        for band in region.get("bands", []):
+            if not isinstance(band, dict):
+                continue
+            if float(band["lat_min"]) <= abs(seed_lat) <= float(band["lat_max"]):
+                return {
+                    "threshold_cm": float(band["threshold_cm"]),
+                    "region": str(region["name"]),
+                    "lat_band": str(band["name"]),
+                    "iteration": int(band.get("iteration", 0)),
+                    "source": str(band.get("source", "regional_amplitude_density_feedback")),
+                    "adjustment_reason": str(band.get("adjustment_reason", "profile")),
+                    "local_amplitude_percentile": float(band.get("local_amplitude_percentile", np.nan)),
+                    "fragmentation_rate": float(band.get("fragmentation_rate", np.nan)),
+                    "contour_quality_score": float(band.get("contour_quality_score", np.nan)),
+                }
+    return None
+
+
+def _load_regional_amplitude_profile(path: Path | None) -> dict[str, object] | None:
+    if path is None:
+        return None
+    profile_path = Path(path)
+    if not profile_path.exists():
+        raise FileNotFoundError(f"Regional amplitude profile not found: {profile_path}")
+    with profile_path.open("r", encoding="utf-8") as handle:
+        profile = json.load(handle)
+    if not isinstance(profile, dict) or not isinstance(profile.get("regions"), list):
+        raise ValueError("Regional amplitude profile must be a JSON object with a regions list")
+    return profile
+
+
+def _parse_target_open_ocean_boxes(value: str) -> tuple[tuple[float, float, float, float, str], ...]:
+    boxes = []
+    for item in str(value or "").split(";"):
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 5:
+            raise ValueError(
+                "--target-open-ocean-boxes expects lon_min,lon_max,lat_min,lat_max,name;..."
+            )
+        boxes.append((float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), parts[4]))
+    return tuple(boxes)
+
+
+def _ssh_primary_with_streamline_diagnostics(
+    ssh: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    speed: np.ndarray,
+    seed_i: int,
+    seed_j: int,
+    params: DetectionParams,
+    extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+) -> dict[str, float | bool | str]:
+    primary = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
+    if (
+        params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate"
+        and lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j)
+        and not bool(primary.get("hua_pass", False))
+    ):
+        # Failed SSH candidates do not need an expensive streamline trace.
+        # Keep the diagnostic schema complete so downstream QC remains uniform.
+        return {
+            **primary,
+            "streamline_closed": False,
+            "streamline_radius_cells": np.nan,
+            "streamline_points": 0.0,
+            "streamline_closure_error_cells": np.nan,
+            "streamline_winding_turns": np.nan,
+            "streamline_direction_exception_fraction": np.nan,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
+            "streamline_boundary_quality": "not_evaluated_ssh_rejected",
+            "dynamical_core_class": "not_evaluated_ssh_rejected",
+            "jet_core_overlap_fraction": np.nan,
+            "jet_core_speed_percentile": float(params.jet_core_speed_percentile),
+            "jet_meander_flag": False,
+        }
+    if (
+        params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate"
+        and lon is not None
+        and lat is not None
+        and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j)
+        and params.skip_open_ocean_streamline_diagnostic
+    ):
+        center_i = float(primary.get("ssh_contour_center_i", seed_i))
+        center_j = float(primary.get("ssh_contour_center_j", seed_j))
+        radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
+        if not np.isfinite(radius) or radius <= 0.0:
+            radius = float(params.start_radius_cells)
+        return {
+            **primary,
+            "streamline_closed": False,
+            "streamline_radius_cells": np.nan,
+            "streamline_points": 0.0,
+            "streamline_closure_error_cells": np.nan,
+            "streamline_winding_turns": np.nan,
+            "streamline_direction_exception_fraction": np.nan,
+            "streamline_boundary_i": "",
+            "streamline_boundary_j": "",
+            "streamline_boundary_quality": "not_evaluated_open_ocean",
+            "dynamical_core_class": "weak_or_no_streamline_core",
+            **_jet_core_overlap_check(speed, center_i, center_j, int(max(params.start_radius_cells, round(radius))), params),
+        }
+    center_i = float(primary.get("ssh_contour_center_i", np.nan))
+    center_j = float(primary.get("ssh_contour_center_j", np.nan))
+    radius = float(primary.get("ssh_contour_radius_cells", params.start_radius_cells))
+    if not np.isfinite(center_i) or not np.isfinite(center_j):
+        center_i = float(seed_i)
+        center_j = float(seed_j)
+    if not np.isfinite(radius) or radius <= 0:
+        radius = float(params.start_radius_cells)
+    stream = _streamline_contour_check(u, v, center_i, center_j, int(max(params.start_radius_cells, round(radius))), params)
+    jet = _jet_core_overlap_check(speed, center_i, center_j, int(max(params.start_radius_cells, round(radius))), params)
+    out = {
+        **primary,
+        "streamline_closed": bool(stream.get("streamline_closed", False)),
+        "streamline_radius_cells": float(stream.get("radius_cells", np.nan)),
+        "streamline_points": float(stream.get("streamline_points", 0.0)),
+        "streamline_closure_error_cells": float(stream.get("streamline_closure_error_cells", np.nan)),
+        "streamline_winding_turns": float(stream.get("streamline_winding_turns", 0.0)),
+        "streamline_direction_exception_fraction": float(stream.get("streamline_direction_exception_fraction", np.nan)),
+        "streamline_boundary_quality": "closed_streamline_core" if bool(stream.get("circle_passed", False)) else str(stream.get("first_hard_failure", "no_streamline_core")),
+        "dynamical_core_class": "closed_streamline_core" if bool(stream.get("circle_passed", False)) else "no_streamline_core",
+        **jet,
+    }
+    if bool(out.get("jet_meander_flag", False)) and bool(out.get("hua_pass", False)):
+        out["dynamical_core_class"] = f"{out['dynamical_core_class']}_jet_flagged"
+    return out
+
+
+def _ssh_primary_with_streamline_effective_boundary(
+    ssh: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    speed: np.ndarray,
+    seed_i: int,
+    seed_j: int,
+    params: DetectionParams,
+    extremum_type: str,
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+) -> dict[str, float | bool | str]:
+    discovery = _ssh_primary_contour_check(ssh, seed_i, seed_j, params, extremum_type, lon, lat)
+    out: dict[str, float | bool | str] = {
+        **_empty_consensus_fields(),
+        **discovery,
+        "ssh_primary_discovery_pass": bool(discovery.get("hua_pass", False)),
+        "ssh_primary_discovery_reason": str(discovery.get("catalog_acceptance_reason", "ssh_primary_rejected")),
+        "boundary_mode": params.boundary_mode,
+        "surface_definition": params.boundary_mode,
+        "circle_passed": False,
+        "hua_pass": False,
+        "radius_cells": np.nan,
+        "accepted_radius_cells": 0.0,
+        "boundary_source": "velocity_streamline_effective_rejected",
+        "catalog_acceptance_reason": "no_closed_streamline_effective",
+        "dynamical_core_class": "no_streamline_core",
+        "streamline_boundary_quality": "not_evaluated",
+        "streamline_closed": False,
+        "streamline_radius_cells": np.nan,
+        "streamline_points": 0.0,
+        "streamline_boundary_i": "",
+        "streamline_boundary_j": "",
+        "streamline_closure_error_cells": np.nan,
+        "streamline_winding_turns": 0.0,
+        "streamline_direction_exception_fraction": np.nan,
+        "streamline_effective_valid_contour_count": 0.0,
+    }
+    center_i = float(seed_i)
+    center_j = float(seed_j)
+    best_stream: dict[str, float | bool | str] | None = None
+    first_fail: dict[str, float | bool | str] | None = None
+    valid_streamline_count = 0
+    for radius in range(params.start_radius_cells, params.max_radius_cells + 1):
+        stream = _streamline_contour_check(u, v, center_i, center_j, radius, params)
+        if first_fail is None and not bool(stream.get("circle_passed", False)):
+            first_fail = stream
+        if bool(stream.get("circle_passed", False)):
+            valid_streamline_count += 1
+            best_stream = stream
+            break
+
+    streamline_radius = float(best_stream.get("radius_cells", params.start_radius_cells)) if best_stream else float(params.start_radius_cells)
+    jet_radius = int(max(params.start_radius_cells, round(streamline_radius)))
+    jet = _jet_core_overlap_check(speed, center_i, center_j, jet_radius, params)
+    if best_stream is None:
+        source = first_fail or {}
+        out.update(
+            {
+                "circle_passed": False,
+                "hua_pass": False,
+                "accepted_radius_cells": 0.0,
+                "boundary_source": "velocity_streamline_effective_rejected",
+                "catalog_acceptance_reason": "no_closed_streamline_effective",
+                "dynamical_core_class": "no_streamline_core",
+                "streamline_boundary_quality": str(source.get("first_hard_failure", "no_closed_streamline")),
+                "streamline_closed": bool(source.get("streamline_closed", False)),
+                "streamline_radius_cells": float(source.get("radius_cells", np.nan)),
+                "streamline_points": float(source.get("streamline_points", 0.0)),
+                "streamline_boundary_i": str(source.get("streamline_boundary_i", "")),
+                "streamline_boundary_j": str(source.get("streamline_boundary_j", "")),
+                "streamline_closure_error_cells": float(source.get("streamline_closure_error_cells", np.nan)),
+                "streamline_winding_turns": float(source.get("streamline_winding_turns", 0.0)),
+                "streamline_direction_exception_fraction": float(source.get("streamline_direction_exception_fraction", np.nan)),
+                "streamline_effective_valid_contour_count": float(valid_streamline_count),
+                "dominant_failure_code": float(source.get("dominant_failure_code", 10.0)),
+                "dominant_failure": str(source.get("dominant_failure", "no_closed_streamline")),
+                "first_hard_failure_code": float(source.get("first_hard_failure_code", 10.0)),
+                "first_hard_failure": str(source.get("first_hard_failure", "no_closed_streamline")),
+                **jet,
+            }
+        )
+        if params.boundary_mode == "ssh_primary_velocity_streamline_effective_open_ocean_fallback" and bool(discovery.get("hua_pass", False)) and _is_open_ocean_detection_location(lon, lat, seed_i, seed_j):
+            out.update(
+                {
+                    "circle_passed": True,
+                    "hua_pass": True,
+                    "radius_cells": float(discovery.get("ssh_contour_radius_cells", np.nan)),
+                    "accepted_radius_cells": float(discovery.get("ssh_contour_radius_cells", np.nan)),
+                    "boundary_source": "ssh_effective_contour_open_ocean_fallback",
+                    "catalog_acceptance_reason": "ssh_effective_contour_open_ocean_fallback",
+                    "dynamical_core_class": "weak_or_no_streamline_core",
+                    "streamline_boundary_quality": "no_closed_streamline_ssh_fallback",
+                    "dominant_failure_code": -1.0,
+                    "dominant_failure": "none",
+                    "first_hard_failure_code": -1.0,
+                    "first_hard_failure": "none",
+                }
+            )
+        return out
+
+    out.update(
+            {
+                "circle_passed": True,
+                "hua_pass": True,
+                "radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "accepted_radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "boundary_source": "velocity_streamline_effective_contour",
+            "catalog_acceptance_reason": "ssh_primary_velocity_streamline_effective",
+            "dynamical_core_class": "closed_streamline_core",
+            "streamline_boundary_quality": "closed_streamline_effective",
+            "streamline_closed": True,
+            "streamline_radius_cells": float(best_stream.get("radius_cells", np.nan)),
+            "streamline_points": float(best_stream.get("streamline_points", 0.0)),
+            "streamline_boundary_i": str(best_stream.get("streamline_boundary_i", "")),
+            "streamline_boundary_j": str(best_stream.get("streamline_boundary_j", "")),
+            "streamline_closure_error_cells": float(best_stream.get("streamline_closure_error_cells", np.nan)),
+            "streamline_winding_turns": float(best_stream.get("streamline_winding_turns", 0.0)),
+            "streamline_direction_exception_fraction": float(best_stream.get("streamline_direction_exception_fraction", np.nan)),
+            "streamline_effective_valid_contour_count": float(valid_streamline_count),
+            "dominant_failure_code": -1.0,
+            "dominant_failure": "none",
+            "first_hard_failure_code": -1.0,
+            "first_hard_failure": "none",
+            **jet,
+        }
+    )
+    if bool(out.get("jet_meander_flag", False)):
+        out["dynamical_core_class"] = "closed_streamline_core_jet_flagged"
+    return out
+
+
+def _is_open_ocean_detection_location(
+    lon: np.ndarray | None,
+    lat: np.ndarray | None,
+    seed_i: int,
+    seed_j: int,
+) -> bool:
+    if lon is None or lat is None:
+        return False
+    x = float(lon[int(seed_i)])
+    y = float(lat[int(seed_j)])
+    if not (np.isfinite(x) and np.isfinite(y)) or -62.0 <= y <= -40.0:
+        return False
+    boundary_boxes = (
+        (120.0, 160.0, 20.0, 45.0),
+        (260.0, 320.0, 20.0, 50.0),
+        (225.0, 260.0, 15.0, 40.0),
+        (330.0, 360.0, 15.0, 40.0),
+        (0.0, 50.0, -50.0, -15.0),
+        (140.0, 185.0, -50.0, -15.0),
+        (285.0, 335.0, -50.0, -15.0),
+    )
+    return not any(x0 <= x <= x1 and y0 <= y <= y1 for x0, x1, y0, y1 in boundary_boxes)
+
+
+def _jet_core_overlap_check(
+    speed: np.ndarray,
+    center_i: float,
+    center_j: float,
+    radius_cells: int,
+    params: DetectionParams,
+) -> dict[str, float | bool]:
+    ci = int(np.clip(round(float(center_i)), 0, speed.shape[1] - 1))
+    cj = int(np.clip(round(float(center_j)), 0, speed.shape[0] - 1))
+    half = max(int(params.max_radius_cells) * 4, int(radius_cells) * 4, 8)
+    x0, x1 = max(0, ci - half), min(speed.shape[1], ci + half + 1)
+    y0, y1 = max(0, cj - half), min(speed.shape[0], cj + half + 1)
+    window = np.asarray(speed[y0:y1, x0:x1], dtype="float64")
+    finite = np.isfinite(window)
+    if window.size == 0 or not np.any(finite):
+        return {
+            "jet_core_overlap_fraction": np.nan,
+            "jet_core_speed_percentile": np.nan,
+            "jet_meander_flag": False,
+        }
+    threshold = float(np.nanpercentile(window[finite], float(params.jet_core_speed_percentile)))
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    disk = (xx - float(center_i)) ** 2 + (yy - float(center_j)) ** 2 <= float(radius_cells) ** 2
+    valid_disk = disk & finite
+    if not np.any(valid_disk):
+        overlap = np.nan
+        flag = False
+    else:
+        overlap = float((valid_disk & (window >= threshold)).sum() / valid_disk.sum())
+        flag = bool(overlap > float(params.jet_core_overlap_max))
+    return {
+        "jet_core_overlap_fraction": overlap,
+        "jet_core_speed_percentile": threshold,
+        "jet_meander_flag": flag,
+    }
+
+
+def _with_consensus_decision(
+    row: dict[str, float | bool | str],
+    *,
+    ssh_row: dict[str, float | bool | str] | None,
+    jet_row: dict[str, float | bool] | None,
+    boundary_source_if_pass: str,
+    fallback_failure: str,
+    require_ssh: bool,
+) -> dict[str, float | bool | str]:
+    out = {**_empty_consensus_fields(), **row}
+    if ssh_row is not None:
+        out.update(ssh_row)
+    elif not require_ssh:
+        out.update({"ssh_contour_closed": False, "ssh_consensus_pass": True, "ssh_contour_radius_cells": np.nan, "ssh_contour_area_cells": np.nan})
+    if jet_row is not None:
+        out.update(jet_row)
+    elif "jet_meander_flag" not in out:
+        out["jet_meander_flag"] = False
+
+    base_pass = bool(row.get("circle_passed", False))
+    ssh_pass = bool(out.get("ssh_consensus_pass", False))
+    jet_flag = bool(out.get("jet_meander_flag", False))
+    accepted = bool(base_pass and ssh_pass and not jet_flag)
+    out["circle_passed"] = accepted
+    out["boundary_mode"] = "velocity_streamline_ssh_consensus"
+    if accepted:
+        out["boundary_source"] = boundary_source_if_pass
+        out["catalog_acceptance_reason"] = boundary_source_if_pass
+        out["dominant_failure_code"] = -1.0
+        out["dominant_failure"] = "none"
+        out["first_hard_failure_code"] = -1.0
+        out["first_hard_failure"] = "none"
+    elif jet_flag:
+        out["boundary_source"] = "jet_meander_rejected"
+        out["catalog_acceptance_reason"] = "jet_core_overlap"
+        out["dominant_failure_code"] = 12.0
+        out["dominant_failure"] = FAILURE_LABELS[12]
+        out["first_hard_failure_code"] = 12.0
+        out["first_hard_failure"] = FAILURE_LABELS[12]
+    elif require_ssh and not ssh_pass:
+        out["boundary_source"] = "ssh_consensus_rejected"
+        out["catalog_acceptance_reason"] = "ssh_consensus_missing"
+        out["dominant_failure_code"] = 11.0
+        out["dominant_failure"] = FAILURE_LABELS[11]
+        out["first_hard_failure_code"] = 11.0
+        out["first_hard_failure"] = FAILURE_LABELS[11]
+    else:
+        out["boundary_source"] = "rejected"
+        out["catalog_acceptance_reason"] = fallback_failure
+    return out
+
+
+def _hua_verify_radius_ssh_consensus(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+    *,
+    ssh: np.ndarray | None,
+    speed: np.ndarray | None,
+    extremum_type: str,
+) -> dict[str, float | bool | str]:
+    best: dict[str, float | bool | str] | None = None
+    first_fail: dict[str, float | bool | str] | None = None
+    require_ssh = ssh is not None
+    speed_for_jet = speed if speed is not None else np.hypot(u, v)
+    for radius in range(params.start_radius_cells, params.max_radius_cells + 1):
+        stream = _streamline_contour_check(u, v, center_i, center_j, radius, params)
+        ssh_row = _ssh_effective_contour_check(ssh, center_i, center_j, radius, params, extremum_type) if require_ssh else None
+        jet_row = _jet_core_overlap_check(speed_for_jet, center_i, center_j, radius, params)
+        if bool(stream.get("circle_passed", False)):
+            row = _with_consensus_decision(
+                stream,
+                ssh_row=ssh_row,
+                jet_row=jet_row,
+                boundary_source_if_pass="pure_streamline_ssh",
+                fallback_failure=str(stream.get("first_hard_failure", "streamline_rejected")),
+                require_ssh=require_ssh,
+            )
+        elif str(stream.get("first_hard_failure", "")) == "no_closed_streamline":
+            circle = _circle_check(u, v, center_i, center_j, radius, params)
+            circle = {
+                **circle,
+                "streamline_closed": False,
+                "streamline_points": 0.0,
+                "streamline_closure_error_cells": np.nan,
+                "streamline_winding_turns": 0.0,
+                "streamline_direction_exception_fraction": 1.0,
+                "failure_10_no_closed_streamline_count": 1.0,
+            }
+            row = _with_consensus_decision(
+                circle,
+                ssh_row=ssh_row,
+                jet_row=jet_row,
+                boundary_source_if_pass="fallback_circle_ssh",
+                fallback_failure="no_closed_streamline_no_ssh_fallback",
+                require_ssh=require_ssh,
+            )
+            if not bool(row.get("circle_passed", False)) and str(row.get("first_hard_failure", "")) not in {"ssh_consensus_missing", "jet_core_overlap"}:
+                row["first_hard_failure_code"] = 13.0
+                row["first_hard_failure"] = FAILURE_LABELS[13]
+                row["dominant_failure_code"] = 13.0
+                row["dominant_failure"] = FAILURE_LABELS[13]
+                row["catalog_acceptance_reason"] = FAILURE_LABELS[13]
+        else:
+            row = {**_empty_consensus_fields(), **stream, "boundary_mode": "velocity_streamline_ssh_consensus"}
+            row.update(ssh_row or {})
+            row.update(jet_row or {})
+            row["boundary_source"] = "streamline_rejected"
+            row["catalog_acceptance_reason"] = str(stream.get("first_hard_failure", "streamline_rejected"))
+
+        if bool(row["circle_passed"]):
+            best = row
+        else:
+            first_fail = row
+            break
+    source_row = best if best is not None else first_fail
+    if source_row is None:
+        source_row = {"circle_passed": False, "radius_cells": np.nan, "dominant_failure": "no_circle", **_empty_consensus_fields()}
+    source_row = dict(source_row)
+    source_row["hua_pass"] = bool(best is not None)
+    source_row["accepted_radius_cells"] = float(source_row["radius_cells"]) if best is not None else 0.0
+    return source_row
+
+
+def _hua_verify_radius(
+    u: np.ndarray,
+    v: np.ndarray,
+    center_i: float,
+    center_j: float,
+    params: DetectionParams,
+    *,
+    ssh: np.ndarray | None = None,
+    speed: np.ndarray | None = None,
+    extremum_type: str = "",
+    lon: np.ndarray | None = None,
+    lat: np.ndarray | None = None,
+) -> dict[str, float | bool | str]:
+    if params.deep_hua_mode == "tangent_then_near_closed_streamline":
+        # Preserve the established circle/tangent decision first.  The
+        # non-circular streamline search is a recovery branch only, so it
+        # cannot replace layers already accepted by the historical rule.
+        primary = _hua_verify_radius(
+            u,
+            v,
+            center_i,
+            center_j,
+            replace(params, deep_hua_mode="full"),
+            ssh=ssh,
+            speed=speed,
+            extremum_type=extremum_type,
+            lon=lon,
+            lat=lat,
+        )
+        primary = dict(primary)
+        if bool(primary.get("hua_pass", False)):
+            return {
+                **primary,
+                "deep_boundary_branch": "tangent_primary",
+                "fallback_attempted": False,
+                "primary_first_hard_failure": "none",
+                "fallback_first_hard_failure": "not_attempted",
+            }
+
+        recovered = _near_closed_streamline_check(u, v, center_i, center_j, params)
+        recovered = dict(recovered)
+        primary_failure = str(primary.get("first_hard_failure", "hua_failed"))
+        if bool(recovered.get("hua_pass", False)):
+            return {
+                **recovered,
+                "deep_boundary_branch": "near_closed_streamline_fallback",
+                "fallback_attempted": True,
+                "fallback_trigger": primary_failure,
+                "primary_first_hard_failure": primary_failure,
+                "fallback_first_hard_failure": "none",
+                "primary_tangent_pass_fraction": primary.get("tangent_pass_fraction", np.nan),
+                "primary_accepted_radius_cells": primary.get("accepted_radius_cells", 0.0),
+                "boundary_mode": "tangent_then_near_closed_streamline",
+                "boundary_source": "near_closed_streamline_fallback",
+            }
+        return {
+            **recovered,
+            "deep_boundary_branch": "rejected_after_near_closed_fallback",
+            "fallback_attempted": True,
+            "fallback_trigger": primary_failure,
+            "primary_first_hard_failure": primary_failure,
+            "fallback_first_hard_failure": str(recovered.get("first_hard_failure", "no_closed_streamline")),
+            "primary_tangent_pass_fraction": primary.get("tangent_pass_fraction", np.nan),
+            "primary_accepted_radius_cells": primary.get("accepted_radius_cells", 0.0),
+            "boundary_mode": "tangent_then_near_closed_streamline",
+            "boundary_source": "near_closed_streamline_fallback_rejected",
+        }
+    if params.deep_hua_mode == "near_closed_streamline":
+        return _near_closed_streamline_check(u, v, center_i, center_j, params)
+    if params.boundary_mode == "ssh_effective_contour_primary" and ssh is not None:
+        if speed is None:
+            speed = np.hypot(u, v)
+        return _ssh_primary_with_streamline_diagnostics(
+            ssh,
+            u,
+            v,
+            speed,
+            int(round(float(center_i))),
+            int(round(float(center_j))),
+            params,
+            extremum_type,
+            lon,
+            lat,
+        )
+    if params.boundary_mode == "ssh_primary_open_ocean_no_streamline_gate" and ssh is not None:
+        if speed is None:
+            speed = np.hypot(u, v)
+        ci = int(round(float(center_i)))
+        cj = int(round(float(center_j)))
+        if _is_open_ocean_detection_location(lon, lat, ci, cj):
+            return _ssh_primary_with_streamline_diagnostics(
+                ssh, u, v, speed, ci, cj, params, extremum_type, lon, lat
+            )
+        return _ssh_primary_with_streamline_effective_boundary(
+            ssh, u, v, speed, ci, cj, params, extremum_type, lon, lat
+        )
+    if params.boundary_mode in {"ssh_primary_velocity_streamline_effective", "ssh_primary_velocity_streamline_effective_open_ocean_fallback"} and ssh is not None:
+        if speed is None:
+            speed = np.hypot(u, v)
+        return _ssh_primary_with_streamline_effective_boundary(
+            ssh,
+            u,
+            v,
+            speed,
+            int(round(float(center_i))),
+            int(round(float(center_j))),
+            params,
+            extremum_type,
+            lon,
+            lat,
+        )
+    if params.boundary_mode == "velocity_streamline_ssh_consensus":
+        return _hua_verify_radius_ssh_consensus(
+            u,
+            v,
+            center_i,
+            center_j,
+            params,
+            ssh=ssh,
+            speed=speed,
+            extremum_type=extremum_type,
+        )
+    best: dict[str, float | bool | str] | None = None
+    first_fail: dict[str, float | bool | str] | None = None
+    for radius in range(params.start_radius_cells, params.max_radius_cells + 1):
+        if params.boundary_mode == "velocity_streamline_contour":
+            row = _streamline_contour_check(u, v, center_i, center_j, radius, params)
+        else:
+            row = _circle_check(u, v, center_i, center_j, radius, params)
+            row = {
+                **row,
+                "boundary_mode": "circle_strict_original",
+                "streamline_closed": False,
+                "streamline_points": np.nan,
+                "streamline_closure_error_cells": np.nan,
+                "streamline_winding_turns": np.nan,
+                "streamline_direction_exception_fraction": np.nan,
+                "failure_10_no_closed_streamline_count": 0.0,
+            }
+        if bool(row["circle_passed"]):
+            best = row
+        else:
+            first_fail = row
+            break
+    source_row = best if best is not None else first_fail
+    if source_row is None:
+        source_row = {"circle_passed": False, "radius_cells": np.nan, "dominant_failure": "no_circle"}
+    source_row = dict(source_row)
+    source_row["hua_pass"] = bool(best is not None)
+    source_row["accepted_radius_cells"] = float(source_row["radius_cells"]) if best is not None else 0.0
+    return source_row
+
+
+def _object_voxels_for_layer(
+    u: np.ndarray,
+    v: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    depth_m: float,
+    *,
+    day: date,
+    object_id: str,
+    depth_index: int,
+    center_i: int,
+    center_j: int,
+    radius_cells: float,
+    polarity: str,
+) -> list[dict[str, object]]:
+    """Return the finite component connected to the Hua center inside its accepted circle."""
+    if not np.isfinite(radius_cells) or radius_cells <= 0:
+        return []
+    radius = int(math.ceil(float(radius_cells)))
+    x0, x1 = max(0, center_i - radius), min(u.shape[1], center_i + radius + 1)
+    y0, y1 = max(0, center_j - radius), min(u.shape[0], center_j + radius + 1)
+    if x0 >= x1 or y0 >= y1:
+        return []
+
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    circle = (xx - center_i) ** 2 + (yy - center_j) ** 2 <= float(radius_cells) ** 2
+    finite = np.isfinite(u[y0:y1, x0:x1]) & np.isfinite(v[y0:y1, x0:x1])
+    mask = circle & finite
+    cj = center_j - y0
+    ci = center_i - x0
+    if cj < 0 or cj >= mask.shape[0] or ci < 0 or ci >= mask.shape[1] or not mask[cj, ci]:
+        return []
+    labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    component_label = int(labels[cj, ci])
+    if component_label <= 0:
+        return []
+    comp_y, comp_x = np.where(labels == component_label)
+    rows: list[dict[str, object]] = []
+    ny, nx = u.shape
+    for ly, lx in zip(comp_y.tolist(), comp_x.tolist()):
+        jj = int(y0 + ly)
+        ii = int(x0 + lx)
+        rows.append(
+            {
+                "date": day.isoformat(),
+                "hua_object_id": object_id,
+                "depth_index": int(depth_index),
+                "i": ii,
+                "j": jj,
+                "lon": float(lon[ii]),
+                "lat": float(lat[jj]),
+                "depth_m": float(depth_m),
+                "polarity": polarity,
+                "accepted_radius_cells": float(radius_cells),
+                "node_key_3d": int(depth_index * ny * nx + jj * nx + ii),
+                "node_key_2d": int(jj * nx + ii),
+            }
+        )
+    return rows
+
+
+def _parse_float_list(value: str, default: list[float]) -> list[float]:
+    text = str(value or "").strip()
+    if not text:
+        return list(default)
+    return [float(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def _pass_rate_breakdown(centers: pd.DataFrame, params: DetectionParams) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    required_reasons = [
+        "invalid_velocity",
+        "velocity_ratio",
+        "angle_jump",
+        "boundary_monotonic_rotation",
+        "tangent_alignment",
+        "opposite_reversal",
+        "no_closed_streamline",
+        "ssh_consensus_missing",
+        "jet_core_overlap",
+        "no_closed_streamline_no_ssh_fallback",
+        "ssh_primary_no_closed_contour",
+        "ssh_primary_touches_boundary",
+        "ssh_primary_radius_out_of_range",
+        "symmetry",
+    ]
+    reason_aliases = {
+        "boundary_monotonic_rotation": "modified_boundary_failure"
+        if params.boundary_mode == "velocity_streamline_contour"
+        else "boundary_monotonic_rotation",
+        "tangent_alignment": "modified_tangent_failure"
+        if params.boundary_mode == "velocity_streamline_contour"
+        else "tangent_alignment",
+    }
+    scopes = {
+        "all_layers": centers,
+        "surface": centers[centers["depth_index"].eq(0)] if "depth_index" in centers.columns else centers.iloc[0:0],
+    }
+    for scope, part in scopes.items():
+        total = int(len(part))
+        passed = int(part["hua_pass"].astype(bool).sum()) if total and "hua_pass" in part.columns else 0
+        rows.append(
+            {
+                "scope": scope,
+                "reason": "hua_pass",
+                "count": passed,
+                "total": total,
+                "fraction_of_total": float(passed / total) if total else 0.0,
+                "fraction_of_failed": np.nan,
+                "boundary_mode": params.boundary_mode,
+                "reason_alias": "hua_pass",
+            }
+        )
+        failed = part[~part["hua_pass"].astype(bool)] if total and "hua_pass" in part.columns else part.iloc[0:0]
+        fail_total = int(len(failed))
+        reason_column = "first_hard_failure" if "first_hard_failure" in failed.columns else "dominant_failure"
+        counts = failed[reason_column].fillna("none").value_counts(dropna=False).to_dict() if fail_total else {}
+        for reason in required_reasons:
+            count = int(counts.get(reason, 0))
+            rows.append(
+                {
+                    "scope": scope,
+                    "reason": str(reason),
+                    "reason_alias": reason_aliases.get(str(reason), str(reason)),
+                    "count": count,
+                    "total": total,
+                    "fraction_of_total": float(count / total) if total else 0.0,
+                    "fraction_of_failed": float(count / fail_total) if fail_total else 0.0,
+                    "boundary_mode": params.boundary_mode,
+                }
+            )
+        if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_open_ocean_no_streamline_gate"} and "boundary_source" in part.columns:
+            source_counts = part["boundary_source"].fillna("unknown").value_counts(dropna=False).to_dict()
+            for source, count_value in source_counts.items():
+                rows.append(
+                    {
+                        "scope": scope,
+                        "reason": f"boundary_source:{source}",
+                        "reason_alias": f"boundary_source:{source}",
+                        "count": int(count_value),
+                        "total": total,
+                        "fraction_of_total": float(int(count_value) / total) if total else 0.0,
+                        "fraction_of_failed": np.nan,
+                        "boundary_mode": params.boundary_mode,
+                    }
+                )
+        if params.boundary_mode in {"ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_open_ocean_no_streamline_gate"} and "dynamical_core_class" in part.columns:
+            core_counts = part["dynamical_core_class"].fillna("unknown").value_counts(dropna=False).to_dict()
+            for core_class, count_value in core_counts.items():
+                rows.append(
+                    {
+                        "scope": scope,
+                        "reason": f"dynamical_core_class:{core_class}",
+                        "reason_alias": f"dynamical_core_class:{core_class}",
+                        "count": int(count_value),
+                        "total": total,
+                        "fraction_of_total": float(int(count_value) / total) if total else 0.0,
+                        "fraction_of_failed": np.nan,
+                        "boundary_mode": params.boundary_mode,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _streamline_pass_mask(part: pd.DataFrame, *, tangent_fraction: float, tangent_tolerance_deg: float, direction_exception_fraction: float, params: DetectionParams) -> pd.Series:
+    tolerance_key = int(round(float(tangent_tolerance_deg)))
+    tangent_column = f"tangent_fraction_{tolerance_key}deg"
+    tangent_values = part[tangent_column].astype(float) if tangent_column in part.columns else part["tangent_pass_fraction"].astype(float)
+    finite = part["finite_fraction"].astype(float).ge(float(params.min_finite_fraction))
+    velocity_ratio = part["max_velocity_ratio"].astype(float).le(float(params.speed_ratio_max))
+    angle_jump = part["max_angle_jump_deg"].astype(float).le(float(params.angle_jump_max_deg))
+    reversal = part["opposite_reversal_fraction"].astype(float).ge(float(params.min_reversal_fraction))
+    closed = part["streamline_closed"].fillna(False).astype(bool)
+    boundary = part["streamline_direction_exception_fraction"].astype(float).le(float(direction_exception_fraction))
+    tangent = tangent_values.ge(float(tangent_fraction))
+    return closed & finite & velocity_ratio & angle_jump & reversal & boundary & tangent
+
+
+def _write_detection_diagnostics(output_dir: Path, centers: pd.DataFrame, params: DetectionParams, args: argparse.Namespace) -> None:
+    breakdown = _pass_rate_breakdown(centers, params)
+    breakdown.to_csv(output_dir / "pass_rate_breakdown.csv", index=False)
+    (output_dir / "pass_rate_breakdown.json").write_text(
+        json.dumps(breakdown.to_dict(orient="records"), ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    if params.boundary_mode != "velocity_streamline_contour" or centers.empty:
+        return
+    baseline_pass_fraction = np.nan
+    baseline_pass_rows = np.nan
+    baseline_layer_rows = np.nan
+    baseline_path = getattr(args, "baseline_summary_path", None)
+    if baseline_path:
+        try:
+            baseline_summary = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+            baseline_pass_fraction = float(baseline_summary.get("pass_fraction", np.nan))
+            baseline_pass_rows = float(baseline_summary.get("n_pass_layers", np.nan))
+            baseline_layer_rows = float(baseline_summary.get("n_center_rows", np.nan))
+        except Exception:
+            baseline_pass_fraction = np.nan
+    fractions = _parse_float_list(args.sensitivity_tangent_fractions, [0.50, 0.60, 0.70])
+    tolerances = _parse_float_list(args.sensitivity_tangent_tolerances_deg, [24.0, 30.0, 36.0, 45.0])
+    direction_fractions = _parse_float_list(args.sensitivity_direction_exception_fractions, [0.05, 0.10, 0.15])
+    rows: list[dict[str, object]] = []
+    for min_fraction in fractions:
+        for tolerance in tolerances:
+            for direction_fraction in direction_fractions:
+                passed = _streamline_pass_mask(
+                    centers,
+                    tangent_fraction=float(min_fraction),
+                    tangent_tolerance_deg=float(tolerance),
+                    direction_exception_fraction=float(direction_fraction),
+                    params=params,
+                )
+                total = int(len(centers))
+                rows.append(
+                    {
+                        "boundary_mode": params.boundary_mode,
+                        "baseline_summary_path": str(baseline_path) if baseline_path else "",
+                        "baseline_pass_fraction": baseline_pass_fraction,
+                        "baseline_hua_pass_rows": baseline_pass_rows,
+                        "baseline_layer_attempt_rows": baseline_layer_rows,
+                        "min_tangent_fraction": float(min_fraction),
+                        "tangent_tolerance_deg": float(tolerance),
+                        "streamline_direction_exception_fraction": float(direction_fraction),
+                        "layer_attempt_rows": total,
+                        "hua_pass_rows_proxy": int(passed.sum()),
+                        "pass_fraction_proxy": float(passed.mean()) if total else 0.0,
+                        "pass_fraction_delta_vs_baseline": float(passed.mean() - baseline_pass_fraction)
+                        if total and np.isfinite(baseline_pass_fraction)
+                        else np.nan,
+                        "pass_rows_delta_vs_baseline": float(passed.sum() - baseline_pass_rows)
+                        if np.isfinite(baseline_pass_rows)
+                        else np.nan,
+                        "no_closed_streamline_rows": int((~centers["streamline_closed"].fillna(False).astype(bool)).sum()),
+                        "modified_boundary_failure_rows": int((centers["streamline_closed"].fillna(False).astype(bool) & centers["streamline_direction_exception_fraction"].astype(float).gt(float(direction_fraction))).sum()),
+                        "modified_tangent_failure_rows": int((centers[f"tangent_fraction_{int(round(float(tolerance)))}deg"].astype(float).lt(float(min_fraction))).sum())
+                        if f"tangent_fraction_{int(round(float(tolerance)))}deg" in centers.columns
+                        else int((centers["tangent_pass_fraction"].astype(float).lt(float(min_fraction))).sum()),
+                        "invalid_velocity_rows": int((centers["finite_fraction"].astype(float).lt(float(params.min_finite_fraction))).sum()),
+                        "velocity_ratio_rows": int((centers["max_velocity_ratio"].astype(float).gt(float(params.speed_ratio_max))).sum()),
+                        "angle_jump_rows": int((centers["max_angle_jump_deg"].astype(float).gt(float(params.angle_jump_max_deg))).sum()),
+                        "opposite_reversal_rows": int((centers["opposite_reversal_fraction"].astype(float).lt(float(params.min_reversal_fraction))).sum()),
+                    }
+                )
+    sensitivity = pd.DataFrame(rows)
+    sensitivity.to_csv(output_dir / "sensitivity_matrix.csv", index=False)
+    _write_parquet(sensitivity, output_dir / "sensitivity_matrix.parquet", index=False)
+
+
+def _extremum_polarity(extremum: str, lat_value: float, circulation_sign: float) -> str:
+    if np.isfinite(circulation_sign) and circulation_sign != 0:
+        # Positive tangential circulation is counterclockwise. In the Southern
+        # Hemisphere cyclonic rotation is clockwise, so use f sign.
+        f_sign = 1.0 if lat_value >= 0 else -1.0
+        return "cyclonic" if circulation_sign == f_sign else "anticyclonic"
+    if lat_value < 0:
+        return "cyclonic" if extremum == "ssh_min" else "anticyclonic"
+    return "cyclonic" if extremum == "ssh_min" else "anticyclonic"
+
+
+def _format_year_template(template: str, year: int) -> str:
+    return str(template).format(year=year)
+
+
+def _template_uses_daily_parts(template: str) -> bool:
+    return "{date" in str(template) or "{yyyymmdd" in str(template)
+
+
+def _format_day_template(template: str, day: date) -> str:
+    return str(template).format(year=day.year, date=f"{day:%Y-%m-%d}", yyyymmdd=f"{day:%Y%m%d}")
+
+
+class DailyPartDataset:
+    def __init__(self, root: Path, template: str) -> None:
+        self.root = Path(root)
+        self.template = str(template)
+        self._open_day: date | None = None
+        self._dataset: Dataset | None = None
+
+    def open_day(self, day: date) -> Dataset:
+        if self._open_day == day and self._dataset is not None:
+            return self._dataset
+        self.close()
+        self._open_day = day
+        self._dataset = Dataset(self.root / _format_day_template(self.template, day))
+        return self._dataset
+
+    @property
+    def variables(self):
+        if self._dataset is None:
+            raise RuntimeError("DailyPartDataset has no open day. Call open_day(day) first.")
+        return self._dataset.variables
+
+    def time_lookup(self) -> dict[date, int]:
+        if self._open_day is None:
+            raise RuntimeError("DailyPartDataset has no open day. Call open_day(day) first.")
+        return {self._open_day: 0}
+
+    def close(self) -> None:
+        if self._dataset is not None:
+            self._dataset.close()
+        self._dataset = None
+        self._open_day = None
+
+
+def _configure_var_chunk_cache(ds: Dataset, variable_names: tuple[str, ...], cache_mb: int) -> None:
+    cache_size = int(cache_mb) * 1024 * 1024
+    if cache_size <= 0:
+        return
+    for name in variable_names:
+        if name not in ds.variables:
+            continue
+        var = ds.variables[name]
+        try:
+            chunking = var.chunking()
+            if isinstance(chunking, list) and chunking:
+                chunk_values = 1
+                for item in chunking:
+                    chunk_values *= int(item)
+                dtype_size = np.dtype(var.dtype).itemsize
+                chunk_bytes = max(1, chunk_values * dtype_size)
+                nelems = max(1009, min(1_000_003, cache_size // chunk_bytes * 2 + 1))
+            else:
+                nelems = 1009
+            var.set_var_chunk_cache(size=cache_size, nelems=int(nelems), preemption=0.75)
+        except Exception:
+            continue
+
+
+def _load_year_arrays(args: argparse.Namespace, year: int) -> tuple[Dataset, Dataset | None, np.ndarray, np.ndarray, np.ndarray]:
+    filter_root = Path(args.filter_root)
+    raw_root = Path(args.raw_root)
+    if _template_uses_daily_parts(str(args.filter_template)):
+        first_day = _parse_date(args.start)
+        while first_day.year != year:
+            first_day += timedelta(days=1)
+        filt = DailyPartDataset(filter_root, str(args.filter_template))
+        filt.open_day(first_day)
+        if _template_uses_daily_parts(str(args.raw_template)):
+            raw = DailyPartDataset(raw_root, str(args.raw_template))
+            raw_path = raw_root / _format_day_template(str(args.raw_template), first_day)
+            if raw_path.exists():
+                raw.open_day(first_day)
+            else:
+                raw = None
+        else:
+            raw_path = raw_root / _format_year_template(args.raw_template, year)
+            raw = Dataset(raw_path) if raw_path.exists() else None
+    else:
+        filt = Dataset(filter_root / _format_year_template(args.filter_template, year))
+        raw_path = raw_root / _format_year_template(args.raw_template, year)
+        raw = Dataset(raw_path) if raw_path.exists() else None
+    _configure_var_chunk_cache(filt, ("zos_glor", "uo_glor", "vo_glor"), int(args.netcdf_chunk_cache_mb))
+    if raw is not None:
+        _configure_var_chunk_cache(raw, ("zos_glor", "uo_glor", "vo_glor"), max(1, int(args.netcdf_chunk_cache_mb) // 4))
+    lon = np.asarray(filt.variables["longitude"][:], dtype="float64")
+    lat = np.asarray(filt.variables["latitude"][:], dtype="float64")
+    depth = np.asarray(filt.variables["depth"][:], dtype="float64")
+    return filt, raw, lon, lat, depth
+
+
+def _prepare_surface_seed_parallel(
+    seed_order: int,
+    seed: pd.Series,
+    speed0: np.ndarray,
+    u0: np.ndarray,
+    v0: np.ndarray,
+    zos: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    dx_km: float,
+    dy_km: float,
+    params: DetectionParams,
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    seed_i = int(seed["seed_i"])
+    seed_j = int(seed["seed_j"])
+    center_i, center_j, center_speed, min_steps = _seeded_speed_min(
+        speed0, seed_i, seed_j, params.surface_search_cells
+    )
+    grid_lon_value = float(lon[center_i])
+    grid_lat_value = float(lat[center_j])
+    refined = _refine_speed_min_subgrid(
+        speed0,
+        u0,
+        v0,
+        lon,
+        lat,
+        center_i,
+        center_j,
+        target_degree=float(args.subgrid_target_degree),
+        window_radius_cells=int(args.subgrid_window_radius_cells),
+        min_finite_fraction=float(args.subgrid_min_finite_fraction),
+    )
+    hua_center_i = float(refined["center_i_refined"])
+    hua_center_j = float(refined["center_j_refined"])
+    check_center_i = hua_center_i
+    check_center_j = hua_center_j
+    check = _hua_verify_radius(
+        u0,
+        v0,
+        check_center_i,
+        check_center_j,
+        params,
+        ssh=zos,
+        speed=speed0,
+        extremum_type=str(seed["ssh_extremum_type"]),
+        lon=lon,
+        lat=lat,
+    )
+    if params.boundary_mode == "ssh_effective_contour_primary" and bool(check.get("hua_pass", False)):
+        contour_i = float(check.get("ssh_contour_center_i", np.nan))
+        contour_j = float(check.get("ssh_contour_center_j", np.nan))
+        if np.isfinite(contour_i) and np.isfinite(contour_j):
+            refined = {
+                **refined,
+                "center_i_refined": contour_i,
+                "center_j_refined": contour_j,
+                "center_lon_refined": _interp_1d_from_fraction(lon, contour_i),
+                "center_lat_refined": _interp_1d_from_fraction(lat, contour_j),
+            }
+    return seed_order, {
+        "seed_i": seed_i,
+        "seed_j": seed_j,
+        "center_i": center_i,
+        "center_j": center_j,
+        "center_speed": center_speed,
+        "min_steps": min_steps,
+        "grid_lon_value": grid_lon_value,
+        "grid_lat_value": grid_lat_value,
+        "refined": refined,
+        "hua_center_i": hua_center_i,
+        "hua_center_j": hua_center_j,
+        "check": check,
+    }
+
+
+def _detect_day(
+    day: date,
+    filt: Dataset,
+    raw: Dataset | None,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    depth: np.ndarray,
+    params: DetectionParams,
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if hasattr(filt, "open_day"):
+        filt.open_day(day)
+    if raw is not None and hasattr(raw, "open_day"):
+        raw.open_day(day)
+    time_index = _time_lookup(filt)[day]
+    zos = np.asarray(filt.variables["zos_glor"][time_index, :, :], dtype="float64")
+    cached_extrema = _load_cached_extrema(args.candidate_cache_dir, day, args.max_candidates_per_day)
+    extrema = (
+        cached_extrema
+        if cached_extrema is not None
+        else _local_extrema(
+            zos,
+            params.ssh_window_cells,
+            lon=lon,
+            lat=lat,
+            selection=args.candidate_selection,
+            max_candidates=args.max_candidates_per_day,
+            tile_lon_deg=args.tile_lon_deg,
+            tile_lat_deg=args.tile_lat_deg,
+            tile_top_n=args.tile_top_n,
+            open_ocean_tile_top_n=args.open_ocean_tile_top_n,
+            open_ocean_low_lat_tile_top_n=args.open_ocean_low_lat_tile_top_n,
+            target_open_ocean_boxes=_parse_target_open_ocean_boxes(args.target_open_ocean_boxes),
+            target_open_ocean_tile_top_n=args.target_open_ocean_tile_top_n,
+            seed_windows_cells=tuple(
+                int(value.strip())
+                for value in str(args.seed_windows_cells).split(",")
+                if value.strip()
+            ) or None,
+            adaptive_window_min=args.ssh_open_ocean_seed_window_cells,
+        )
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scale_counts = (
+        {str(int(scale)): int(count) for scale, count in extrema["seed_scale_cells"].value_counts().sort_index().items()}
+        if not extrema.empty and "seed_scale_cells" in extrema.columns
+        else {}
+    )
+    (output_dir / "candidate_pool_summary.json").write_text(
+        json.dumps(
+            {
+                "date": day.isoformat(),
+                "candidate_count_after_merge_and_tile_cap": int(len(extrema)),
+                "seed_scale_counts_after_merge_and_tile_cap": scale_counts,
+                "candidate_selection": str(args.candidate_selection),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if extrema.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(columns=OBJECT_VOXEL_COLUMNS)
+
+    if float(args.max_depth_m) <= 0.0 or not np.isfinite(float(args.max_depth_m)):
+        max_depth_idx = len(depth)
+    else:
+        max_depth_idx = int(np.searchsorted(depth, args.max_depth_m, side="right"))
+        max_depth_idx = min(max_depth_idx, len(depth))
+    depth_indices = np.arange(max_depth_idx, dtype=int)
+    dx_km, dy_km = _grid_spacing_km(lon, lat)
+    centers_rows: list[dict[str, object]] = []
+    circle_rows: list[dict[str, object]] = []
+    structure_rows: list[dict[str, object]] = []
+    voxel_rows: list[dict[str, object]] = []
+
+    u_day = None
+    v_day = None
+    if args.preload_day_uv:
+        # ACC windows are small enough that loading one day of u/v once is
+        # cheaper than thousands of HDF5 layer reads during candidate checks.
+        u_day = np.asarray(filt.variables["uo_glor"][time_index, :max_depth_idx, :, :], dtype="float32")
+        v_day = np.asarray(filt.variables["vo_glor"][time_index, :max_depth_idx, :, :], dtype="float32")
+    if u_day is None:
+        u0 = np.asarray(filt.variables["uo_glor"][time_index, 0, :, :], dtype="float32")
+        v0 = np.asarray(filt.variables["vo_glor"][time_index, 0, :, :], dtype="float32")
+    else:
+        u0 = u_day[0]
+        v0 = v_day[0]
+    speed0 = np.hypot(u0, v0)
+    parallel_surface_cache: dict[int, dict[str, object]] = {}
+    if (
+        len(depth_indices) == 1
+        and int(args.intra_day_workers) > 1
+    ):
+        shared_arrays: dict[str, SharedMemory] = {}
+        shared_specs: dict[str, tuple[str, tuple[int, ...], str]] = {}
+        try:
+            for key, array in {"zos": zos, "u0": u0, "v0": v0, "speed0": speed0}.items():
+                shared = SharedMemory(create=True, size=int(array.nbytes))
+                np.ndarray(array.shape, dtype=array.dtype, buffer=shared.buf)[:] = array
+                shared_arrays[key] = shared
+                shared_specs[key] = (shared.name, tuple(array.shape), array.dtype.str)
+            payloads = [
+                (int(seed_order), seed.to_dict(), dx_km, dy_km, params, args)
+                for seed_order, seed in extrema.iterrows()
+            ]
+            with ProcessPoolExecutor(
+                max_workers=max(1, int(args.intra_day_workers)),
+                initializer=_init_shared_surface_arrays,
+                initargs=(shared_specs, lon, lat),
+            ) as pool:
+                futures = [pool.submit(_prepare_surface_seed_shared, payload) for payload in payloads]
+                for future in as_completed(futures):
+                    seed_order, prepared = future.result()
+                    parallel_surface_cache[seed_order] = prepared
+        finally:
+            for shared in shared_arrays.values():
+                shared.close()
+                shared.unlink()
+
+    candidate_total = int(len(extrema))
+    for seed_order, seed in extrema.iterrows():
+        seed_i = int(seed["seed_i"])
+        seed_j = int(seed["seed_j"])
+        prepared = parallel_surface_cache.get(int(seed_order))
+        if prepared is None:
+            center_i, center_j, center_speed, min_steps = _seeded_speed_min(
+                speed0, seed_i, seed_j, params.surface_search_cells
+            )
+        else:
+            center_i = int(prepared["center_i"])
+            center_j = int(prepared["center_j"])
+            center_speed = float(prepared["center_speed"])
+            min_steps = int(prepared["min_steps"])
+        prev_i, prev_j = center_i, center_j
+        object_id = f"{day:%Y%m%d}_{int(seed_order):05d}"
+        stopped = False
+        for depth_index in depth_indices:
+            if u_day is None:
+                u = np.asarray(filt.variables["uo_glor"][time_index, depth_index, :, :], dtype="float32")
+                v = np.asarray(filt.variables["vo_glor"][time_index, depth_index, :, :], dtype="float32")
+            else:
+                u = u_day[depth_index]
+                v = v_day[depth_index]
+            speed = np.hypot(u, v)
+            if depth_index > 0:
+                center_i, center_j, center_speed, min_steps = _seeded_speed_min(speed, prev_i, prev_j, params.deep_search_cells)
+            grid_lat_value = float(lat[center_j])
+            grid_lon_value = float(lon[center_i])
+            refinement_enabled = True
+            refinement_stage = "pre_hua"
+            fallback_refined = {
+                "center_i_refined": float(center_i),
+                "center_j_refined": float(center_j),
+                "center_lon_refined": grid_lon_value,
+                "center_lat_refined": grid_lat_value,
+                "refined_speed_ms": float(center_speed),
+                "refined_offset_km": 0.0,
+                "refined_ok": False,
+                "subgrid_fit_quality": "not_attempted",
+            }
+            if prepared is not None and int(depth_index) == 0:
+                pre_hua_refined = dict(prepared["refined"])
+            else:
+                pre_hua_refined = (
+                    _refine_speed_min_subgrid(
+                        speed,
+                        u,
+                        v,
+                        lon,
+                        lat,
+                        center_i,
+                        center_j,
+                        target_degree=float(args.subgrid_target_degree),
+                        window_radius_cells=int(args.subgrid_window_radius_cells),
+                        min_finite_fraction=float(args.subgrid_min_finite_fraction),
+                    )
+                    if refinement_enabled
+                    else fallback_refined
+                )
+            hua_center_i = float(pre_hua_refined["center_i_refined"])
+            hua_center_j = float(pre_hua_refined["center_j_refined"])
+            if prepared is not None and int(depth_index) == 0:
+                check = dict(prepared["check"])
+            else:
+                check_center_i = float(seed_i) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_i
+                check_center_j = float(seed_j) if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 else hua_center_j
+                check = _hua_verify_radius(
+                    u,
+                    v,
+                    check_center_i,
+                    check_center_j,
+                    params,
+                    ssh=zos if int(depth_index) == 0 else None,
+                    speed=speed,
+                    extremum_type=str(seed["ssh_extremum_type"]),
+                    lon=lon,
+                    lat=lat,
+                )
+            refined = pre_hua_refined
+            if params.boundary_mode == "ssh_effective_contour_primary" and int(depth_index) == 0 and bool(check.get("hua_pass", False)):
+                contour_i = float(check.get("ssh_contour_center_i", np.nan))
+                contour_j = float(check.get("ssh_contour_center_j", np.nan))
+                if np.isfinite(contour_i) and np.isfinite(contour_j):
+                    refined = {
+                        **refined,
+                        "center_i_refined": contour_i,
+                        "center_j_refined": contour_j,
+                        "center_lon_refined": _interp_1d_from_fraction(lon, contour_i),
+                        "center_lat_refined": _interp_1d_from_fraction(lat, contour_j),
+                        "refined_speed_ms": float(_sample_scalar_at(speed, contour_i, contour_j)),
+                        "refined_offset_km": math.hypot((contour_i - center_i) * dx_km, (contour_j - center_j) * dy_km),
+                        "refined_ok": True,
+                        "subgrid_fit_quality": "ssh_contour_centroid",
+                    }
+            if bool(check["hua_pass"]):
+                prev_i = int(np.clip(round(float(refined["center_i_refined"])), 0, speed.shape[1] - 1))
+                prev_j = int(np.clip(round(float(refined["center_j_refined"])), 0, speed.shape[0] - 1))
+            else:
+                stopped = True
+            lat_value = float(refined["center_lat_refined"])
+            lon_value = float(refined["center_lon_refined"])
+            polarity = _extremum_polarity(str(seed["ssh_extremum_type"]), lat_value, float(check.get("circulation_sign", np.nan)))
+            row = {
+                "date": day.isoformat(),
+                "hua_object_id": object_id,
+                "seed_order": int(seed_order),
+                "ssh_extremum_type": str(seed["ssh_extremum_type"]),
+                "polarity": polarity,
+                "time_index": int(time_index),
+                "candidate_selection": str(seed.get("candidate_selection", args.candidate_selection)),
+                "seed_scale_cells": float(seed.get("seed_scale_cells", args.ssh_window_cells)),
+                "seed_pool_source": str(seed.get("seed_pool_source", "local_extrema")),
+                "seed_merge_group": float(seed.get("seed_merge_group", np.nan)),
+                "tile_lon_min": float(seed.get("tile_lon_min", np.nan)),
+                "tile_lon_max": float(seed.get("tile_lon_max", np.nan)),
+                "tile_lat_min": float(seed.get("tile_lat_min", np.nan)),
+                "tile_lat_max": float(seed.get("tile_lat_max", np.nan)),
+                "tile_rank": int(seed.get("tile_rank", seed_order + 1)) if pd.notna(seed.get("tile_rank", np.nan)) else int(seed_order + 1),
+                "depth_index": int(depth_index),
+                "depth_m": float(depth[depth_index]),
+                "seed_i": seed_i,
+                "seed_j": seed_j,
+                "seed_lon": float(lon[seed_i]),
+                "seed_lat": float(lat[seed_j]),
+                "ssh_value_m": float(seed["ssh_value_m"]),
+                "speed_min_i": int(round(float(refined["center_i_refined"]))),
+                "speed_min_j": int(round(float(refined["center_j_refined"]))),
+                "speed_min_i_grid": int(center_i),
+                "speed_min_j_grid": int(center_j),
+                "center_lon_grid": grid_lon_value,
+                "center_lat_grid": grid_lat_value,
+                "center_lon": lon_value,
+                "center_lat": lat_value,
+                "center_i_refined": float(refined["center_i_refined"]),
+                "center_j_refined": float(refined["center_j_refined"]),
+                "hua_center_i": float(hua_center_i),
+                "hua_center_j": float(hua_center_j),
+                "hua_center_source": "refined_search_stage",
+                "refined_before_hua": True,
+                "center_refinement_stage": refinement_stage,
+                "center_lon_refined": float(refined["center_lon_refined"]),
+                "center_lat_refined": float(refined["center_lat_refined"]),
+                "center_x_from_seed_km": float((float(refined["center_i_refined"]) - seed_i) * dx_km),
+                "center_y_from_seed_km": float((float(refined["center_j_refined"]) - seed_j) * dy_km),
+                "center_x_from_seed_grid_km": float((center_i - seed_i) * dx_km),
+                "center_y_from_seed_grid_km": float((center_j - seed_j) * dy_km),
+                "center_speed_ms": float(refined["refined_speed_ms"] if bool(refined["refined_ok"]) else center_speed),
+                "center_speed_grid_ms": float(center_speed),
+                "refined_offset_km": float(refined["refined_offset_km"]),
+                "refined_ok": bool(refined["refined_ok"]),
+                "subgrid_fit_quality": str(refined["subgrid_fit_quality"]),
+                "local_min_steps": int(min_steps),
+                "stopped_after_failure": bool(stopped),
+                **check,
+            }
+            centers_rows.append(row)
+            circle_rows.append({k: v for k, v in row.items() if k not in {"center_lon", "center_lat"}})
+            if bool(check["hua_pass"]):
+                structure_rows.append(
+                    {
+                        "date": day.isoformat(),
+                        "hua_object_id": object_id,
+                        "depth_index": int(depth_index),
+                        "depth_m": float(depth[depth_index]),
+                        "center_lon": lon_value,
+                        "center_lat": lat_value,
+                        "center_lon_grid": grid_lon_value,
+                        "center_lat_grid": grid_lat_value,
+                        "center_lon_refined": float(refined["center_lon_refined"]),
+                        "center_lat_refined": float(refined["center_lat_refined"]),
+                        "refined_ok": bool(refined["refined_ok"]),
+                        "refined_offset_km": float(refined["refined_offset_km"]),
+                        "radius_km": float(check["accepted_radius_cells"]) * float(np.nanmean([dx_km, dy_km])),
+                        "polarity": polarity,
+                    }
+                )
+                if args.write_object_voxels:
+                    voxel_rows.extend(
+                        _object_voxels_for_layer(
+                            u,
+                            v,
+                            lon,
+                            lat,
+                            float(depth[depth_index]),
+                            day=day,
+                            object_id=object_id,
+                            depth_index=int(depth_index),
+                            center_i=int(center_i),
+                            center_j=int(center_j),
+                            radius_cells=float(check["accepted_radius_cells"]),
+                            polarity=polarity,
+                        )
+                    )
+            if args.stop_at_first_failed_layer and stopped:
+                break
+        if (int(seed_order) + 1) % 250 == 0 or int(seed_order) + 1 == candidate_total:
+            (output_dir / "candidate_processing_progress.json").write_text(
+                json.dumps(
+                    {
+                        "date": day.isoformat(),
+                        "processed_candidates": int(seed_order) + 1,
+                        "candidate_total": candidate_total,
+                        "accepted_surface_candidates_so_far": int(
+                            sum(bool(row.get("hua_pass", False)) for row in centers_rows if int(row.get("depth_index", -1)) == 0)
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+    centers = pd.DataFrame(centers_rows)
+    circle = pd.DataFrame(circle_rows)
+    structures = pd.DataFrame(structure_rows)
+    voxels = pd.DataFrame(voxel_rows, columns=OBJECT_VOXEL_COLUMNS)
+    if args.write_day_figures and not centers.empty:
+        _plot_day_summary(day, centers, zos, lon, lat, output_dir / "figures", speed=speed0)
+    return centers, circle, structures, voxels
+
+
+def _scatter_seed_fate(ax, surface: pd.DataFrame, lon: np.ndarray | None = None, lat: np.ndarray | None = None) -> None:
+    passed = surface["hua_pass"].astype(bool)
+    boundary = surface["boundary_source"].fillna("") if "boundary_source" in surface.columns else pd.Series("", index=surface.index)
+    jet = surface["jet_meander_flag"].fillna(False).astype(bool) if "jet_meander_flag" in surface.columns else pd.Series(False, index=surface.index)
+    if "surface_definition" in surface.columns and surface["surface_definition"].fillna("").eq("ssh_effective_contour_primary").any():
+        core = surface["dynamical_core_class"].fillna("unknown") if "dynamical_core_class" in surface.columns else pd.Series("unknown", index=surface.index)
+        accepted = passed & boundary.eq("ssh_effective_contour_primary")
+        closed = accepted & core.astype(str).str.contains("closed_streamline_core")
+        weak = accepted & ~closed
+        failed = ~accepted
+        if "ssh_contour_boundary_i" in surface.columns and "ssh_contour_boundary_j" in surface.columns:
+            for _, row in surface.loc[accepted].iterrows():
+                ii_text = str(row.get("ssh_contour_boundary_i", ""))
+                jj_text = str(row.get("ssh_contour_boundary_j", ""))
+                if not ii_text or not jj_text:
+                    continue
+                try:
+                    ii = np.asarray([int(v) for v in ii_text.split(";") if v != ""], dtype=int)
+                    jj = np.asarray([int(v) for v in jj_text.split(";") if v != ""], dtype=int)
+                except ValueError:
+                    continue
+                if ii.size and jj.size and lon is not None and lat is not None:
+                    valid = (ii >= 0) & (ii < len(lon)) & (jj >= 0) & (jj < len(lat))
+                    if np.any(valid):
+                        ax.plot(lon[ii[valid]], lat[jj[valid]], color="#111827", linewidth=0.7, alpha=0.7)
+        if failed.any():
+            ax.scatter(surface.loc[failed, "seed_lon"], surface.loc[failed, "seed_lat"], s=16, c="#ef4444", marker="x", label="SSH primary rejected")
+        if weak.any():
+            ax.scatter(surface.loc[weak, "center_lon"], surface.loc[weak, "center_lat"], s=28, c="#a855f7", label="SSH eddy, weak/no streamline core")
+        if closed.any():
+            ax.scatter(surface.loc[closed, "center_lon"], surface.loc[closed, "center_lat"], s=28, c="#2563eb", label="SSH eddy, closed streamline core")
+        jet_pass = accepted & jet
+        if jet_pass.any():
+            ax.scatter(surface.loc[jet_pass, "center_lon"], surface.loc[jet_pass, "center_lat"], s=45, facecolors="none", edgecolors="#111827", label="jet-meander flagged")
+        return
+    pure = passed & boundary.eq("pure_streamline_ssh")
+    fallback = passed & boundary.eq("fallback_circle_ssh")
+    other_pass = passed & ~(pure | fallback)
+    jet_reject = ~passed & jet
+    ssh_reject = ~passed & boundary.isin(["ssh_consensus_rejected", "jet_meander_rejected"])
+    no_closed = ~passed & surface.get("first_hard_failure", pd.Series("", index=surface.index)).fillna("").astype(str).str.contains("no_closed_streamline")
+    other_fail = ~passed & ~(jet_reject | ssh_reject | no_closed)
+    if other_fail.any():
+        ax.scatter(surface.loc[other_fail, "seed_lon"], surface.loc[other_fail, "seed_lat"], s=14, c="#9ca3af", label="other rejected seed", alpha=0.8)
+    if no_closed.any():
+        ax.scatter(surface.loc[no_closed, "seed_lon"], surface.loc[no_closed, "seed_lat"], s=17, c="#f59e0b", label="no closed streamline rejected", alpha=0.85)
+    if ssh_reject.any():
+        ax.scatter(surface.loc[ssh_reject, "seed_lon"], surface.loc[ssh_reject, "seed_lat"], s=18, c="#ef4444", marker="x", label="SSH/jet consensus rejected")
+    if jet_reject.any():
+        ax.scatter(surface.loc[jet_reject, "seed_lon"], surface.loc[jet_reject, "seed_lat"], s=26, facecolors="none", edgecolors="#111827", label="jet-core overlap rejected")
+    if other_pass.any():
+        ax.scatter(surface.loc[other_pass, "center_lon"], surface.loc[other_pass, "center_lat"], s=20, c="#22c55e", label="Hua passed center")
+    if pure.any():
+        ax.scatter(surface.loc[pure, "center_lon"], surface.loc[pure, "center_lat"], s=24, c="#2563eb", label="pure streamline + SSH")
+    if fallback.any():
+        ax.scatter(surface.loc[fallback, "center_lon"], surface.loc[fallback, "center_lat"], s=32, c="#a855f7", marker="D", label="fallback circle + SSH")
+
+
+def _plot_day_summary(
+    day: date,
+    centers: pd.DataFrame,
+    zos: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    figure_dir: Path,
+    *,
+    speed: np.ndarray | None = None,
+) -> None:
+    plt = _get_pyplot()
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    surface = centers[centers["depth_index"].eq(0)].copy()
+    if surface.empty:
+        return
+    fig, ax = plt.subplots(figsize=(13, 4.8))
+    if speed is None:
+        vmax = float(np.nanpercentile(np.abs(zos), 98))
+        vmax = max(vmax, 1e-6)
+        im = ax.pcolormesh(lon, lat, zos, shading="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+        cbar_label = "filtered zos (m)"
+    else:
+        bg = np.asarray(speed, dtype="float64")
+        vmax = float(np.nanpercentile(bg[np.isfinite(bg)], 98)) if np.isfinite(bg).any() else 1.0
+        vmax = max(vmax, 1e-6)
+        im = ax.pcolormesh(lon, lat, bg, shading="auto", cmap="viridis", vmin=0.0, vmax=vmax)
+        cbar_label = "surface velocity-anomaly speed"
+    _scatter_seed_fate(ax, surface, lon=lon, lat=lat)
+    ax.set_title(f"Hua SSH+velocity surface candidates {day:%Y-%m-%d}")
+    ax.set_xlabel("longitude")
+    ax.set_ylabel("latitude")
+    ax.legend(loc="upper right", fontsize=8)
+    cbar = fig.colorbar(im, ax=ax, pad=0.01)
+    cbar.set_label(cbar_label)
+    fig.savefig(figure_dir / f"surface_candidates_{day:%Y%m%d}.png", dpi=180, bbox_inches="tight")
+    if str(surface.get("boundary_mode", pd.Series([""])).iloc[0]) in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary"}:
+        ax.set_xlim(120.0, 145.0)
+        ax.set_ylim(20.0, 35.0)
+        mode = str(surface.get("boundary_mode", pd.Series([""])).iloc[0])
+        ax.set_title(f"OFES {mode} seed fate | Kuroshio | {day:%Y-%m-%d}")
+        fig.savefig(figure_dir / f"kuroshio_seed_fate_{mode}_{day:%Y%m%d}.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_parts(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        df.to_parquet(tmp, index=False, engine=DEFAULT_PARQUET_ENGINE)
+        tmp.replace(path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        csv_path = path.with_suffix(".csv")
+        tmp_csv = csv_path.with_suffix(csv_path.suffix + ".tmp")
+        df.to_csv(tmp_csv, index=False)
+        tmp_csv.replace(csv_path)
+
+
+def _read_parquet(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".csv":
+        try:
+            return pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
+    return pd.read_parquet(path, engine=DEFAULT_PARQUET_ENGINE)
+
+
+def _write_parquet(df: pd.DataFrame, path: Path, index: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.to_parquet(path, index=index, engine=DEFAULT_PARQUET_ENGINE)
+    except Exception:
+        df.to_csv(path.with_suffix(".csv"), index=index)
+
+
+def _merge_parts(parts_dir: Path, name: str, output_dir: Path) -> pd.DataFrame:
+    existing = output_dir / f"{name}.parquet"
+    if existing.exists():
+        return _read_parquet(existing)
+    existing_csv = output_dir / f"{name}.csv"
+    if existing_csv.exists():
+        return pd.read_csv(existing_csv)
+    parts = sorted(parts_dir.rglob("*.parquet"))
+    if not parts:
+        parts = sorted(parts_dir.rglob("*.csv"))
+    if not parts:
+        return pd.DataFrame()
+    frames = [_read_parquet(path) for path in parts]
+    merged = pd.concat(frames, ignore_index=True)
+    _write_parquet(merged, output_dir / f"{name}.parquet", index=False)
+    merged.to_csv(output_dir / f"{name}.csv", index=False)
+    return merged
+
+
+def _voxel_stats_from_parts(parts_dir: Path) -> pd.DataFrame:
+    parts = sorted(parts_dir.rglob("*.parquet"))
+    if not parts:
+        return pd.DataFrame()
+    cols = ["hua_object_id", "depth_index", "i", "j", "node_key_2d", "node_key_3d"]
+    stats = []
+    for path in parts:
+        voxels = pd.read_parquet(path, columns=cols, engine=DEFAULT_PARQUET_ENGINE)
+        if voxels.empty:
+            continue
+        surface = voxels[voxels["depth_index"].eq(0)]
+        total = (
+            voxels.groupby("hua_object_id")
+            .agg(
+                voxel_count_3d=("node_key_3d", "nunique"),
+                min_i=("i", "min"),
+                max_i=("i", "max"),
+                min_j=("j", "min"),
+                max_j=("j", "max"),
+                min_depth_index=("depth_index", "min"),
+                max_depth_index=("depth_index", "max"),
+            )
+            .reset_index()
+        )
+        surf = surface.groupby("hua_object_id")["node_key_2d"].nunique().rename("surface_voxel_count_2d").reset_index()
+        stats.append(total.merge(surf, on="hua_object_id", how="left"))
+    if not stats:
+        return pd.DataFrame()
+    merged = pd.concat(stats, ignore_index=True)
+    reduced = (
+        merged.groupby("hua_object_id")
+        .agg(
+            voxel_count_3d=("voxel_count_3d", "sum"),
+            surface_voxel_count_2d=("surface_voxel_count_2d", "sum"),
+            min_i=("min_i", "min"),
+            max_i=("max_i", "max"),
+            min_j=("min_j", "min"),
+            max_j=("max_j", "max"),
+            min_depth_index=("min_depth_index", "min"),
+            max_depth_index=("max_depth_index", "max"),
+        )
+        .reset_index()
+    )
+    reduced["surface_voxel_count_2d"] = reduced["surface_voxel_count_2d"].fillna(0).astype("int64")
+    return reduced
+
+
+def _write_frame_object_summary(centers: pd.DataFrame, voxels: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
+    if centers.empty:
+        summary = pd.DataFrame()
+    else:
+        passed = centers[centers["hua_pass"].astype(bool)].copy()
+        if passed.empty:
+            summary = pd.DataFrame()
+        else:
+            layer_stats = (
+                passed.groupby("hua_object_id")
+                .agg(
+                    date=("date", "first"),
+                    polarity=("polarity", "first"),
+                    surface_seed_i=("seed_i", "first"),
+                    surface_seed_j=("seed_j", "first"),
+                    surface_seed_lon=("seed_lon", "first"),
+                    surface_seed_lat=("seed_lat", "first"),
+                    surface_center_i=("speed_min_i", "first"),
+                    surface_center_j=("speed_min_j", "first"),
+                    surface_center_lon=("center_lon", "first"),
+                    surface_center_lat=("center_lat", "first"),
+                    ssh_value_m=("ssh_value_m", "first"),
+                    pass_layers=("depth_index", "size"),
+                    max_depth_m=("depth_m", "max"),
+                    mean_radius_cells=("accepted_radius_cells", "mean"),
+                    min_center_speed_ms=("center_speed_ms", "min"),
+                    mean_center_speed_ms=("center_speed_ms", "mean"),
+                )
+                .reset_index()
+            )
+            voxel_stats = _voxel_stats_from_parts(output_dir / "object_voxels_parts") if voxels.empty else pd.DataFrame()
+            if voxels.empty and voxel_stats.empty:
+                summary = layer_stats
+                summary["voxel_count_3d"] = 0
+                summary["surface_voxel_count_2d"] = 0
+            else:
+                if voxel_stats.empty:
+                    surface = voxels[voxels["depth_index"].eq(0)]
+                    voxel_stats = (
+                        voxels.groupby("hua_object_id")
+                        .agg(
+                            voxel_count_3d=("node_key_3d", "nunique"),
+                            min_i=("i", "min"),
+                            max_i=("i", "max"),
+                            min_j=("j", "min"),
+                            max_j=("j", "max"),
+                            min_depth_index=("depth_index", "min"),
+                            max_depth_index=("depth_index", "max"),
+                        )
+                        .reset_index()
+                    )
+                    surf = surface.groupby("hua_object_id")["node_key_2d"].nunique().rename("surface_voxel_count_2d").reset_index()
+                    voxel_stats = voxel_stats.merge(surf, on="hua_object_id", how="left")
+                summary = layer_stats.merge(voxel_stats, on="hua_object_id", how="left")
+    _write_parquet(summary, output_dir / "frame_object_summary.parquet", index=False)
+    summary.to_csv(output_dir / "frame_object_summary.csv", index=False)
+    return summary
+
+
+def _plot_axis_examples(centers: pd.DataFrame, output_dir: Path, max_examples: int = 8) -> None:
+    plt = _get_pyplot()
+    if centers.empty:
+        return
+    figure_dir = output_dir / "axis_velocity_stack_examples"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    ranked = (
+        centers.groupby("hua_object_id")
+        .agg(n_layers=("depth_index", "size"), n_pass=("hua_pass", "sum"), date=("date", "first"), polarity=("polarity", "first"))
+        .sort_values(["n_pass", "n_layers"], ascending=False)
+        .head(max_examples)
+        .reset_index()
+    )
+    for _, item in ranked.iterrows():
+        obj = centers[centers["hua_object_id"].eq(item["hua_object_id"])].sort_values("depth_index")
+        z = -obj["depth_m"].to_numpy(dtype="float64") / 1000.0
+        x = obj["center_x_from_seed_km"].to_numpy(dtype="float64")
+        y = obj["center_y_from_seed_km"].to_numpy(dtype="float64")
+        passed = obj["hua_pass"].astype(bool).to_numpy()
+        fig = plt.figure(figsize=(8, 6.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.plot(x, y, z, color="#334155", linewidth=2.0, label="Hua candidate axis")
+        ax.scatter(x[passed], y[passed], z[passed], c="#22c55e", s=36, label="pass")
+        ax.scatter(x[~passed], y[~passed], z[~passed], c="#ef4444", s=32, marker="x", label="fail")
+        ax.scatter([0], [0], [z[0] if len(z) else 0], marker="+", c="red", s=150, linewidth=3, label="SSH seed")
+        ax.set_xlabel("east from SSH seed (km)")
+        ax.set_ylabel("north from SSH seed (km)")
+        ax.set_zlabel("depth (km, down)")
+        ax.set_title(f"Hua replicated axis {item['hua_object_id']}\n{item['polarity']}, {item['date']}, pass {int(item['n_pass'])}/{int(item['n_layers'])}")
+        ax.view_init(elev=22, azim=-55)
+        ax.legend(fontsize=8)
+        stem = figure_dir / f"axis_{item['hua_object_id']}"
+        fig.savefig(stem.with_suffix(".png"), dpi=180, bbox_inches="tight")
+        fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+        plt.close(fig)
+
+
+def _write_docs(output_dir: Path, args: argparse.Namespace, summary: dict[str, object], rejection: pd.DataFrame) -> None:
+    lines = [
+        "# Hua 2023 SSH+Velocity Hybrid 方法对齐说明",
+        "",
+        "本目录是 Hua et al. 2023 方法在 ACC 30-180 天带通场上的论文复刻实验，不读取现有 catalog/tracks/completed centers。",
+        "",
+        "## 方法链条",
+        "",
+        "1. 用 `zos_glor` 带通信号在表层做局地极大/极小搜索，对应论文的 SSH minima/maxima candidate centers。",
+        "2. 在 SSH candidate 附近寻找 `sqrt(u'^2+v'^2)` 局部低值，得到速度中心候选。",
+        "3. 从 `STARTRADIUS=3` 个网格点开始沿圆周路径检查速度模连续性、方向连续性、切向性、对心对称性和两侧反转。",
+        "4. 表层通过后，以下一层上方中心为 seed 向深层扩展；失败层记录原因，不硬跳到远处中心。",
+        "",
+        "## 边界模式",
+        "",
+        f"- 当前边界模式：`{getattr(args, 'boundary_mode', 'circle_strict_original')}`。",
+        f"- Hua 检验后端：`{getattr(args, 'hua_backend', 'python')}`。",
+        f"- 中心加密阶段：`{getattr(args, 'center_refinement_stage', 'pre_hua')}`。",
+        "- `circle_strict_original` 是修改前原标准：固定半径圆周上的 Hua 几何检验。",
+        "- `velocity_streamline_contour` 是 ACC TEST 实验口径：每层围绕速度弱中心寻找闭合速度流线轮廓，并在该轮廓上评估方向一致性和切向对齐。",
+        "- `velocity_streamline_ssh_consensus` 是 OFES 诊断口径：把速度流线作为强动力核，再用 SSH/effective-contour 共识和 jet-core overlap 诊断决定是否接受为 isolated eddy interior；`no_closed_streamline` seed 可经 SSH+固定圆周 fallback 接受。",
+        "- `ssh_effective_contour_primary` 是 OFES/META-like 表层口径：表层由 SSH anomaly 闭合等值线定义 eddy interior，velocity streamline 只作为动力核和边界质量诊断；深层仍沿用现有 Hua 速度检验延展。",
+        "- `ssh_primary_velocity_streamline_effective` 是 OFES 统一默认口径：SSH anomaly 只作为发现层，表层最终边界由速度弱中心附近的闭合 velocity streamline 圆判据决定；SSH discovery 字段保留供统一 shape/overlap/persistence QC。",
+        "- `pre_hua` 是唯一中心加密顺序：速度弱中心先做连续坐标加密，再用 refined center 进入 Hua 检验。",
+        "- `pass_rate_breakdown.csv/json` 给出 surface/all-layer 通过率与失败占比；新 SSH consensus 模式额外按 `boundary_source` 统计 pure streamline、fallback 与 jet/SSH 拒绝来源；`sensitivity_matrix.csv/parquet` 给出原流线模式下 tangent/monotonic 参数敏感度。",
+        "",
+        "## ACC 适配",
+        "",
+        "- 主速度口径为 `u'=u_{30-180d}, v'=v_{30-180d}`；SSH 口径为 `zos_{30-180d}`。",
+        "- 未复制 raw 年文件，未写 `input_daily/`。",
+        "- SSH 搜索窗口、深层搜索半径是 ACC 网格适配参数，已写入 `run_summary.json`。",
+        "",
+        "## 运行摘要",
+        "",
+        f"- 日期范围：`{args.start}` 到 `{args.end}`。",
+        f"- 总中心记录：`{summary.get('n_center_rows', 0)}`。",
+        f"- 表层候选数：`{summary.get('n_surface_candidates', 0)}`。",
+        f"- Hua pass 层数：`{summary.get('n_pass_layers', 0)}`。",
+        f"- Hua pass fraction：`{summary.get('pass_fraction', 0.0):.4f}`。",
+        "",
+        "## 失败原因",
+        "",
+    ]
+    if rejection.empty:
+        lines.append("没有失败原因统计。")
+    else:
+        for row in rejection.to_dict("records"):
+            lines.append(f"- `{row['failure_reason']}`：`{row['count']}`")
+    (output_dir / "method_alignment_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (output_dir / "hua_acc_replication_summary_zh.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_synthetic_tests(output_dir: Path, params: DetectionParams) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    yy, xx = np.mgrid[-40:41, -40:41]
+    r = np.hypot(xx, yy)
+    tang_u = -yy / np.maximum(r, 1)
+    tang_v = xx / np.maximum(r, 1)
+    amp = np.exp(-(r / 15) ** 2)
+    cases = []
+    saddle_u = xx * np.exp(-(r / 18) ** 2)
+    saddle_v = -yy * np.exp(-(r / 18) ** 2)
+    for name, u, v, expected in [
+        ("gaussian_vortex", tang_u * amp, tang_v * amp, True),
+        ("pure_shear", np.ones_like(xx, dtype=float) * 0.05, yy * 0.0, False),
+        ("double_core_saddle", saddle_u, saddle_v, False),
+    ]:
+        check = _hua_verify_radius(u, v, 40, 40, params)
+        cases.append({"case": name, "expected_pass": expected, **check})
+    df = pd.DataFrame(cases)
+    df.to_csv(output_dir / "synthetic_hua_tests.csv", index=False)
+    _write_parquet(df, output_dir / "synthetic_hua_tests.parquet", index=False)
+    return df
+
+
+def run(args: argparse.Namespace) -> None:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if bool(args.disable_subgrid_center_refinement):
+        raise SystemExit(
+            "--disable-subgrid-center-refinement has been retired for ACC TEST. "
+            "Search-stage pre-Hua subgrid center refinement is now mandatory."
+        )
+    target_boxes = _parse_target_open_ocean_boxes(args.target_open_ocean_boxes)
+    params = DetectionParams(
+        ssh_window_cells=args.ssh_window_cells,
+        start_radius_cells=args.start_radius_cells,
+        max_radius_cells=args.max_radius_cells,
+        speed_ratio_max=args.speed_ratio_max,
+        angle_jump_max_deg=args.angle_jump_max_deg,
+        tangent_tolerance_deg=args.tangent_tolerance_deg,
+        symmetry_tolerance_deg=args.symmetry_tolerance_deg,
+        min_tangent_fraction=args.min_tangent_fraction,
+        min_reversal_fraction=args.min_reversal_fraction,
+        min_finite_fraction=args.min_finite_fraction,
+        direction_exception_extra=args.direction_exception_extra,
+        surface_search_cells=args.surface_search_cells,
+        deep_search_cells=args.deep_search_cells,
+        require_boundary_monotonic_rotation=args.require_boundary_monotonic_rotation,
+        boundary_monotonic_exception_limit=args.boundary_monotonic_exception_limit,
+        boundary_mode=args.boundary_mode,
+        streamline_direction_exception_fraction=args.streamline_direction_exception_fraction,
+        streamline_step_cells=args.streamline_step_cells,
+        streamline_max_steps=args.streamline_max_steps,
+        streamline_start_angles=args.streamline_start_angles,
+        streamline_closure_tolerance_cells=args.streamline_closure_tolerance_cells,
+        streamline_min_winding_turns=args.streamline_min_winding_turns,
+        streamline_min_points=args.streamline_min_points,
+        ssh_consensus_min_finite_fraction=args.ssh_consensus_min_finite_fraction,
+        ssh_primary_level_count=args.ssh_primary_level_count,
+        ssh_primary_window_factor=args.ssh_primary_window_factor,
+        ssh_primary_max_radius_factor=args.ssh_primary_max_radius_factor,
+        ssh_primary_min_amplitude_cm=args.ssh_primary_min_amplitude_cm,
+        ssh_primary_open_ocean_min_amplitude_cm=args.ssh_primary_open_ocean_min_amplitude_cm,
+        ssh_primary_open_ocean_low_lat_amplitude_cm=args.ssh_primary_open_ocean_low_lat_amplitude_cm,
+        ssh_primary_open_ocean_high_lat_amplitude_cm=args.ssh_primary_open_ocean_high_lat_amplitude_cm,
+        ssh_primary_open_ocean_window_factor=args.ssh_primary_open_ocean_window_factor,
+        ssh_primary_open_ocean_max_radius_factor=args.ssh_primary_open_ocean_max_radius_factor,
+        ssh_open_ocean_seed_window_cells=args.ssh_open_ocean_seed_window_cells,
+        target_open_ocean_boxes=target_boxes,
+        target_open_ocean_tile_top_n=args.target_open_ocean_tile_top_n,
+        target_open_ocean_min_amplitude_cm=args.target_open_ocean_min_amplitude_cm,
+        target_open_ocean_window_factor=args.target_open_ocean_window_factor,
+        target_open_ocean_max_radius_factor=args.target_open_ocean_max_radius_factor,
+        regional_amplitude_profile=_load_regional_amplitude_profile(args.regional_amplitude_profile),
+        ssh_primary_max_shape_error_percent=args.ssh_primary_max_shape_error_percent,
+        ssh_primary_acc_max_shape_error_percent=args.ssh_primary_acc_max_shape_error_percent,
+        jet_core_speed_percentile=args.jet_core_speed_percentile,
+        jet_core_overlap_max=args.jet_core_overlap_max,
+        skip_open_ocean_streamline_diagnostic=bool(args.skip_open_ocean_streamline_diagnostic),
+        hua_backend=args.hua_backend,
+    )
+    if params.boundary_mode in {"velocity_streamline_ssh_consensus", "ssh_effective_contour_primary", "ssh_primary_velocity_streamline_effective", "ssh_primary_velocity_streamline_effective_open_ocean_fallback", "ssh_primary_open_ocean_no_streamline_gate"} and params.hua_backend != "python":
+        raise SystemExit(
+            f"--boundary-mode {params.boundary_mode} currently requires --hua-backend python "
+            "because the SSH contour and jet-axis diagnostics are implemented in the Python catalog layer."
+        )
+    if args.synthetic_tests:
+        run_synthetic_tests(output_dir / "synthetic_tests", params)
+
+    days = _date_range(_parse_date(args.start), _parse_date(args.end))
+    part_root = output_dir / "parts"
+    if not args.finalize_only:
+        years = sorted({d.year for d in days})
+        for year in years:
+            filt, raw, lon, lat, depth = _load_year_arrays(args, year)
+            try:
+                year_days = [d for d in days if d.year == year]
+                for day in year_days:
+                    centers_path = part_root / "centers" / f"date={day:%Y%m%d}.parquet"
+                    circle_path = part_root / "circle" / f"date={day:%Y%m%d}.parquet"
+                    structures_path = part_root / "structures" / f"date={day:%Y%m%d}.parquet"
+                    voxels_path = output_dir / "object_voxels_parts" / f"year={day.year}" / f"date={day:%Y%m%d}.parquet"
+                    voxel_ready = (not args.write_object_voxels) or voxels_path.exists()
+                    centers_ready = centers_path.exists() or centers_path.with_suffix(".csv").exists()
+                    circle_ready = circle_path.exists() or circle_path.with_suffix(".csv").exists()
+                    structures_ready = structures_path.exists() or structures_path.with_suffix(".csv").exists()
+                    if args.resume and centers_ready and circle_ready and structures_ready and voxel_ready:
+                        continue
+                    centers, circle, structures, voxels = _detect_day(
+                        day,
+                        filt,
+                        raw,
+                        lon,
+                        lat,
+                        depth,
+                        params,
+                        args,
+                        output_dir,
+                    )
+                    _write_parts(centers, centers_path)
+                    _write_parts(circle, circle_path)
+                    _write_parts(structures, structures_path)
+                    if args.write_object_voxels:
+                        _write_parts(voxels, voxels_path)
+                    print(f"[hua] {day} centers={len(centers)} pass={int(centers['hua_pass'].sum()) if not centers.empty else 0}", flush=True)
+            finally:
+                filt.close()
+                if raw is not None:
+                    raw.close()
+    if args.partial_only:
+        return
+
+    centers = _merge_parts(part_root / "centers", "centers_hua_style", output_dir)
+    _merge_parts(part_root / "circle", "circle_check_diagnostics", output_dir)
+    _merge_parts(part_root / "structures", "structures_hua_style", output_dir)
+    if args.write_object_voxels:
+        voxels = pd.DataFrame(columns=OBJECT_VOXEL_COLUMNS)
+    else:
+        voxels = pd.DataFrame(columns=OBJECT_VOXEL_COLUMNS)
+    _write_frame_object_summary(centers, voxels, output_dir)
+    if centers.empty:
+        rejection = pd.DataFrame(columns=["failure_reason", "count"])
+        summary = {"n_center_rows": 0, "n_surface_candidates": 0, "n_pass_layers": 0, "pass_fraction": 0.0}
+    else:
+        reason_column = "first_hard_failure" if "first_hard_failure" in centers.columns else "dominant_failure"
+        rejection = (
+            centers.loc[~centers["hua_pass"].astype(bool), reason_column]
+            .value_counts()
+            .rename_axis("failure_reason")
+            .reset_index(name="count")
+        )
+        rejection.to_csv(output_dir / "rejection_reasons.csv", index=False)
+        if not bool(args.skip_axis_examples):
+            _plot_axis_examples(centers, output_dir)
+        summary = {
+            "n_center_rows": int(len(centers)),
+            "n_surface_candidates": int(centers[centers["depth_index"].eq(0)]["hua_object_id"].nunique()),
+            "n_pass_layers": int(centers["hua_pass"].sum()),
+            "pass_fraction": float(centers["hua_pass"].mean()),
+            "n_days": int(centers["date"].nunique()),
+            "n_objects": int(centers["hua_object_id"].nunique()),
+            "boundary_mode": str(params.boundary_mode),
+            "hua_backend": str(params.hua_backend),
+            "center_refinement_stage": str(getattr(args, "center_refinement_stage", "pre_hua")),
+            "refined_before_hua_rows": int(centers["refined_before_hua"].fillna(False).astype(bool).sum())
+            if "refined_before_hua" in centers.columns
+            else 0,
+            "parameters": {**vars(args), "detection_params": params.__dict__},
+        }
+        if "streamline_closed" in centers.columns:
+            closed = centers["streamline_closed"].fillna(False).astype(bool)
+            summary.update(
+                {
+                    "streamline_closed_rows": int(closed.sum()),
+                    "streamline_closed_fraction": float(closed.mean()) if len(closed) else 0.0,
+                }
+            )
+        if "boundary_source" in centers.columns:
+            summary["boundary_source_counts"] = {
+                str(key): int(value)
+                for key, value in centers["boundary_source"].fillna("unknown").value_counts(dropna=False).to_dict().items()
+            }
+        if "dynamical_core_class" in centers.columns:
+            summary["dynamical_core_class_counts"] = {
+                str(key): int(value)
+                for key, value in centers["dynamical_core_class"].fillna("unknown").value_counts(dropna=False).to_dict().items()
+            }
+        if "jet_meander_flag" in centers.columns:
+            jet_flags = centers["jet_meander_flag"].fillna(False).astype(bool)
+            summary["jet_meander_flag_rows"] = int(jet_flags.sum())
+            summary["jet_meander_flag_fraction"] = float(jet_flags.mean()) if len(jet_flags) else 0.0
+        if "catalog_acceptance_reason" in centers.columns:
+            summary["catalog_acceptance_reason_counts"] = {
+                str(key): int(value)
+                for key, value in centers["catalog_acceptance_reason"].fillna("unknown").value_counts(dropna=False).to_dict().items()
+            }
+        if "refined_ok" in centers.columns:
+            passed_refined = centers[centers["hua_pass"].astype(bool)].copy()
+            offsets = passed_refined["refined_offset_km"].astype(float) if "refined_offset_km" in passed_refined.columns else pd.Series(dtype=float)
+            finite_offsets = offsets[np.isfinite(offsets)]
+            summary.update(
+                {
+                    "subgrid_refined_enabled": bool(not args.disable_subgrid_center_refinement),
+                    "subgrid_target_degree": float(args.subgrid_target_degree),
+                    "subgrid_refined_ok_rows": int(passed_refined["refined_ok"].fillna(False).astype(bool).sum()),
+                    "subgrid_refined_ok_fraction_of_passed": float(
+                        passed_refined["refined_ok"].fillna(False).astype(bool).mean()
+                    )
+                    if len(passed_refined)
+                    else 0.0,
+                    "subgrid_refined_offset_km_median": float(np.nanmedian(finite_offsets)) if finite_offsets.size else 0.0,
+                    "subgrid_refined_offset_km_p90": float(np.nanquantile(finite_offsets, 0.9)) if finite_offsets.size else 0.0,
+                }
+            )
+    (output_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    if rejection.empty:
+        rejection.to_csv(output_dir / "rejection_reasons.csv", index=False)
+    if not centers.empty:
+        _write_detection_diagnostics(output_dir, centers, params, args)
+    _write_docs(output_dir, args, summary, rejection)
+
+
+# Public numerical API used by OFES stages.  The implementation names remain
+# private inside this module so the migration is numerically identical, while
+# callers no longer couple themselves to private symbols across packages.
+grid_spacing_km = _grid_spacing_km
+hua_verify_radius = _hua_verify_radius
+object_voxels_for_layer = _object_voxels_for_layer
+refine_speed_min_subgrid = _refine_speed_min_subgrid
+seeded_speed_min = _seeded_speed_min
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Canonical OFES SSH-primary surface eddy detection.")
+    parser.add_argument("--filter-root", type=Path, required=True)
+    parser.add_argument("--raw-root", type=Path, required=True)
+    parser.add_argument("--filter-template", default="global_phy_{year}.nc")
+    parser.add_argument("--raw-template", default="global_phy_{year}.nc")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--start", required=True)
+    parser.add_argument("--end", required=True)
+    parser.add_argument("--max-depth-m", type=float, default=0.0, help="Maximum depth in meters. Use <=0 for all source depth levels.")
+    parser.add_argument("--ssh-window-cells", type=int, default=7)
+    parser.add_argument("--max-candidates-per-day", type=int, default=0)
+    parser.add_argument("--candidate-selection", choices=["global_topn", "tile_topn"], default="tile_topn")
+    parser.add_argument("--tile-lon-deg", type=float, default=10.0)
+    parser.add_argument("--tile-lat-deg", type=float, default=10.0)
+    parser.add_argument("--tile-top-n", type=int, default=15)
+    parser.add_argument("--open-ocean-tile-top-n", type=int, default=30)
+    parser.add_argument("--open-ocean-low-lat-tile-top-n", type=int, default=15)
+    parser.add_argument("--seed-windows-cells", default="", help="Comma-separated SSH seed windows; empty preserves the single --ssh-window-cells scale.")
+    parser.add_argument("--intra-day-workers", type=int, default=1, help="Shared-memory worker count for surface-only seed checks within one day.")
+    parser.add_argument("--surface-search-cells", type=int, default=8)
+    parser.add_argument("--deep-search-cells", type=int, default=6)
+    parser.add_argument("--start-radius-cells", type=int, default=3)
+    parser.add_argument("--max-radius-cells", type=int, default=8)
+    parser.add_argument("--speed-ratio-max", type=float, default=3.0)
+    parser.add_argument("--angle-jump-max-deg", type=float, default=150.0)
+    parser.add_argument("--tangent-tolerance-deg", type=float, default=24.0)
+    parser.add_argument("--symmetry-tolerance-deg", type=float, default=120.0)
+    parser.add_argument("--min-tangent-fraction", type=float, default=0.70)
+    parser.add_argument("--min-reversal-fraction", type=float, default=0.70)
+    parser.add_argument("--min-finite-fraction", type=float, default=0.95)
+    parser.add_argument("--direction-exception-extra", type=int, default=0)
+    parser.add_argument("--require-boundary-monotonic-rotation", action="store_true")
+    parser.add_argument("--boundary-monotonic-exception-limit", type=int, default=0)
+    parser.add_argument(
+        "--boundary-mode",
+        choices=["ssh_primary_open_ocean_no_streamline_gate"],
+        default="ssh_primary_open_ocean_no_streamline_gate",
+    )
+    parser.add_argument(
+        "--hua-backend",
+        choices=["python"],
+        default="python",
+        help="Canonical Python Hua geometry backend.",
+    )
+    parser.add_argument("--streamline-direction-exception-fraction", type=float, default=0.10)
+    parser.add_argument("--streamline-step-cells", type=float, default=0.5)
+    parser.add_argument("--streamline-max-steps", type=int, default=180)
+    parser.add_argument("--streamline-start-angles", type=int, default=4)
+    parser.add_argument("--streamline-closure-tolerance-cells", type=float, default=1.75)
+    parser.add_argument("--streamline-min-winding-turns", type=float, default=0.75)
+    parser.add_argument("--streamline-min-points", type=int, default=16)
+    parser.add_argument("--ssh-consensus-min-finite-fraction", type=float, default=0.70)
+    parser.add_argument("--ssh-primary-level-count", type=int, default=16)
+    parser.add_argument("--ssh-primary-window-factor", type=float, default=4.0)
+    parser.add_argument("--ssh-primary-max-radius-factor", type=float, default=2.0)
+    parser.add_argument("--ssh-primary-min-amplitude-cm", type=float, default=0.0)
+    parser.add_argument("--ssh-primary-open-ocean-min-amplitude-cm", type=float, default=0.4)
+    parser.add_argument("--ssh-primary-open-ocean-low-lat-amplitude-cm", type=float, default=0.8)
+    parser.add_argument("--ssh-primary-open-ocean-high-lat-amplitude-cm", type=float, default=0.25)
+    parser.add_argument("--ssh-primary-open-ocean-window-factor", type=float, default=4.0)
+    parser.add_argument("--ssh-primary-open-ocean-max-radius-factor", type=float, default=3.5)
+    parser.add_argument("--ssh-open-ocean-seed-window-cells", type=int, default=3)
+    parser.add_argument(
+        "--target-open-ocean-boxes",
+        default=(
+            "190,245,25,55,north_pacific;190,280,-50,-30,south_pacific;"
+            "320,330,25,45,north_atlantic;335,355,-45,-20,south_atlantic"
+        ),
+    )
+    parser.add_argument("--target-open-ocean-tile-top-n", type=int, default=60)
+    parser.add_argument("--target-open-ocean-min-amplitude-cm", type=float, default=0.10)
+    parser.add_argument("--target-open-ocean-window-factor", type=float, default=8.0)
+    parser.add_argument("--target-open-ocean-max-radius-factor", type=float, default=6.0)
+    parser.add_argument("--regional-amplitude-profile", type=Path, default=None)
+    parser.add_argument("--ssh-primary-max-shape-error-percent", type=float, default=70.0)
+    parser.add_argument("--ssh-primary-acc-max-shape-error-percent", type=float, default=55.0)
+    parser.add_argument("--jet-core-speed-percentile", type=float, default=80.0)
+    parser.add_argument("--jet-core-overlap-max", type=float, default=0.50)
+    parser.add_argument("--skip-open-ocean-streamline-diagnostic", action="store_true")
+    parser.add_argument("--sensitivity-tangent-fractions", default="0.50,0.60,0.70")
+    parser.add_argument("--sensitivity-tangent-tolerances-deg", default="24,30,36,45")
+    parser.add_argument("--sensitivity-direction-exception-fractions", default="0.05,0.10,0.15")
+    parser.add_argument(
+        "--baseline-summary-path",
+        type=Path,
+        default=None,
+        help="Optional baseline run_summary.json used to add delta-vs-baseline fields to streamline sensitivity_matrix outputs.",
+    )
+    parser.add_argument(
+        "--disable-subgrid-center-refinement",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--center-refinement-stage",
+        choices=["pre_hua"],
+        default="pre_hua",
+        help="The only supported order refines the velocity-minimum center before Hua checks.",
+    )
+    parser.add_argument(
+        "--subgrid-target-degree",
+        type=float,
+        default=1.0 / 24.0,
+        help="Local refined-center interpolation spacing in degrees; default is 1/24 degree.",
+    )
+    parser.add_argument(
+        "--subgrid-window-radius-cells",
+        type=int,
+        default=2,
+        help="Half-width, in original grid cells, used around each passed Hua center for local refinement.",
+    )
+    parser.add_argument(
+        "--subgrid-min-finite-fraction",
+        type=float,
+        default=0.6,
+        help="Minimum finite-data fraction in the local refinement window.",
+    )
+    parser.add_argument("--preload-day-uv", action="store_true")
+    parser.add_argument("--write-object-voxels", action="store_true")
+    parser.add_argument("--partial-only", action="store_true")
+    parser.add_argument("--finalize-only", action="store_true")
+    parser.add_argument("--stop-at-first-failed-layer", action="store_true")
+    parser.add_argument("--write-day-figures", action="store_true")
+    parser.add_argument("--skip-axis-examples", action="store_true", help="Skip 3-D diagnostic axis-example plots during finalize.")
+    parser.add_argument("--synthetic-tests", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--candidate-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional directory containing precomputed candidates_YYYYMMDD.csv files. Cache rows bypass live candidate selection.",
+    )
+    parser.add_argument(
+        "--netcdf-chunk-cache-mb",
+        type=int,
+        default=512,
+        help="Per-variable NetCDF chunk cache. Local yearly sharding benefits from reusing 46-day HDF5 time chunks.",
+    )
+    args = parser.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()

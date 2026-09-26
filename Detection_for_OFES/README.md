@@ -1,82 +1,75 @@
 # Detection_for_OFES
 
-## Official Workflow
-
-There is one production scientific profile:
-
-```text
-eta_hp500_geometry_vertical_v1
-```
-
-It is intentionally narrow and traceable:
+`Detection_for_OFES` is the sole maintained OFES eddy package. It has one
+scientific default: `eta_hp500_geometry_vertical_v1`.
 
 ```text
-SSH              OFES native eta only; never pressur or an MSS anomaly
-surface          daily Gaussian eta - LP500 km(eta)
-detection        no tile cap, SSH-primary contour
-surface QC       geometry + same-day, same-polarity overlap
-excluded         streamline hard gate, persistence, tracking, rebuild-W
-vertical         tangent 45 degrees / fraction >= 0.35, then relaxed
-                 near-closed-streamline fallback
-strict core      section-bipolar classification only; never changes acceptance
-native W         NH cyclonic strict-core; native W; unrotated pointwise mean
+SSH          native OFES eta
+filter       daily Gaussian eta - LP500 km(eta), FFT implementation
+surface      no tile cap; SSH-primary contour
+QC           geometry plus same-day/same-polarity overlap
+excluded     streamline hard gate, persistence and rebuilt W
+vertical     tangent 45 deg / fraction 0.35, then relaxed near-closed fallback
+strict-core  section-bipolar classification only
+W            native OFES W, layer-center aligned, unrotated pointwise mean
 ```
 
-Run or resume through the sole launcher:
+## Run
+
+There is one user entry point:
 
 ```powershell
 & 'D:\01_Eddy\01_Vertical_asymmetric\S-H-I-T-ocean-\Detection_for_OFES\start_ofes_default_run.ps1' -Resume
 ```
 
-For a partial, auditable run:
+The equivalent Python command is:
 
 ```powershell
-D:\Util\lever\02_miniforge\envs\OFES_detection\python.exe -m Detection_for_OFES.workflows.default_pipeline `
+D:\Util\lever\02_miniforge\envs\OFES_detection\python.exe -m Detection_for_OFES run `
   --profile eta_hp500_geometry_vertical_v1 `
-  --start 1991-01-01 --end 1991-01-19 --resume `
-  --stages surface-inputs,surface-filter,raw-detection,geometry-qc
+  --start 1991-01-01 --end 1991-01-19 --resume
 ```
 
-All official results live only below:
+Tracking and shape are optional, non-filtering post-processors:
+
+```powershell
+... -m Detection_for_OFES run --resume --with-tracking --with-shape
+```
+
+`--stages` exists only for recovery and debugging. Scientific thresholds come
+from the nested dataclasses in `profiles.py`; stage CLIs receive explicit
+values and do not define a competing workflow profile.
+
+## Layout
 
 ```text
-E:\DATA\01_Eddy_correspond\02_OFES\Fromthebeginning\runs\
-  eta_hp500_geometry_vertical_v1\YYYYMMDD_YYYYMMDD\
-    00_manifest\
-    01_surface\{eta_inputs,highpass_500km,raw_detection,geometry_qc}\
-    02_velocity\highpass_500km_full105\
-    03_vertical\tangent45_fraction35_then_near_closed_relaxed\
-    04_section_bipolar\
-    05_native_w\nh_cyclonic_strict_core\
-    06_reports\
-    logs\
+Fromthebeginning/runs/eta_hp500_geometry_vertical_v1/layout_v2/YYYYMMDD_YYYYMMDD/
+  00_manifest/
+  01_surface/{eta_inputs,highpass_500km,raw_detection,geometry_qc}/
+  02_velocity/highpass_500km_full105/
+  03_vertical/tangent45_fraction35_then_near_closed_relaxed/
+  04_classification/section_bipolar/
+  05_tracking/
+  06_shape/
+  07_composites/native_w/
+  08_reports/
+  logs/
 ```
 
-Every stage has a date-level input/profile fingerprint under `00_manifest/stages`.
-`--resume` skips only a matching complete day; it refuses to reuse an output
-whose profile or input identity changed. `hua_object_id` remains the object
-primary key. Official outputs add `run_id`, `profile_id`,
-`vertical_profile_id`, date, and depth index where applicable.
+Every stage records its input identity, code/profile fingerprint, parameters,
+outputs and completion state. Resume invalidates only the changed date and its
+downstream work. `hua_object_id` remains the object primary key throughout.
 
-Default execution is FFT horizontal convolution with compression level 1,
-up to 8 date workers for surface stages, 2 for full-depth velocity and vertical
-stages, depth-major continuation, no default object voxels, and direct readonly
-DTA memmaps for Native W. `--stage-raw` remains an explicit network-storage
-fallback for W sampling.
+## Package Map
 
-## Historical And Experiments
+- `core`: seed/contour/Hua geometry, vertical numerical API, tracking, shape
+- `filters`: cached FFT Gaussian 500 km filtering
+- `io`: OFES DTA/CTL, NetCDF, tables and native-W layer alignment
+- `stages`: formal surface, QC, vertical, classification and optional stages
+- `composite`: the maintained native-field accumulator and Native W composite
+- `datasets`: OFES/prho download and climatology builders
+- `workflows`: run context, contracts, fingerprints and orchestration
 
-Existing results under `Fromthebeginning/04_Vertical`, `05_TEMP`, threshold
-sweeps, three-kernel comparisons, MSS comparisons, Rossby paths, MATLAB bridge,
-and rebuild-W are historical or experimental. They are not moved, deleted, or
-rewritten by the official workflow. Their registry is in
-[`legacy/HISTORICAL_RUNS.json`](legacy/HISTORICAL_RUNS.json).
-
-- `tools.run_default_geometry_vertical`, `start_default_geometry_vertical.ps1`,
-  and `run_default_surface_catalog.ps1` are compatibility forwarders.
-- `tools.run_default_vertical_extension --legacy-rossby-workflow` is explicit
-  legacy reproduction only.
-- `run_ofes_rebuild_w.py` remains a separate legacy workflow and cannot read
-  official-profile objects implicitly.
-- Research commands are documented under `experiments/`; they never appear in
-  the official launch instructions.
+Historical output directories remain read-only and are listed in
+`legacy/HISTORICAL_RUNS.json`. Historical runnable source is intentionally not
+kept in this repository; use the recorded Git commit to reproduce it.

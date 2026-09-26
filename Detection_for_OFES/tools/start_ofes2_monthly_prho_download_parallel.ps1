@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 function Start-PrhoWorker([string]$Name, [int]$StartYear, [int]$EndYear) {
   $stdout = Join-Path $logDir "ofes2_monthly_prho_$Name.stdout.log"
   $stderr = Join-Path $logDir "ofes2_monthly_prho_$Name.stderr.log"
-  $arguments = @('-m', 'Detection_for_OFES.tools.download_ofes2_monthly_prho', '--output-root', $OutputRoot,
+  $arguments = @('-m', 'Detection_for_OFES.datasets.download_ofes2_monthly_prho', '--output-root', $OutputRoot,
     '--start-year', $StartYear, '--end-year', $EndYear, '--worker-name', $Name,
     '--lat-block-rows', 20)
   Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repoRoot `

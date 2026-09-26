@@ -19,7 +19,7 @@ function Write-SupervisorLog([string]$Message) {
 function Start-DownloadWorker([string]$Name, [int]$StartYear, [int]$EndYear) {
   $stdout = Join-Path $logDir "ofes2_monthly_prho_$Name.stdout.log"
   $stderr = Join-Path $logDir "ofes2_monthly_prho_$Name.stderr.log"
-  $arguments = @('-m', 'Detection_for_OFES.tools.download_ofes2_monthly_prho', '--output-root', $OutputRoot,
+  $arguments = @('-m', 'Detection_for_OFES.datasets.download_ofes2_monthly_prho', '--output-root', $OutputRoot,
     '--start-year', $StartYear, '--end-year', $EndYear, '--worker-name', $Name, '--lat-block-rows', 20)
   $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
@@ -67,11 +67,6 @@ while ($true) {
 }
 
 Write-SupervisorLog 'all monthly prho workers complete; building day-weighted annual MSS'
-& $python -m Detection_for_OFES.tools.build_ofes2_prho_annual_mss --output-root $OutputRoot *>> (Join-Path $logDir 'ofes2_prho_annual_mss.log')
+& $python -m Detection_for_OFES.datasets.build_ofes2_prho_annual_mss --output-root $OutputRoot *>> (Join-Path $logDir 'ofes2_prho_annual_mss.log')
 if ($LASTEXITCODE -ne 0) { throw "Annual prho MSS build failed with exit code $LASTEXITCODE" }
 Write-SupervisorLog 'annual prho MSS complete'
-$fieldOutput = 'E:\DATA\01_Eddy_correspond\02_OFES\Fromthebeginning\05_TEMP\nh_cyclonic_strict_core_raw_fields_19910101_19910119'
-Write-SupervisorLog 'starting final strict-core density-anomaly family panels'
-& $python -u -m Detection_for_OFES.tools.render_multiday_strict_core_raw_fields --mode with-anomaly --output-root $fieldOutput *>> (Join-Path $fieldOutput 'logs\annual_mss_family_panels.log')
-if ($LASTEXITCODE -ne 0) { throw "Density-anomaly family panel render failed with exit code $LASTEXITCODE" }
-Write-SupervisorLog 'final strict-core density-anomaly family panels complete'

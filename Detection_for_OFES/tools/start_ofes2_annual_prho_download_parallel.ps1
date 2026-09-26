@@ -11,9 +11,11 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 function Start-PrhoWorker([string]$Name, [int]$StartYear, [int]$EndYear) {
   $stdout = Join-Path $logDir "ofes2_annual_prho_$Name.stdout.log"
   $stderr = Join-Path $logDir "ofes2_annual_prho_$Name.stderr.log"
-  $arguments = @('-m', 'Detection_for_OFES.tools.download_ofes2_annual_prho', '--output-root', $OutputRoot,
+  $arguments = @('-m', 'Detection_for_OFES.datasets.download_ofes2_annual_prho', '--output-root', $OutputRoot,
     '--start-year', $StartYear, '--end-year', $EndYear, '--worker-name', $Name,
-    '--lat-block-rows', 10, '--depth-block-layers', 20)
+    '--lat-block-rows', 10, '--depth-block-layers', 20,
+    '--block-retries', 5, '--retry-seconds', 15, '--retry-max-seconds', 300,
+    '--retry-jitter-seconds', 7)
   Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
 }
@@ -27,7 +29,7 @@ if ($first.ExitCode -ne 0 -or $second.ExitCode -ne 0) {
   throw "An annual prho worker failed. Inspect $logDir."
 }
 
-& $python -m Detection_for_OFES.tools.download_ofes2_annual_prho `
+& $python -m Detection_for_OFES.datasets.download_ofes2_annual_prho `
   --output-root $OutputRoot --start-year 1993 --end-year 2012 --finalize-only `
   1> (Join-Path $logDir 'ofes2_annual_prho_finalize.stdout.log') `
   2> (Join-Path $logDir 'ofes2_annual_prho_finalize.stderr.log')

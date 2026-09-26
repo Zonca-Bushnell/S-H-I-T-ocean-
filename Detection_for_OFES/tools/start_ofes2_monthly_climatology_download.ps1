@@ -18,7 +18,7 @@ $stderr = Join-Path $logDir "$logStem.stderr.log"
 
 $env:PYTHONNOUSERSITE = '1'
 $arguments = @(
-  '-m', 'Detection_for_OFES.tools.download_ofes2_monthly_climatology',
+  '-m', 'Detection_for_OFES.datasets.download_ofes2_monthly_climatology',
   '--output-root', $OutputRoot,
   '--start-year', $StartYear,
   '--end-year', $EndYear,
